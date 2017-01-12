@@ -1,6 +1,9 @@
 module Main where
 
 import Lib
+import OpenSSL
 
 main :: IO ()
-main = someFunc
+main = withOpenSSL $ do
+  putStrLn "Starting..."
+  startListening
