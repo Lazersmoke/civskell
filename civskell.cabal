@@ -16,7 +16,7 @@ cabal-version:       >=1.10
 library
   hs-source-dirs:      src
   exposed-modules:     Lib, ParseBS, Data, Clientbound, Serverbound
-  build-depends:       base >= 4.7 && < 5, network, parsec, bytestring, utf8-string, random, HsOpenSSL, pretty-hex
+  build-depends:       base >= 4.7 && < 5, network, parsec, bytestring, utf8-string, random, HsOpenSSL, pretty-hex, time
   default-language:    Haskell2010
 
 executable civskell-exe

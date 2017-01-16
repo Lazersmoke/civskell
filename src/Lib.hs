@@ -63,7 +63,7 @@ initiateLogin hdl = do
       putStrLn $ "LoginStart from " ++ name
       (p,k) <- generatePublicKey
       let vt = BS.pack [0xDE,0xAD,0xBE,0xEF]
-      sendSerial hdl (Client.EncryptionRequest "abc" p vt)
+      sendSerial hdl (Client.EncryptionRequest "" p vt)
       mEncryptionResp <- getPacket hdl
       case mEncryptionResp of
         Just (Server.EncryptionResponse ss vt') -> do
