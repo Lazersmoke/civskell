@@ -1,52 +1,25 @@
 module Encrypt where
 
-import System.Random
-import Data.List
+import Data.Bits
 import Data.Maybe
 import Data.Semigroup
+import qualified Crypto.PubKey.RSA as RSA
+import Data.Int
 import Data.Word
-import Data.Bits
-import OpenSSL.RSA
-import OpenSSL.DER
-import OpenSSL.X509
-import OpenSSL.EVP.Cipher
-import OpenSSL.EVP.Open
-import OpenSSL.EVP.Base64
-import OpenSSL.PEM
-import Data.Time.Clock
+import Numeric
+import Crypto.Hash
+import Crypto.Hash.Algorithms
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as BSL
-import Hexdump
-
-import System.IO.Unsafe
+import qualified Data.ByteString.UTF8
+import qualified Data.ByteString.Char8
 import Unsafe.Coerce
 
-import Clientbound 
-import Data
-
-aes :: Cipher
-aes = unsafePerformIO $ fromJust <$> getCipherByName "AES-128-CFB8"
-
-getAKeypair :: IO RSAKeyPair
-getAKeypair = generateRSAKey' 1024 65537 
-
-generatePublicKey :: IO (BS.ByteString,RSAKeyPair)
-generatePublicKey = do
-  k <- getAKeypair
-  print $ rsaE k
-  putStrLn . prettyHex $ intBytesRaw $ rsaE k
-  putStrLn . prettyHex . BS.singleton . fromIntegral . BS.length . intBytesRaw . rsaE $ k
-  return (encodePubKey k, k)
-
--- Apparently we have to use the encrypted ss as our IV???
-decryptSS :: BS.ByteString -> RSAKeyPair -> BS.ByteString
-decryptSS ss k = openBS aes ss ss k ss
-
-decryptVT :: BS.ByteString -> RSAKeyPair -> BS.ByteString -> BS.ByteString
-decryptVT ss k vt = openBS aes ss ss k vt
+-- 128 is 128 bytes, so 1024 bit key
+getAKeypair :: IO (RSA.PublicKey,RSA.PrivateKey)
+getAKeypair = RSA.generate 128 65537 
 
 -- Observe the cancer, but don't touch it or you'll contract it.
-encodePubKey :: RSAKeyPair -> BS.ByteString
+encodePubKey :: RSA.PublicKey -> BS.ByteString
 encodePubKey k = asnSequence <> withLength (algIdentifier <> pubKeyBitstring)
   where
     -- ASN.1 object identifier for RSA keys (decoded from 1.2.840.113549.1.1.1)
@@ -94,11 +67,27 @@ encodePubKey k = asnSequence <> withLength (algIdentifier <> pubKeyBitstring)
     theModulus = asnInt <> withLength (nullForGoodLuck <> bytesOfModulus)
     theExponent = asnInt <> withLength bytesOfExponent
 
-    bytesOfModulus = intBytesRaw $ rsaN k
-    bytesOfExponent = intBytesRaw $ rsaE k
+    bytesOfModulus = intBytesRaw $ RSA.public_n k
+    bytesOfExponent = intBytesRaw $ RSA.public_e k
 
 -- intBytesRaw gets the variable-length byte encoding of a number
 intBytesRaw :: Integer -> BS.ByteString
 intBytesRaw = BS.reverse . BS.unfoldr (\i -> if i == 0 then Nothing else Just $ (fromIntegral i, shiftR i 8))
 
+unIntBytesRaw :: BS.ByteString -> Integer 
+unIntBytesRaw = BS.foldr' (\b i -> shiftL i 8 + fromIntegral b) 0 . BS.reverse
 
+-- Literally black magic and complements, just don't fucking touch it and hope it works
+genLoginHash :: String -> BS.ByteString -> BS.ByteString -> String
+genLoginHash sId ss pubKey = if isNegative then "-" ++ twoComp else theHash
+  where
+    twoComp = (\a -> showHex a "") . unIntBytesRaw $ BS.map complement beforeZ <> zs
+    (beforeZ,afterZ) = BS.spanEnd (==0x00) theHashBS
+    zs = case BS.uncons afterZ of
+      Just (foc,theRest) -> BS.singleton (focusByte foc) <> theRest
+      Nothing -> afterZ
+    focusByte w = complement w .|. (w .&. shiftR (complement zeroBits) (countTrailingZeros w))
+    isNegative = head theHash `elem` "89abcdef"
+    theHashBS = intBytesRaw . fst . head . (readHex :: ReadS Integer) $ theHash
+    
+    theHash = show . hashFinalize $ hashUpdates (hashInit :: Context SHA1) [Data.ByteString.UTF8.fromString sId,ss,pubKey]

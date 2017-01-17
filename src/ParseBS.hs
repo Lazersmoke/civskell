@@ -3,35 +3,39 @@
 {-# LANGUAGE FlexibleContexts #-}
 module ParseBS where
 
-import Text.Parsec.ByteString
-import Text.Parsec
-import qualified Data.ByteString as BS
-import Data.Word
-import Data.Int
+import Control.Monad
 import Data.Bits
 import Data.Char
-import Control.Monad
+import Data.Int
+import Data.Word
+import Text.Parsec
+import Text.Parsec.ByteString
 import Unsafe.Coerce
-
-import qualified Serverbound as Server
+import qualified Data.ByteString as BS
 
 import Data
-
+import qualified Serverbound as Server
 
 anyByte :: Parser Word8
 anyByte = fromIntegral . ord <$> anyChar
 
-parsePacket :: Parser Server.Packet
-parsePacket = try parseHandshakePacket <|> try parseLoginPacket <|> parseStatusPacket
+parsePacket :: ServerState -> Parser Server.Packet
+parsePacket Handshaking = parseHandshakePacket 
+parsePacket LoggingIn = parseLoginPacket 
+parsePacket Status = parseStatusPacket
+parsePacket Playing = parsePlayPacket
 
 parseHandshakePacket :: Parser Server.Packet
 parseHandshakePacket = parseHandshake
 
 parseLoginPacket :: Parser Server.Packet
-parseLoginPacket = parseLoginStart
+parseLoginPacket = try parseLoginStart <|> parseEncryptionResponse
 
 parseStatusPacket :: Parser Server.Packet
 parseStatusPacket = parseStatusRequest <|> parseStatusPing
+
+parsePlayPacket :: Parser Server.Packet
+parsePlayPacket = parseStatusRequest <|> parseStatusPing
 
 parseStatusRequest :: Parser Server.Packet
 parseStatusRequest = try (specificVarInt 0x00 >> eof) >> return Server.StatusRequest
@@ -54,6 +58,15 @@ parseLoginStart :: Parser Server.Packet
 parseLoginStart = do
   try $ specificVarInt 0x00
   Server.LoginStart <$> parseVarString
+
+parseEncryptionResponse :: Parser Server.Packet
+parseEncryptionResponse = do
+  try $ specificVarInt 0x01
+  ssLen <- fromEnum <$> parseVarInt
+  ss <- BS.pack <$> replicateM ssLen anyByte
+  vtLen <- fromEnum <$> parseVarInt
+  vt <- BS.pack <$> replicateM vtLen anyByte
+  return $ Server.EncryptionResponse ss vt
 
 parseVarString :: Parser String
 parseVarString = do

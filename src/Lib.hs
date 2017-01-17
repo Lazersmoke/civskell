@@ -1,17 +1,16 @@
 module Lib where
 
-import Network
-import qualified Data.ByteString as BS
-import System.IO
 import Control.Concurrent
-import Text.Parsec
-import Hexdump
+import Network
+import System.IO
+import qualified Crypto.PubKey.RSA.PKCS15 as RSA
+import qualified Data.ByteString as BS
 
-import ParseBS
-import qualified Serverbound as Server
-import qualified Clientbound as Client
+import CivNetwork
 import Data
 import Encrypt
+import qualified Clientbound as Client
+import qualified Serverbound as Server
 
 startListening :: IO ()
 startListening = connLoop =<< listenOn (PortNumber 25565)
@@ -30,7 +29,7 @@ connLoop sock = do
 connHandler :: Handle -> IO ()
 connHandler hdl = do
   -- Get a packet from the client (should be a handshake)
-  getPacket hdl >>= maybe (putStrLn "WTF no packet? REEEEEEEEEEEEE") (handleHandshake hdl)
+  getPacket hdl Handshaking >>= maybe (putStrLn "WTF no packet? REEEEEEEEEEEEE") (handleHandshake hdl)
 
 handleHandshake :: Handle -> Server.Packet -> IO ()
 -- Normal handshake recieved
@@ -57,75 +56,57 @@ handleHandshake hdl pkt = do
 
 initiateLogin :: Handle -> IO ()
 initiateLogin hdl = do
-  mloginStart <- getPacket hdl
+  mloginStart <- getPacket hdl LoggingIn
   case mloginStart of
     Just (Server.LoginStart name) -> do
       putStrLn $ "LoginStart from " ++ name
-      (p,k) <- generatePublicKey
+      (pub,priv) <- getAKeypair
       let vt = BS.pack [0xDE,0xAD,0xBE,0xEF]
-      sendSerial hdl (Client.EncryptionRequest "" p vt)
-      mEncryptionResp <- getPacket hdl
+      let sId = ""
+      let encPubKey = encodePubKey pub
+      sendSerial hdl (Client.EncryptionRequest sId encPubKey vt)
+      mEncryptionResp <- getPacket hdl LoggingIn
       case mEncryptionResp of
-        Just (Server.EncryptionResponse ss vt') -> do
-          if decryptVT ss k vt' /= vt 
-            then putStrLn "Client fucked up and encoded our vt wrong"
-            else do
-              let sharedSecret = decryptSS ss k
-              putStrLn "Yay it all worked"
-        Just a -> putStrLn "Expected EncryptionResponse, got something else"
+        Just (Server.EncryptionResponse ssFromClient vtFromClient) -> do
+          case RSA.decrypt Nothing priv vtFromClient of
+            Left e -> print e
+            Right vtHopefully -> do
+              if vtHopefully /= vt
+                then putStrLn "Client fucked up and encoded our vt wrong"
+                else case RSA.decrypt Nothing priv ssFromClient of
+                  Left e -> print e
+                  Right ss -> do
+                    let hash = genLoginHash sId ss encPubKey
+                    print hash
+                    authGetReq name hash
+                    putStrLn "Yay it all worked (maybe)"
+        Just _ -> putStrLn "Expected EncryptionResponse, got something else"
+        Nothing -> putStrLn "unable to parse encryptionresponse packet"
+    Just _ -> putStrLn "Unexpected non-login start packet"
+    Nothing -> putStrLn "Unable to parse login start packet"
+
+-- Server list refresh ping/status cycle
 statusMode :: Handle -> IO ()
 statusMode hdl = do
-  mpkt <- getPacket hdl
+  -- Wait for them to ask our status
+  mpkt <- getPacket hdl Status
   case mpkt of
+    -- Make sure they are actually asking for our status
     Just Server.StatusRequest -> do
+      -- TODO: dynamic response
       let resp = "{\"version\":{\"name\":\"1.10.2\",\"protocol\":210},\"players\":{\"max\":1000,\"online\": 0},\"description\":{\"text\":\"meow\"}}"
-      putStrLn resp
+      -- Send resp to clients
       sendSerial hdl (Client.StatusResponse resp)
-      mping <- getPacket hdl
+      -- Wait for them to start a ping
+      mping <- getPacket hdl Status
       case mping of
+        -- Make sure they are actually pinging us, then send a pong right away
         Just (Server.StatusPing l) -> sendSerial hdl (Client.StatusPong l)
-        Just a -> putStrLn "Client sent non-ping packet, disconnecting"
+        Just _ -> putStrLn "Client sent non-ping packet, disconnecting"
         Nothing -> putStrLn "WTF bruh you got this far and fucked up"
-    Just a -> putStrLn "Client gave non status-request packet, disconnecting"
+    Just _ -> putStrLn "Client gave non status-request packet, disconnecting"
     Nothing -> putStrLn "WTF m8? you tried to ask for our status, then gave us a shitty packet? Who the fuck do you think I am!?!?!?"
 
+-- Simple way to inject a text message into a json chat string
 jsonyText :: String -> String
 jsonyText s = "{\"text\":\"" ++ s ++ "\"}"
-
-sendSerial :: Serialize s => Handle -> s -> IO ()
-sendSerial hdl s = do
-  putStrLn $ "Sending: "
-  putStrLn $ indentedHex (serialize s)
-  BS.hPut hdl (serialize s)
-
-getRawPacket :: Handle -> IO BS.ByteString
-getRawPacket handle = do
-  -- First byte has the length
-  l <- BS.head <$> BS.hGet handle 1
-  -- Get (length) bytes more for the rest of the packet
-  pktData <- BS.hGet handle (fromEnum l)
-  putStrLn "Got:"
-  putStrLn . indentedHex $ l `BS.cons` pktData
-  -- Return the actual data (no length annotation, but yes pktId)
-  return pktData
-
-getPacket :: Handle -> IO (Maybe Server.Packet)
-getPacket hdl = do
-  -- get the raw data (sans length)
-  pkt <- getRawPacket hdl
-  -- parse it
-  case parse parsePacket "" pkt of
-    -- If it parsed ok, then 
-    Right serverPkt -> do
-      -- Log about it
-      putStrLn $ "Packet: " ++ show serverPkt
-      -- return it
-      return $ Just serverPkt
-    -- If it didn't parse correctly, print the error and return that it parsed bad
-    Left e -> print e >> return Nothing
-
-shittyIndent :: String -> String
-shittyIndent = init . unlines . map ("  "++) . lines
-
-indentedHex :: BS.ByteString -> String
-indentedHex = shittyIndent . prettyHex

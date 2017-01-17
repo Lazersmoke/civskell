@@ -1,15 +1,16 @@
 {-# LANGUAGE BinaryLiterals #-}
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE FlexibleInstances #-}
 module Clientbound where
 
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.UTF8
+import Data.Bits
+import Data.Int
 import Data.Semigroup
 import Data.Word
-import Data.Int
-import Data.Bits
 import Unsafe.Coerce
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.UTF8
 
 import Data
 
@@ -32,8 +33,8 @@ data StatusPacket
   | StatusPong Int64 deriving Show
 
 instance Serialize StatusPacket where
-  serialize pkt = withLength . BS.append (makeVarInt $ packetId pkt) $ case pkt of
-    (StatusResponse s) -> makeVarString s
+  serialize pkt = withLength . BS.append (serialize $ packetId pkt) $ case pkt of
+    (StatusResponse s) -> serialize s
     (StatusPong l) -> makeLong l
 
 instance PacketId StatusPacket where
@@ -45,11 +46,11 @@ instance PacketId StatusPacket where
 
 -- All login packets have their length and pktId annotated
 instance Serialize LoginPacket where
-  serialize pkt = withLength . BS.append (makeVarInt $ packetId pkt) $ case pkt of
-    (Disconnect reason) -> makeVarString reason
-    (EncryptionRequest sId p vt) -> makeVarString sId <> withLength p <> withLength vt
-    (LoginSuccess uuid name) -> makeVarString uuid <> makeVarString name
-    (SetCompression thresh) -> makeVarInt thresh
+  serialize pkt = withLength . BS.append (serialize $ packetId pkt) $ case pkt of
+    (Disconnect reason) -> serialize reason
+    (EncryptionRequest sId p vt) -> serialize sId <> withLength p <> withLength vt
+    (LoginSuccess uuid name) -> serialize uuid <> serialize name
+    (SetCompression thresh) -> serialize thresh
 
 -- All login packets have a packet ID
 instance PacketId LoginPacket where
@@ -68,21 +69,21 @@ instance PacketId LoginPacket where
 
 -- Annotate a BS with its length as a VarInt
 withLength :: BS.ByteString -> BS.ByteString
-withLength bs = makeVarInt (fromIntegral $ BS.length bs) <> bs
+withLength bs = serialize ((fromIntegral $ BS.length bs) :: VarInt) <> bs
 
-makeVarString :: String -> BS.ByteString
-makeVarString str = makeVarInt (fromIntegral $ BS.length encoded) <> encoded
-  where
-    encoded = Data.ByteString.UTF8.fromString str
+instance Serialize String where
+  serialize str = serialize ((fromIntegral $ BS.length encoded) :: VarInt) <> encoded
+    where
+      encoded = Data.ByteString.UTF8.fromString str
 
-makeVarInt :: VarInt -> BS.ByteString
-makeVarInt n = if moreAfter
-  then (0b10000000 .|. writeNow) `BS.cons` makeVarInt (shiftR n 7)
-  else BS.singleton writeNow
-  where
-    -- Write first seven bits
-    writeNow = (unsafeCoerce :: VarInt -> Word8) $ n .&. 0b1111111
-    moreAfter = shiftR n 7 /= 0
+instance Serialize VarInt where
+  serialize n = if moreAfter
+    then (0b10000000 .|. writeNow) `BS.cons` serialize (shiftR n 7)
+    else BS.singleton writeNow
+    where
+      -- Write first seven bits
+      writeNow = (unsafeCoerce :: VarInt -> Word8) $ n .&. 0b1111111
+      moreAfter = shiftR n 7 /= 0
 
 makeLong :: Int64 -> BS.ByteString
 makeLong i = BS.pack $ map ((unsafeCoerce :: Int64 -> Word8) . shiftR i) [56,48..0]

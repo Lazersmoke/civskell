@@ -2,9 +2,9 @@
 {-# LANGUAGE DataKinds #-}
 module Serverbound where
 
-import qualified Data.ByteString as BS
-import Data.Word
 import Data.Int
+import Data.Word
+import qualified Data.ByteString as BS
 
 import Data
 
