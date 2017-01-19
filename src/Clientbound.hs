@@ -1,16 +1,13 @@
 {-# LANGUAGE BinaryLiterals #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE TypeSynonymInstances #-}
-{-# LANGUAGE FlexibleInstances #-}
 module Clientbound where
 
 import Data.Bits
 import Data.Int
 import Data.Semigroup
 import Data.Word
-import Unsafe.Coerce
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.UTF8
+import Unsafe.Coerce
 
 import Data
 
@@ -70,20 +67,6 @@ instance PacketId LoginPacket where
 -- Annotate a BS with its length as a VarInt
 withLength :: BS.ByteString -> BS.ByteString
 withLength bs = serialize ((fromIntegral $ BS.length bs) :: VarInt) <> bs
-
-instance Serialize String where
-  serialize str = serialize ((fromIntegral $ BS.length encoded) :: VarInt) <> encoded
-    where
-      encoded = Data.ByteString.UTF8.fromString str
-
-instance Serialize VarInt where
-  serialize n = if moreAfter
-    then (0b10000000 .|. writeNow) `BS.cons` serialize (shiftR n 7)
-    else BS.singleton writeNow
-    where
-      -- Write first seven bits
-      writeNow = (unsafeCoerce :: VarInt -> Word8) $ n .&. 0b1111111
-      moreAfter = shiftR n 7 /= 0
 
 makeLong :: Int64 -> BS.ByteString
 makeLong i = BS.pack $ map ((unsafeCoerce :: Int64 -> Word8) . shiftR i) [56,48..0]

@@ -3,8 +3,12 @@ module Lib where
 import Control.Concurrent
 import Network
 import System.IO
+import Data.Word
+import Data.Bits
 import qualified Crypto.PubKey.RSA.PKCS15 as RSA
 import qualified Data.ByteString as BS
+
+import Unsafe.Coerce
 
 import CivNetwork
 import Data
@@ -76,10 +80,15 @@ initiateLogin hdl = do
                 else case RSA.decrypt Nothing priv ssFromClient of
                   Left e -> print e
                   Right ss -> do
+                    let enc = makeEncrypter ss
                     let hash = genLoginHash sId ss encPubKey
                     print hash
-                    authGetReq name hash
-                    putStrLn "Yay it all worked (maybe)"
+                    auth <- authGetReq name hash
+                    case auth of
+                      Nothing -> putStrLn "parse error on auth"
+                      Just (uuid,nameFromAuth) -> do
+                        iv' <- sendSerialEnc (enc,ss) hdl (Client.LoginSuccess uuid nameFromAuth)
+                        putStrLn "Yay it all worked (maybe)"
         Just _ -> putStrLn "Expected EncryptionResponse, got something else"
         Nothing -> putStrLn "unable to parse encryptionresponse packet"
     Just _ -> putStrLn "Unexpected non-login start packet"

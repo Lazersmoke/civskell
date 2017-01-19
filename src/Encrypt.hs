@@ -1,18 +1,15 @@
 module Encrypt where
 
 import Data.Bits
-import Data.Maybe
 import Data.Semigroup
 import qualified Crypto.PubKey.RSA as RSA
-import Data.Int
-import Data.Word
 import Numeric
 import Crypto.Hash
-import Crypto.Hash.Algorithms
+import Crypto.Cipher.Types
+import Crypto.Cipher.AES
+import Crypto.Error
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8
-import qualified Data.ByteString.Char8
-import Unsafe.Coerce
 
 -- 128 is 128 bytes, so 1024 bit key
 getAKeypair :: IO (RSA.PublicKey,RSA.PrivateKey)
@@ -74,20 +71,26 @@ encodePubKey k = asnSequence <> withLength (algIdentifier <> pubKeyBitstring)
 intBytesRaw :: Integer -> BS.ByteString
 intBytesRaw = BS.reverse . BS.unfoldr (\i -> if i == 0 then Nothing else Just $ (fromIntegral i, shiftR i 8))
 
+-- unIntBytesRaw gets the Integer represented by a BS
 unIntBytesRaw :: BS.ByteString -> Integer 
 unIntBytesRaw = BS.foldr' (\b i -> shiftL i 8 + fromIntegral b) 0 . BS.reverse
 
--- Literally black magic and complements, just don't fucking touch it and hope it works
+makeEncrypter :: BS.ByteString -> AES128
+makeEncrypter ss = throwCryptoError $ cipherInit ss
+
+--semCipherEncrypt :: BS.ByteString -> BS.ByteString -> BS.ByteString
+
+-- Get a login hash from a sId, shared secret, and public key
 genLoginHash :: String -> BS.ByteString -> BS.ByteString -> String
-genLoginHash sId ss pubKey = if isNegative then "-" ++ twoComp else theHash
+genLoginHash sId ss pubKey = 
+  -- bit 159 (0-indexed from right) is the negativity bit
+  if testBit theHashInt 159
+    -- If its negative, then do the reverse two's comp. and add a negative sign
+    then "-" ++ showHex (xor (2^(160 :: Integer) - 1) $ theHashInt - 1) ""
+    -- If its positive, then its already good
+    else theHash
   where
-    twoComp = (\a -> showHex a "") . unIntBytesRaw $ BS.map complement beforeZ <> zs
-    (beforeZ,afterZ) = BS.spanEnd (==0x00) theHashBS
-    zs = case BS.uncons afterZ of
-      Just (foc,theRest) -> BS.singleton (focusByte foc) <> theRest
-      Nothing -> afterZ
-    focusByte w = complement w .|. (w .&. shiftR (complement zeroBits) (countTrailingZeros w))
-    isNegative = head theHash `elem` "89abcdef"
-    theHashBS = intBytesRaw . fst . head . (readHex :: ReadS Integer) $ theHash
-    
+    -- the hash as an Integer
+    theHashInt = fst . head . (readHex :: ReadS Integer) $ theHash
+    -- the hash as a String of and SHA1 hash (this is the only way to export it)
     theHash = show . hashFinalize $ hashUpdates (hashInit :: Context SHA1) [Data.ByteString.UTF8.fromString sId,ss,pubKey]
