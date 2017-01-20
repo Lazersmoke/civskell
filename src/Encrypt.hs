@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 module Encrypt where
 
 import Data.Bits
@@ -10,10 +11,14 @@ import Crypto.Cipher.AES
 import Crypto.Error
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8
+import Control.Eff
+import Control.Eff.Lift
+
+import Data
 
 -- 128 is 128 bytes, so 1024 bit key
-getAKeypair :: IO (RSA.PublicKey,RSA.PrivateKey)
-getAKeypair = RSA.generate 128 65537 
+getAKeypair :: HasIO r => Eff r (RSA.PublicKey,RSA.PrivateKey)
+getAKeypair = lift $ RSA.generate 128 65537 
 
 -- Observe the cancer, but don't touch it or you'll contract it.
 encodePubKey :: RSA.PublicKey -> BS.ByteString
