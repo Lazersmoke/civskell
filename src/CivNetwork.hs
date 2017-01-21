@@ -15,76 +15,51 @@ import Text.Parsec.ByteString
 import qualified Text.Parsec.Char as C
 import Crypto.Cipher.AES
 import Crypto.Cipher.Types
-import Control.Eff
-import Control.Eff.Lift
-import Control.Eff.Reader.Strict
+import Control.Monad.Freer
+import Control.Monad.Freer.Reader
+import Control.Monad.Freer.State
 
 import Data
 import ParseBS
 import qualified Serverbound as Server
-
-rPut :: (HasIO r,Member (Reader Handle) r) => BS.ByteString -> Eff r ()
-rPut bs = do
-  hdl <- ask
-  lift $ BS.hPut hdl bs
-
-rGet :: (HasIO r,Member (Reader Handle) r) => Int -> Eff r BS.ByteString
-rGet size = do
-  hdl <- ask
-  lift $ BS.hGet hdl size
+import Encrypt
 
 -- Send something serializeable over the network
-sendSerial :: (HasIO r,Member (Reader Handle) r,Serialize s) => s -> Eff r ()
+sendSerial :: (HasLogging r,HasNetworking r,Serialize s) => s -> Eff r ()
 sendSerial s = do
   -- Log its hex dump
-  lift . putStrLn $ "Sending: "
-  lift . putStrLn $ indentedHex (serialize s)
+  logg $ "Sending: "
+  logg $ indentedHex (serialize s)
   -- Send it
   rPut $ serialize s
 
 -- Send something serializeable, but encrypt it using the given cipher and iv
-sendSerialEnc :: (HasIO r, Member (Reader Handle) r,Serialize s) => (AES128,BS.ByteString) -> s -> Eff r BS.ByteString
-sendSerialEnc (ciph,iv) s = do
-  -- Serialize the data, then unpack into a list of bytes
-  let dat = BS.unpack $ serialize s
-  -- fold over that list of bytes, encrypting as you go
-  -- the state inherent in the fold is the "shift register"
-  let (iv',encDat) = foldl magic (iv,BS.empty) dat
+sendSerialEnc :: (HasLogging r, HasNetworking r,HasEncryption r,Serialize s) => s -> Eff r ()
+sendSerialEnc s = do
+  -- Encrypt the data
+  dat <- cfb8Encrypt (serialize s)
   -- Log what we are sending (encrypted and not)
-  lift . putStrLn $ "Sending Encrypted: "
-  lift . putStrLn $ indentedHex (serialize s)
-  lift . putStrLn $ indentedHex encDat
+  logg $ "Sending Encrypted: "
+  logg $ indentedHex (serialize s)
+  logg $ indentedHex dat
   -- actually send it
-  rPut encDat
-  -- return the updated shift register to be used next time
-  return iv'
-  where
-    -- Does a single step (one byte) of a CFB8 encryption
-    magic (s,ds) d = let 
-      -- encrypt the shift register
-      s' = ecbEncrypt ciph s
-      -- use the MSB of the shift register to encrypt the current plaintext
-      ct = BS.head s' `xor` d
-      -- shift the new ciphertext into the shift register
-      s'' = BS.tail s `BS.snoc` ct
-      -- add the cipher text to the output, and return the updated shift register
-      in (s'',ds `BS.snoc` ct)
+  rPut dat
 
 -- Get an unparsed packet from the network
-getRawPacket :: (HasIO r, Member (Reader Handle) r) => Eff r BS.ByteString
+getRawPacket :: (HasLogging r, HasNetworking r) => Eff r BS.ByteString
 getRawPacket = do
   -- Get the length it should be
   (l,bs) <- getPacketLength 
   -- Get (length) bytes more for the rest of the packet
   pktData <- rGet (fromIntegral l)
   -- TODO: make this a debugmode only putStrLn
-  lift $ putStrLn "Got:"
-  lift . putStrLn $ indentedHex $ bs `BS.append` pktData
+  logg "Got:"
+  logg $ indentedHex $ bs `BS.append` pktData
   -- Return the actual data (no length annotation, but yes pktId)
   return pktData
 
 -- TODO: merge with parseVarInt by abstracting the first line
-getPacketLength :: (HasIO r, Member (Reader Handle) r) => Eff r (VarInt,BS.ByteString)
+getPacketLength :: (HasLogging r, HasNetworking r) => Eff r (VarInt,BS.ByteString)
 getPacketLength = do
   -- Get the first byte
   l <- BS.head <$> rGet 1
@@ -101,7 +76,7 @@ getPacketLength = do
     else return (thisPart,BS.singleton l)
 
 -- Get a packet from the network (high level) using a parser context
-getPacket :: (HasIO r,Member (Reader Handle) r) => ServerState -> Eff r (Maybe Server.Packet)
+getPacket :: (HasLogging r,HasNetworking r) => ServerState -> Eff r (Maybe Server.Packet)
 getPacket st = do
   -- get the raw data (sans length)
   pkt <- getRawPacket
@@ -112,7 +87,7 @@ getPacket st = do
       -- return it
       return $ Just serverPkt
     -- If it didn't parse correctly, print the error and return that it parsed bad
-    Left e -> lift (print e) >> return Nothing
+    Left e -> logg (show e) >> return Nothing
 
 -- add "  " to each line
 shittyIndent :: String -> String
@@ -123,19 +98,19 @@ indentedHex :: BS.ByteString -> String
 indentedHex = shittyIndent . prettyHex
 
 -- get the auth info from the mojang server
-authGetReq :: HasIO r => String -> String -> Eff r (Maybe (String,String))
+authGetReq :: (HasLogging r,HasIO r) => String -> String -> Eff r (Maybe (String,String))
 authGetReq name hash = do
   -- use SSL
-  manager <- lift $ newManager tlsManagerSettings
+  manager <- liftIO $ newManager tlsManagerSettings
   -- create the request, using sId and username from LoginStart
-  req <- lift $ parseRequest $ "https://sessionserver.mojang.com/session/minecraft/hasJoined?username=" ++ name ++ "&serverId=" ++ hash
+  req <- liftIO $ parseRequest $ "https://sessionserver.mojang.com/session/minecraft/hasJoined?username=" ++ name ++ "&serverId=" ++ hash
   -- actually make the request and store it
-  resp <- lift $ httpLbs req manager
+  resp <- liftIO $ httpLbs req manager
   -- parse the response into something useful
   case parse parseAuthJSON "" (LBS.toStrict . responseBody $ resp) of
     Left e -> do
-      lift $ putStrLn "Failed to parse Auth JSON"
-      lift $ print e
+      logg "Failed to parse Auth JSON"
+      logg $ show e
       return Nothing
     Right (uuid,plaName) -> return $ Just (uuid,plaName)
 

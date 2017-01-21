@@ -2,6 +2,11 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE BinaryLiterals #-}
 module Data where
 
@@ -11,13 +16,23 @@ import Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8
 import Unsafe.Coerce
-import Control.Eff
-import Control.Eff.Lift
+import Control.Monad.Freer
+import Control.Monad.Freer.Internal
+import Control.Monad.Freer.State
+import Control.Monad.Freer.Reader
+import System.IO (Handle)
+import Crypto.Cipher.AES
 
 -- VarInt's are parsed into Int32's
 type VarInt = Int32
 
-type HasIO = SetMember Lift (Lift IO)
+liftIO :: HasIO r => IO a -> Eff r a
+liftIO = send
+
+type HasIO = Member IO
+type HasNetworking = Member Networking
+type HasLogging = Member Logging
+type HasEncryption = Member (State (AES128,BS.ByteString))
 
 -- Enums for parsing, etc
 data Side = Server | Client
@@ -52,3 +67,38 @@ instance Serialize VarInt where
       writeNow = (unsafeCoerce :: VarInt -> Word8) $ n .&. 0b1111111
       -- Are there more bytes to add?
       moreAfter = shiftR n 7 /= 0
+
+data Networking a where
+  GetFromNetwork :: Int -> Networking BS.ByteString
+  PutIntoNetwork :: BS.ByteString -> Networking ()
+
+rGet :: HasNetworking n => Int -> Eff n BS.ByteString
+rGet = send . GetFromNetwork
+
+rPut :: HasNetworking n => BS.ByteString -> Eff n ()
+rPut = send . PutIntoNetwork
+
+runNetworking :: HasIO r => Handle -> Eff (Networking ': r) a -> Eff r a
+runNetworking _ (Val x) = return x
+runNetworking hdl (E u q) = case decomp u of 
+  Right now -> match now 
+  Left restOfU -> E restOfU (tsingleton (\x -> runNetworking hdl (qApp q x)))
+  where
+    match (GetFromNetwork len) = do
+      dat <- liftIO (BS.hGet hdl len)
+      runNetworking hdl (qApp q dat)
+    match (PutIntoNetwork bs) = do
+      liftIO (BS.hPut hdl bs)
+      runNetworking hdl (qApp q ())
+
+data Logging a where
+  LogString :: String -> Logging ()
+
+logg :: HasLogging r => String -> Eff r ()
+logg = send . LogString
+
+runLogger :: HasIO r => Eff (Logging ': r) a -> Eff r a
+runLogger (Val x) = return x
+runLogger (E u q) = case decomp u of
+  Right (LogString str) -> liftIO (putStrLn str) >> runLogger (qApp q ())
+  Left otherEffects -> E otherEffects (tsingleton (\x -> runLogger (qApp q x)))

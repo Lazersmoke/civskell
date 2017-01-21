@@ -4,6 +4,7 @@ module Encrypt where
 import Data.Bits
 import Data.Semigroup
 import qualified Crypto.PubKey.RSA as RSA
+import Data.Word
 import Numeric
 import Crypto.Hash
 import Crypto.Cipher.Types
@@ -11,14 +12,14 @@ import Crypto.Cipher.AES
 import Crypto.Error
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8
-import Control.Eff
-import Control.Eff.Lift
+import Control.Monad.Freer
+import Control.Monad.Freer.State
 
 import Data
 
 -- 128 is 128 bytes, so 1024 bit key
 getAKeypair :: HasIO r => Eff r (RSA.PublicKey,RSA.PrivateKey)
-getAKeypair = lift $ RSA.generate 128 65537 
+getAKeypair = liftIO $ RSA.generate 128 65537 
 
 -- Observe the cancer, but don't touch it or you'll contract it.
 encodePubKey :: RSA.PublicKey -> BS.ByteString
@@ -82,6 +83,27 @@ unIntBytesRaw = BS.foldr' (\b i -> shiftL i 8 + fromIntegral b) 0 . BS.reverse
 
 makeEncrypter :: BS.ByteString -> AES128
 makeEncrypter ss = throwCryptoError $ cipherInit ss
+
+cfb8Encrypt :: (HasEncryption r) => BS.ByteString -> Eff r BS.ByteString
+cfb8Encrypt = bsFoldlM magic BS.empty 
+  where
+    -- Does a single step (one byte) of a CFB8 encryption
+    magic :: HasEncryption r => BS.ByteString -> Word8 -> Eff r BS.ByteString
+    magic ds d = do 
+      (ciph,iv) <- get :: HasEncryption r => Eff r (AES128,BS.ByteString)
+      -- use the MSB of the encrypted shift register to encrypt the current plaintext
+      let ct = BS.head (ecbEncrypt ciph iv) `xor` d
+      -- shift the new ciphertext into the shift register
+      let ivFinal = BS.tail iv `BS.snoc` ct
+      -- add the cipher text to the output, and return the updated shift register
+      put (ciph,ivFinal)
+      return $ ds `BS.snoc` ct
+
+bsFoldlM :: Monad m => (b -> Word8 -> m b) -> b -> BS.ByteString -> m b
+bsFoldlM f i bs = BS.foldr f' return bs i
+  where f' x k z = f z x >>= k
+
+
 
 --semCipherEncrypt :: BS.ByteString -> BS.ByteString -> BS.ByteString
 
