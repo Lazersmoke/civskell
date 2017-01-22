@@ -22,7 +22,7 @@ data Packet
   | EnchantItem
   | ClickWindow
   | CloseWindow
-  | PluginMessage
+  | PluginMessage String BS.ByteString
   | UseEntity
   | KeepAlive
   | PlayerPosition
@@ -67,7 +67,7 @@ instance PacketId Packet where
     (EnchantItem) -> 0x06
     (ClickWindow) -> 0x07
     (CloseWindow) -> 0x08
-    (PluginMessage) -> 0x09
+    (PluginMessage _ _) -> 0x09
     (UseEntity) -> 0x0A
     (KeepAlive) -> 0x0B
     (PlayerPosition) -> 0x0C
@@ -103,7 +103,7 @@ instance PacketId Packet where
     (EnchantItem) -> Playing
     (ClickWindow) -> Playing
     (CloseWindow) -> Playing
-    (PluginMessage) -> Playing
+    (PluginMessage _ _) -> Playing
     (UseEntity) -> Playing
     (KeepAlive) -> Playing
     (PlayerPosition) -> Playing

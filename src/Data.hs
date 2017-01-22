@@ -8,11 +8,13 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE BinaryLiterals #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module Data where
 
 import Data.Int
 import Data.Word
 import Data.Bits
+import Data.Semigroup
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8
 import Unsafe.Coerce
@@ -20,11 +22,11 @@ import Control.Monad.Freer
 import Control.Monad.Freer.Internal
 import Control.Monad.Freer.State
 import Control.Monad.Freer.Reader
-import System.IO (Handle)
 import Crypto.Cipher.AES
 
 -- VarInt's are parsed into Int32's
-type VarInt = Int32
+newtype VarInt = VarInt {unVarInt :: Int32} deriving (Num,Show,Bits,Eq,Enum,Integral,Real,Ord)
+type Short = Int16
 
 liftIO :: HasIO r => IO a -> Eff r a
 liftIO = send
@@ -32,11 +34,14 @@ liftIO = send
 type HasIO = Member IO
 type HasNetworking = Member Networking
 type HasLogging = Member Logging
-type HasEncryption = Member (State (AES128,BS.ByteString))
+type HasEncryption r = (Member (Reader AES128) r, Member (State BS.ByteString) r)
 
 -- Enums for parsing, etc
 data Side = Server | Client
 data ServerState = Handshaking | Playing | LoggingIn | Status
+
+data Position = Position Int Int Int deriving (Show,Eq)
+ 
 
 -- Things that have a packet ID and a bound to side
 class PacketId p where
@@ -68,7 +73,34 @@ instance Serialize VarInt where
       -- Are there more bytes to add?
       moreAfter = shiftR n 7 /= 0
 
+instance Serialize Word8 where
+  serialize = BS.singleton
+
+instance Serialize Bool where
+  serialize True = BS.singleton 0x01
+  serialize False = BS.singleton 0x00
+
+instance Serialize Int32 where
+  serialize i = BS.pack $ map ((unsafeCoerce :: Int32 -> Word8) . shiftR i) [24,16..0]
+
+instance Serialize Float where
+  serialize i = serialize $ (unsafeCoerce :: Float -> Int32) i
+
+instance Serialize Int64 where
+  serialize i = BS.pack $ map ((unsafeCoerce :: Int64 -> Word8) . shiftR i) [56,48..0]
+
+instance Serialize Position where
+  serialize (Position x y z) = serialize $ 
+    (shiftL (u x .&. 0x3FFFFFF) 38) .|. 
+    (shiftL (u y .&. 0xFFF) 26) .|.
+    (u z .&. 0x3FFFFFF)
+    where
+      u = unsafeCoerce :: Int -> Int64
+
 data Networking a where
+  SetCompressionLevel :: Maybe VarInt -> Networking ()
+  AddCompression :: BS.ByteString -> Networking BS.ByteString
+  RemoveCompression :: BS.ByteString -> Networking BS.ByteString
   GetFromNetwork :: Int -> Networking BS.ByteString
   PutIntoNetwork :: BS.ByteString -> Networking ()
 
@@ -78,21 +110,18 @@ rGet = send . GetFromNetwork
 rPut :: HasNetworking n => BS.ByteString -> Eff n ()
 rPut = send . PutIntoNetwork
 
-runNetworking :: HasIO r => Handle -> Eff (Networking ': r) a -> Eff r a
-runNetworking _ (Val x) = return x
-runNetworking hdl (E u q) = case decomp u of 
-  Right now -> match now 
-  Left restOfU -> E restOfU (tsingleton (\x -> runNetworking hdl (qApp q x)))
-  where
-    match (GetFromNetwork len) = do
-      dat <- liftIO (BS.hGet hdl len)
-      runNetworking hdl (qApp q dat)
-    match (PutIntoNetwork bs) = do
-      liftIO (BS.hPut hdl bs)
-      runNetworking hdl (qApp q ())
+setCompression :: HasNetworking n => Maybe VarInt -> Eff n ()
+setCompression = send . SetCompressionLevel
+
+addCompression :: HasNetworking n => BS.ByteString -> Eff n BS.ByteString
+addCompression = send . AddCompression
+
+removeCompression :: HasNetworking n => BS.ByteString -> Eff n BS.ByteString
+removeCompression = send . RemoveCompression
 
 data Logging a where
   LogString :: String -> Logging ()
+
 
 logg :: HasLogging r => String -> Eff r ()
 logg = send . LogString
@@ -102,3 +131,7 @@ runLogger (Val x) = return x
 runLogger (E u q) = case decomp u of
   Right (LogString str) -> liftIO (putStrLn str) >> runLogger (qApp q ())
   Left otherEffects -> E otherEffects (tsingleton (\x -> runLogger (qApp q x)))
+
+-- Annotate a BS with its length as a VarInt
+withLength :: BS.ByteString -> BS.ByteString
+withLength bs = serialize ((fromIntegral $ BS.length bs) :: VarInt) <> bs

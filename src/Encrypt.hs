@@ -14,6 +14,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8
 import Control.Monad.Freer
 import Control.Monad.Freer.State
+import Control.Monad.Freer.Reader
 
 import Data
 
@@ -23,7 +24,7 @@ getAKeypair = liftIO $ RSA.generate 128 65537
 
 -- Observe the cancer, but don't touch it or you'll contract it.
 encodePubKey :: RSA.PublicKey -> BS.ByteString
-encodePubKey k = asnSequence <> withLength (algIdentifier <> pubKeyBitstring)
+encodePubKey k = asnSequence <> withLengthAsn (algIdentifier <> pubKeyBitstring)
   where
     -- ASN.1 object identifier for RSA keys (decoded from 1.2.840.113549.1.1.1)
     -- See section 5.9 for details: http://luca.ntop.org/Teaching/Appunti/asn1.html
@@ -54,21 +55,21 @@ encodePubKey k = asnSequence <> withLength (algIdentifier <> pubKeyBitstring)
         let b = (intBytesRaw . fromIntegral . BS.length $ bs) 
         in (0x80 .|. (fromIntegral . BS.length $ b)) `BS.cons` b
     -- A thing and its length
-    withLength a = lenOf a <> a
+    withLengthAsn a = lenOf a <> a
 
-    algIdentifier = asnSequence <> withLength (algObjectId <> algParams)
+    algIdentifier = asnSequence <> withLengthAsn (algObjectId <> algParams)
     -- Use our precalculated magic bytes
-    algObjectId = asnObjectId <> withLength asnOIDForRSAKeys
+    algObjectId = asnObjectId <> withLengthAsn asnOIDForRSAKeys
     -- 0x05 0x00 is NULL in ASN.1, and we don't have any params
     algParams = asnTag <> nullForGoodLuck
 
     -- idk why there is a null here
-    pubKeyBitstring = asnBitString <> withLength (nullForGoodLuck <> pubKeySequence)
-    pubKeySequence = asnSequence <> withLength (theModulus <> theExponent)
+    pubKeyBitstring = asnBitString <> withLengthAsn (nullForGoodLuck <> pubKeySequence)
+    pubKeySequence = asnSequence <> withLengthAsn (theModulus <> theExponent)
 
     -- The people who made ASN.1 like to put random nulls in for fun
-    theModulus = asnInt <> withLength (nullForGoodLuck <> bytesOfModulus)
-    theExponent = asnInt <> withLength bytesOfExponent
+    theModulus = asnInt <> withLengthAsn (nullForGoodLuck <> bytesOfModulus)
+    theExponent = asnInt <> withLengthAsn bytesOfExponent
 
     bytesOfModulus = intBytesRaw $ RSA.public_n k
     bytesOfExponent = intBytesRaw $ RSA.public_e k
@@ -84,20 +85,35 @@ unIntBytesRaw = BS.foldr' (\b i -> shiftL i 8 + fromIntegral b) 0 . BS.reverse
 makeEncrypter :: BS.ByteString -> AES128
 makeEncrypter ss = throwCryptoError $ cipherInit ss
 
-cfb8Encrypt :: (HasEncryption r) => BS.ByteString -> Eff r BS.ByteString
+cfb8Encrypt :: HasEncryption r => BS.ByteString -> Eff r BS.ByteString
 cfb8Encrypt = bsFoldlM magic BS.empty 
   where
     -- Does a single step (one byte) of a CFB8 encryption
     magic :: HasEncryption r => BS.ByteString -> Word8 -> Eff r BS.ByteString
     magic ds d = do 
-      (ciph,iv) <- get :: HasEncryption r => Eff r (AES128,BS.ByteString)
+      iv <- get
+      ciph <- ask :: HasEncryption r => Eff r AES128
       -- use the MSB of the encrypted shift register to encrypt the current plaintext
       let ct = BS.head (ecbEncrypt ciph iv) `xor` d
       -- shift the new ciphertext into the shift register
       let ivFinal = BS.tail iv `BS.snoc` ct
       -- add the cipher text to the output, and return the updated shift register
-      put (ciph,ivFinal)
+      put ivFinal
       return $ ds `BS.snoc` ct
+
+cfb8Decrypt :: HasEncryption r => BS.ByteString -> Eff r BS.ByteString
+cfb8Decrypt = bsFoldlM magic BS.empty
+  where
+    magic :: HasEncryption r => BS.ByteString -> Word8 -> Eff r BS.ByteString
+    magic ds d = do
+      iv <- get
+      ciph <- ask :: HasEncryption r => Eff r AES128
+      let pt = BS.head (ecbEncrypt ciph iv) `xor` d
+      -- snoc on cipher always
+      let ivFinal = BS.tail iv `BS.snoc` d
+      put ivFinal
+      return (ds `BS.snoc` pt)
+
 
 bsFoldlM :: Monad m => (b -> Word8 -> m b) -> b -> BS.ByteString -> m b
 bsFoldlM f i bs = BS.foldr f' return bs i

@@ -35,7 +35,14 @@ parseStatusPacket :: Parser Server.Packet
 parseStatusPacket = parseStatusRequest <|> parseStatusPing
 
 parsePlayPacket :: Parser Server.Packet
-parsePlayPacket = parseStatusRequest <|> parseStatusPing
+parsePlayPacket = parsePluginMessage
+
+parsePluginMessage :: Parser Server.Packet
+parsePluginMessage = do
+  try (specificVarInt 0x09)
+  Server.PluginMessage
+    <$> parseVarString
+    <*> (BS.pack <$> many anyByte) <* eof
 
 parseStatusRequest :: Parser Server.Packet
 parseStatusRequest = try (specificVarInt 0x00 >> eof) >> return Server.StatusRequest
@@ -98,6 +105,13 @@ parseLong :: Parser Int64
 parseLong = do
   bs <- replicateM 8 $ (unsafeCoerce :: Word8 -> Int64) <$> anyByte
   return $ foldl1 (\a x -> shiftL a 8 .|. x) bs
+
+parseCompPkt :: Parser (VarInt,BS.ByteString)
+parseCompPkt = do
+  dataLen <- parseVarInt
+  bs <- BS.pack <$> many anyByte
+  eof
+  return (dataLen,bs)
 
 -- Comes out to -1
 parseTest :: IO ()
