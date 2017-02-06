@@ -13,22 +13,26 @@ data Packet
   -- Protocol Version, Server Address, Server Port, Next State
   = Handshake VarInt String Word16 VarInt
   -- Play Packet
-  | TPConfirm
+  | TPConfirm VarInt
   | TabComplete
-  | ChatMessage
-  | ClientStatus
-  | ClientSettings
+  | ChatMessage String
+  | ClientStatus VarInt
+  | ClientSettings String Word8 VarInt Bool Word8 VarInt
   | ConfirmTransaction
   | EnchantItem
   | ClickWindow
-  | CloseWindow
+  | CloseWindow Word8
   | PluginMessage String BS.ByteString
   | UseEntity
-  | KeepAlive
-  | PlayerPosition
-  | PlayerPositionAndLook
-  | PlayerLook
-  | Player
+  | KeepAlive VarInt
+  -- x,y,z (abs), on ground
+  | PlayerPosition (Position Double) Bool
+  -- x,y,z, yaw,pitch, onground
+  | PlayerPositionAndLook (Position Double) (Float,Float) Bool
+  -- yaw,pitch, onground
+  | PlayerLook (Float,Float) Bool
+  -- onground
+  | Player Bool
   | VehicleMove
   | SteerBoat
   | PlayerAbilities
@@ -36,10 +40,10 @@ data Packet
   | EntityAction
   | SteerVehicle
   | ResourcePackStatus
-  | HeldItemChange
-  | CreativeInventoryAction
+  | HeldItemChange Short
+  | CreativeInventoryAction Short Slot
   | UpdateSign
-  | Animation
+  | Animation VarInt
   | Spectate
   | PlayerBlockPlacement
   | UseItem
@@ -54,26 +58,29 @@ data Packet
   -- Arbitrary Number (see Clientbound.StatusPong)
   | StatusPing Int64 deriving Show
 
+--parseServerboundPacket :: Word8 -> Parser Packet
+--parseServerboundPacket pktId = try (specificVarInt pktId)
+
 instance PacketId Packet where
   packetSide _ = Server
   packetId p = case p of
     (Handshake _ _ _ _) -> 0x00
-    (TPConfirm) -> 0x00
+    (TPConfirm _) -> 0x00
     (TabComplete) -> 0x01
-    (ChatMessage) -> 0x02
-    (ClientStatus) -> 0x03
-    (ClientSettings) -> 0x04
+    (ChatMessage _) -> 0x02
+    (ClientStatus _) -> 0x03
+    (ClientSettings _ _ _ _ _ _) -> 0x04
     (ConfirmTransaction) -> 0x05
     (EnchantItem) -> 0x06
     (ClickWindow) -> 0x07
-    (CloseWindow) -> 0x08
+    (CloseWindow _) -> 0x08
     (PluginMessage _ _) -> 0x09
     (UseEntity) -> 0x0A
-    (KeepAlive) -> 0x0B
-    (PlayerPosition) -> 0x0C
-    (PlayerPositionAndLook) -> 0x0D
-    (PlayerLook) -> 0x0E
-    (Player) -> 0x0F
+    (KeepAlive _) -> 0x0B
+    (PlayerPosition _ _) -> 0x0C
+    (PlayerPositionAndLook _ _ _) -> 0x0D
+    (PlayerLook _ _) -> 0x0E
+    (Player _) -> 0x0F
     (VehicleMove) -> 0x10
     (SteerBoat) -> 0x11
     (PlayerAbilities) -> 0x12
@@ -81,10 +88,10 @@ instance PacketId Packet where
     (EntityAction) -> 0x14
     (SteerVehicle) -> 0x15
     (ResourcePackStatus) -> 0x16
-    (HeldItemChange) -> 0x17
-    (CreativeInventoryAction) -> 0x18
+    (HeldItemChange _) -> 0x17
+    (CreativeInventoryAction _ _) -> 0x18
     (UpdateSign) -> 0x19
-    (Animation) -> 0x1A
+    (Animation _) -> 0x1A
     (Spectate) -> 0x1B
     (PlayerBlockPlacement) -> 0x1C
     (UseItem) -> 0x1D
@@ -94,22 +101,22 @@ instance PacketId Packet where
     (StatusPing _) -> 0x01
   packetState p = case p of
     (Handshake _ _ _ _) -> Handshaking
-    (TPConfirm) -> Playing
+    (TPConfirm _) -> Playing
     (TabComplete) -> Playing
-    (ChatMessage) -> Playing
-    (ClientStatus) -> Playing
-    (ClientSettings) -> Playing
+    (ChatMessage _) -> Playing
+    (ClientStatus _) -> Playing
+    (ClientSettings _ _ _ _ _ _) -> Playing
     (ConfirmTransaction) -> Playing
     (EnchantItem) -> Playing
     (ClickWindow) -> Playing
-    (CloseWindow) -> Playing
+    (CloseWindow _) -> Playing
     (PluginMessage _ _) -> Playing
     (UseEntity) -> Playing
-    (KeepAlive) -> Playing
-    (PlayerPosition) -> Playing
-    (PlayerPositionAndLook) -> Playing
-    (PlayerLook) -> Playing
-    (Player) -> Playing
+    (KeepAlive _) -> Playing
+    (PlayerPosition _ _) -> Playing
+    (PlayerPositionAndLook _ _ _) -> Playing
+    (PlayerLook _ _) -> Playing
+    (Player _) -> Playing
     (VehicleMove) -> Playing
     (SteerBoat) -> Playing
     (PlayerAbilities) -> Playing
@@ -117,10 +124,10 @@ instance PacketId Packet where
     (EntityAction) -> Playing
     (SteerVehicle) -> Playing
     (ResourcePackStatus) -> Playing
-    (HeldItemChange) -> Playing
-    (CreativeInventoryAction) -> Playing
+    (HeldItemChange _) -> Playing
+    (CreativeInventoryAction _ _) -> Playing
     (UpdateSign) -> Playing
-    (Animation) -> Playing
+    (Animation _) -> Playing
     (Spectate) -> Playing
     (PlayerBlockPlacement) -> Playing
     (UseItem) -> Playing

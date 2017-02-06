@@ -85,39 +85,31 @@ unIntBytesRaw = BS.foldr' (\b i -> shiftL i 8 + fromIntegral b) 0 . BS.reverse
 makeEncrypter :: BS.ByteString -> AES128
 makeEncrypter ss = throwCryptoError $ cipherInit ss
 
-cfb8Encrypt :: HasEncryption r => BS.ByteString -> Eff r BS.ByteString
-cfb8Encrypt = bsFoldlM magic BS.empty 
+cfb8Encrypt :: AES128 -> BS.ByteString -> BS.ByteString -> (BS.ByteString,BS.ByteString)
+cfb8Encrypt c i = BS.foldl magic (BS.empty,i) 
   where
     -- Does a single step (one byte) of a CFB8 encryption
-    magic :: HasEncryption r => BS.ByteString -> Word8 -> Eff r BS.ByteString
-    magic ds d = do 
-      iv <- get
-      ciph <- ask :: HasEncryption r => Eff r AES128
-      -- use the MSB of the encrypted shift register to encrypt the current plaintext
-      let ct = BS.head (ecbEncrypt ciph iv) `xor` d
-      -- shift the new ciphertext into the shift register
-      let ivFinal = BS.tail iv `BS.snoc` ct
-      -- add the cipher text to the output, and return the updated shift register
-      put ivFinal
-      return $ ds `BS.snoc` ct
+    -- add the cipher text to the output, and return the updated shift register
+    magic (ds,iv) d = (ds `BS.snoc` ct,ivFinal)
+      where
+        -- use the MSB of the encrypted shift register to encrypt the current plaintext
+        ct = BS.head (ecbEncrypt c iv) `xor` d
+        -- shift the new ciphertext into the shift register
+        ivFinal = BS.tail iv `BS.snoc` ct
 
-cfb8Decrypt :: HasEncryption r => BS.ByteString -> Eff r BS.ByteString
-cfb8Decrypt = bsFoldlM magic BS.empty
+cfb8Decrypt :: AES128 -> BS.ByteString -> BS.ByteString -> (BS.ByteString,BS.ByteString)
+cfb8Decrypt c i = BS.foldl magic (BS.empty,i)
   where
-    magic :: HasEncryption r => BS.ByteString -> Word8 -> Eff r BS.ByteString
-    magic ds d = do
-      iv <- get
-      ciph <- ask :: HasEncryption r => Eff r AES128
-      let pt = BS.head (ecbEncrypt ciph iv) `xor` d
-      -- snoc on cipher always
-      let ivFinal = BS.tail iv `BS.snoc` d
-      put ivFinal
-      return (ds `BS.snoc` pt)
+    magic (ds,iv) d = (ds `BS.snoc` pt,ivFinal)
+      where
+        pt = BS.head (ecbEncrypt c iv) `xor` d
+        -- snoc on cipher always
+        ivFinal = BS.tail iv `BS.snoc` d
 
 
-bsFoldlM :: Monad m => (b -> Word8 -> m b) -> b -> BS.ByteString -> m b
-bsFoldlM f i bs = BS.foldr f' return bs i
-  where f' x k z = f z x >>= k
+--bsFoldlM :: Monad m => (b -> Word8 -> m b) -> b -> BS.ByteString -> m b
+--bsFoldlM f i bs = BS.foldr f' return bs i
+  --where f' x k z = f z x >>= k
 
 
 

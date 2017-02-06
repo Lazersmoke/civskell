@@ -5,9 +5,8 @@ module Clientbound where
 import Data.Int
 import Data.Semigroup
 import Data.Word
-import Data.Bits
+import Data.List (genericLength)
 import qualified Data.ByteString as BS
-
 import Data
 
 data Packet
@@ -27,36 +26,36 @@ data Packet
   | StatusPong Int64
   -- Play
   -- EID, UUID, Type of Object, x, y, z, pitch, yaw, Object Data, velx, vely, velz
-  | SpawnObject VarInt String Word8 Double Double Double Word8 Word8 Int32 Short Short Short
+  | SpawnObject VarInt String Word8 (Position Double) (Word8,Word8) Int32 Short Short Short
   -- EID, x, y, z, count
-  | SpawnExpOrb VarInt Double Double Double Short
+  | SpawnExpOrb VarInt (Position Double) Short
   -- EID, Type (always 1 for thunderbolt), x, y, z
-  | SpawnGlobalEntity VarInt Word8 Double Double Double
+  | SpawnGlobalEntity VarInt Word8 (Position Double)
   -- EID, UUID, Type, x, y, z, yaw, pitch, head pitch, velx, vely, velz, Metadata
-  | SpawnMob VarInt String VarInt Double Double Double Word8 Word8 Word8 Short Short Short -- Metadata NYI
+  | SpawnMob VarInt String VarInt (Position Double) Word8 Word8 Word8 Short Short Short -- Metadata NYI
   -- EID, UUID, Title, Location, 
   | SpawnPainting VarInt String String {-Position NYI-} Word8
   -- EID, UUID, x, y, z, yaw, pitch, metadata
-  | SpawnPlayer VarInt String Double Double Double Word8 Word8 -- Metadata NYI
+  | SpawnPlayer VarInt String (Position Double) Word8 Word8 -- Metadata NYI
   -- EID, Animation ID (from table)
   | Animation VarInt Word8
   -- List of all stats
   | Statistics [(String,VarInt)]
   -- EID, Block coord, stage (0-9)
-  | BlockBreakAnimation VarInt Position Word8
+  | BlockBreakAnimation VarInt (Position Int) Word8
   -- Block coord, action (from enum), NBT tag
-  | UpdateBlockEntity Position Word8 BS.ByteString
+  | UpdateBlockEntity (Position Int) Word8 BS.ByteString
   -- Block coord, Action Id (enum), Action Param, Block Type ; http://wiki.vg/Block_Actions
-  | BlockAction Position (Word8,Word8) VarInt
+  | BlockAction (Position Int) (Word8,Word8) VarInt
   -- Block coord, Block ID (from global palette)
-  | BlockChange Position VarInt
+  | BlockChange (Position Int) VarInt
   -- UUID, Action (from enum)
   | BossBar String {- BossBarAction NYI -}
   -- Difficulty (0-3)
   | ServerDifficulty Word8
   -- List of matches for tab completion. Prefixed with length when sent
   | TabComplete [String]
-  -- JSON chat string, Position to appear in (0:chatbox,1:sys msg. chatbox,2:hotbar)
+  -- JSON chat string, (Position Int) to appear in (0:chatbox,1:sys msg. chatbox,2:hotbar)
   | ChatMessage String Word8
   -- Chunk x, Chunk z, List of (chunk relative coords, Block Id (global palette))
   | MultiBlockChange (Int32,Int32) [((Word8,Word8,Word8),VarInt)]
@@ -67,11 +66,11 @@ data Packet
   -- Window Id, Window Type (Enum), JSON chat string of Window Title, Num of Slots, optionally: EID of horse
   | OpenWindow Word8 String String Word8 (Maybe Int32)
   -- Window Id, List of <Slot>
-  | WindowItems Word8 -- [Slot] NYI
+  | WindowItems Word8 [Slot]
   -- Window Id, Property (enum), Value (enum)
   | WindowProperty Word8 Short Short
   -- Window Id, Slot num, <Slot>
-  | SetSlot Word8 Short -- Slot NYI
+  | SetSlot Word8 Short Slot
   -- Item Id (applies to all instances), Cooldown Ticks
   | SetCooldown VarInt VarInt
   -- Plugin Channel, Data
@@ -93,16 +92,17 @@ data Packet
   -- Chunk X, Chunk Z, Full Chunk?, Bitmask of slices present, [Chunk Section], optional: 256 byte array of biome data, [Block entity NBT tag]
   | ChunkData (Int32,Int32) Bool VarInt {-[ChunkSection] NYI-} (Maybe BS.ByteString) {-[NBT Tag] NYI-}
   -- Effect Id (Enum), block coord, extra data (from Enum), disable relative?
-  | Effect Int32 Position Int32 Bool
+  | Effect Int32 (Position Int) Int32 Bool
   -- Particle
   -- | Particle
   -- EID, Gamemode (Enum), Dimension (Enum), Difficulty (Enum), Max Players (deprecated), Level Type, reduce debug info?
   | JoinGame Int32 Word8 Int32 Word8 Word8 String Bool
   -- Flags bitfield, fly speed, fov modifier
   | PlayerAbilities Word8 Float Float
+  -- x,y,z, yaw,pitch, relativity flags, TPconfirm Id
+  | PlayerPositionAndLook (Position Double) (Float,Float) Word8 VarInt
   -- Block pos of player spawn
-  | SpawnPosition Position deriving Show
-
+  | SpawnPosition (Position Int) deriving Show
 
 -- All packets have their length and pktId annotated
 instance Serialize Packet where
@@ -116,13 +116,13 @@ instance Serialize Packet where
     (StatusResponse s) -> serialize s
     (StatusPong l) -> serialize l
     -- Play 
-    (SpawnObject _ _ _ _ _ _ _ _ _ _ _ _) -> BS.singleton 0x00
-    (SpawnExpOrb _ _ _ _ _) -> BS.singleton 0x00
-    (SpawnGlobalEntity _ _ _ _ _) -> BS.singleton 0x00
-    (SpawnMob _ _ _ _ _ _ _ _ _ _ _ _) -> BS.singleton 0x00
+    (SpawnObject _ _ _ _ _ _ _ _ _) -> BS.singleton 0x00
+    (SpawnExpOrb _ _ _) -> BS.singleton 0x00
+    (SpawnGlobalEntity _ _ _) -> BS.singleton 0x00
+    (SpawnMob _ _ _ _ _ _ _ _ _ _) -> BS.singleton 0x00
     (SpawnPainting _ _ _ {-Position NYI-} _) -> BS.singleton 0x00
-    (SpawnPlayer _ _ _ _ _ _ _ {-Metadata NYI-}) -> BS.singleton 0x00
-    (Animation _ _) -> BS.singleton 0x00
+    (SpawnPlayer _ _ _ _ _ {-Metadata NYI-}) -> BS.singleton 0x00
+    (Animation eid anim) -> serialize eid <> serialize anim
     (Statistics _) -> BS.singleton 0x00
     (BlockBreakAnimation _ _ _) -> BS.singleton 0x00
     (UpdateBlockEntity _ _ _) -> BS.singleton 0x00
@@ -136,9 +136,9 @@ instance Serialize Packet where
     (ConfirmTransaction _ _ _) -> BS.singleton 0x00
     (CloseWindow _) -> BS.singleton 0x00
     (OpenWindow _ _ _ _ _) -> BS.singleton 0x00
-    (WindowItems _ {-[Slot] NYI-}) -> BS.singleton 0x00
+    (WindowItems winId slots) -> serialize winId <> serialize (genericLength slots :: Int16) <> BS.concat (map serialize slots)
     (WindowProperty _ _ _) -> BS.singleton 0x00
-    (SetSlot _ _ {-Slot NYI-}) -> BS.singleton 0x00
+    (SetSlot _ _ _) -> BS.singleton 0x00
     (SetCooldown _ _) -> BS.singleton 0x00
     (PluginMessage str bs) -> serialize str <> bs
     (NamedSoundEffect _ _ _ _ _) -> BS.singleton 0x00
@@ -147,11 +147,12 @@ instance Serialize Packet where
     (Explosion _ _ _ _) -> BS.singleton 0x00
     (UnloadChunk _) -> BS.singleton 0x00
     (ChangeGameState _ _) -> BS.singleton 0x00
-    (KeepAlive _) -> BS.singleton 0x00
+    (KeepAlive kid) -> serialize kid
     (ChunkData _ _ _ {-[ChunkSection] NYI-} _ {-[NBT Tag] NYI-}) -> BS.singleton 0x00
     (Effect _ _ _ _) -> BS.singleton 0x00
     (JoinGame eid gamemode dim dif maxp leveltype reduce) -> serialize eid <> serialize gamemode <> serialize dim <> serialize dif <> serialize maxp <> serialize leveltype <> serialize reduce
     (PlayerAbilities flag fly fov) -> serialize flag <> serialize fly <> serialize fov
+    (PlayerPositionAndLook (Position x y z) (yaw,pitch) relFlag tpId) -> serialize x <> serialize y <> serialize z <> serialize yaw <> serialize pitch <> serialize relFlag <> serialize tpId
     (SpawnPosition pos) -> serialize pos
 
 -- All packets have a packet ID
@@ -167,12 +168,12 @@ instance PacketId Packet where
     (StatusResponse _) -> 0x00
     (StatusPong _) -> 0x01
     -- Play
-    (SpawnObject _ _ _ _ _ _ _ _ _ _ _ _) -> 0x00
-    (SpawnExpOrb _ _ _ _ _) -> 0x01
-    (SpawnGlobalEntity _ _ _ _ _) -> 0x02
-    (SpawnMob _ _ _ _ _ _ _ _ _ _ _ _) -> 0x03
+    (SpawnObject _ _ _ _ _ _ _ _ _) -> 0x00
+    (SpawnExpOrb _ _ _) -> 0x01
+    (SpawnGlobalEntity _ _ _) -> 0x02
+    (SpawnMob _ _ _ _ _ _ _ _ _ _) -> 0x03
     (SpawnPainting _ _ _ {-Position NYI-} _) -> 0x04
-    (SpawnPlayer _ _ _ _ _ _ _ {-Metadata NYI-}) -> 0x05
+    (SpawnPlayer _ _ _ _ _ {-Metadata NYI-}) -> 0x05
     (Animation _ _) -> 0x06
     (Statistics _) -> 0x07
     (BlockBreakAnimation _ _ _) -> 0x08
@@ -187,9 +188,9 @@ instance PacketId Packet where
     (ConfirmTransaction _ _ _) -> 0x11
     (CloseWindow _) -> 0x12
     (OpenWindow _ _ _ _ _) -> 0x13
-    (WindowItems _ {-[Slot] NYI-}) -> 0x14
+    (WindowItems _ _) -> 0x14
     (WindowProperty _ _ _) -> 0x15
-    (SetSlot _ _ {-Slot NYI-}) -> 0x16
+    (SetSlot _ _ _) -> 0x16
     (SetCooldown _ _) -> 0x17
     (PluginMessage _ _) -> 0x18
     (NamedSoundEffect _ _ _ _ _) -> 0x19
@@ -204,6 +205,7 @@ instance PacketId Packet where
     -- Paricle -> 0x22
     (JoinGame _ _ _ _ _ _ _) -> 0x23
     (PlayerAbilities _ _ _) -> 0x2B
+    (PlayerPositionAndLook _ _ _ _) -> 0x2E
     (SpawnPosition _) -> 0x43
   packetState p = case p of
     -- Login
@@ -215,12 +217,12 @@ instance PacketId Packet where
     (StatusResponse _) -> Status
     (StatusPong _) -> Status
     -- Play
-    (SpawnObject _ _ _ _ _ _ _ _ _ _ _ _) -> Playing
-    (SpawnExpOrb _ _ _ _ _) -> Playing
-    (SpawnGlobalEntity _ _ _ _ _) -> Playing
-    (SpawnMob _ _ _ _ _ _ _ _ _ _ _ _) -> Playing
+    (SpawnObject _ _ _ _ _ _ _ _ _) -> Playing
+    (SpawnExpOrb _ _ _) -> Playing
+    (SpawnGlobalEntity _ _ _) -> Playing
+    (SpawnMob _ _ _ _ _ _ _ _ _ _) -> Playing
     (SpawnPainting _ _ _ {-Position NYI-} _) -> Playing
-    (SpawnPlayer _ _ _ _ _ _ _ {-Metadata NYI-}) -> Playing
+    (SpawnPlayer _ _ _ _ _ {-Metadata NYI-}) -> Playing
     (Animation _ _) -> Playing
     (Statistics _) -> Playing
     (BlockBreakAnimation _ _ _) -> Playing
@@ -235,9 +237,9 @@ instance PacketId Packet where
     (ConfirmTransaction _ _ _) -> Playing
     (CloseWindow _) -> Playing
     (OpenWindow _ _ _ _ _) -> Playing
-    (WindowItems _ {-[Slot] NYI-}) -> Playing
+    (WindowItems _ _) -> Playing
     (WindowProperty _ _ _) -> Playing
-    (SetSlot _ _ {-Slot NYI-}) -> Playing
+    (SetSlot _ _ _) -> Playing
     (SetCooldown _ _) -> Playing
     (PluginMessage _ _) -> Playing
     (NamedSoundEffect _ _ _ _ _) -> Playing
@@ -251,5 +253,6 @@ instance PacketId Packet where
     (Effect _ _ _ _) -> Playing
     (JoinGame _ _ _ _ _ _ _) -> Playing
     (PlayerAbilities _ _ _) -> Playing
+    (PlayerPositionAndLook _ _ _ _) -> Playing
     (SpawnPosition _) -> Playing
     
