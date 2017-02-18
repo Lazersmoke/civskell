@@ -16,8 +16,7 @@ import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Client
 import Text.Parsec.ByteString
 import qualified Text.Parsec.Char as C
-import Control.Monad.Freer
-import Control.Monad.Freer.Internal
+import Control.Eff
 import qualified Codec.Compression.Zlib as Z
 import Data.Semigroup
 
@@ -31,7 +30,7 @@ import Encrypt
 sendPacket :: (HasLogging r,HasNetworking r) => Client.Packet -> Eff r ()
 sendPacket s = do
   -- Log its hex dump
-  logLevel ClientboundPacket $ "Sending: " ++ show s
+  logLevel ClientboundPacket $ show s
   logLevel HexDump $ indentedHex (serialize s)
   -- Send it
   rPut =<< addCompression (serialize s)
@@ -47,14 +46,15 @@ getPacket st = do
     Right serverPkt -> do
       -- return it
       -- TODO: make this a debugmode only putStrLn
-      logLevel ServerboundPacket $ "Got: " ++ show serverPkt
+      logLevel ServerboundPacket $ show serverPkt
       logLevel HexDump $ indentedHex $ pkt
       return $ Just serverPkt
     -- If it didn't parse correctly, print the error and return that it parsed bad
     Left e -> do
       logLevel ErrorLog "Failed to parse incoming packet"
       logLevel ErrorLog (show e)
-      logLevel HexDump $ indentedHex $ pkt
+      -- Hex dump is an error
+      logLevel ErrorLog $ indentedHex $ pkt
       return Nothing
 
 -- Get an unparsed packet from the network
@@ -128,53 +128,51 @@ parseAuthJSON = do
     reformat = ins 8 . ins 12 . ins 16 . ins 20
 
 runNetworking :: HasIO r => Maybe EncryptionCouplet -> Maybe VarInt -> Handle -> Eff (Networking ': r) a -> Eff r a
-runNetworking _ _ _ (Val x) = return x
-runNetworking mEnc mThresh hdl (E u q) = case decomp u of 
-  Right now -> match now 
-  Left restOfU -> E restOfU (tsingleton (\x -> runNetworking mEnc mThresh hdl (qApp q x)))
-  where
-    match (GetFromNetwork len) = do
-      case mEnc of
-        Nothing -> do
-          dat <- liftIO (BS.hGet hdl len)
-          runNetworking mEnc mThresh hdl (qApp q dat)
-        Just (c,e,d) -> do
-          bs <- liftIO (BS.hGet hdl len)
-          let (bs',d') = cfb8Decrypt c d bs
-          runNetworking (Just (c,e,d')) mThresh hdl (qApp q bs')
-    match (PutIntoNetwork bs) = do
-      case mEnc of
-        Nothing -> do
-          liftIO (BS.hPut hdl bs)
-          runNetworking mEnc mThresh hdl (qApp q ())
-        Just (c,e,d) -> do
-          let (bs',e') = cfb8Encrypt c e bs
-          liftIO (BS.hPut hdl bs')
-          runNetworking (Just (c,e',d)) mThresh hdl (qApp q ())
-    match (SetCompressionLevel thresh) = runNetworking mEnc thresh hdl (qApp q ())
-    match (SetupEncryption couplet) = runNetworking (Just couplet) mThresh hdl (qApp q ())
-    match (AddCompression bs) = case mThresh of
+runNetworking _ _ _ (Pure x) = Pure x
+runNetworking mEnc mThresh hdl (Eff u q) = case u of 
+  Weaken restOfU -> Eff restOfU (Singleton (runNetworking mEnc mThresh hdl . runTCQ q))
+  Inject (GetFromNetwork len) -> do
+    case mEnc of
+      Nothing -> do
+        dat <- liftIO (BS.hGet hdl len)
+        runNetworking mEnc mThresh hdl (runTCQ q dat)
+      Just (c,e,d) -> do
+        bs <- liftIO (BS.hGet hdl len)
+        let (bs',d') = cfb8Decrypt c d bs
+        runNetworking (Just (c,e,d')) mThresh hdl (runTCQ q bs')
+  Inject (PutIntoNetwork bs) -> do
+    case mEnc of
+      Nothing -> do
+        liftIO (BS.hPut hdl bs)
+        runNetworking mEnc mThresh hdl (runTCQ q ())
+      Just (c,e,d) -> do
+        let (bs',e') = cfb8Encrypt c e bs
+        liftIO (BS.hPut hdl bs')
+        runNetworking (Just (c,e',d)) mThresh hdl (runTCQ q ())
+  Inject (SetCompressionLevel thresh) -> runNetworking mEnc thresh hdl (runTCQ q ())
+  Inject (SetupEncryption couplet) -> runNetworking (Just couplet) mThresh hdl (runTCQ q ())
+  Inject (AddCompression bs) -> case mThresh of
+    -- Do not compress; annotate with length only
+    Nothing -> runNetworking mEnc mThresh hdl (runTCQ q (withLength bs))
+    Just t -> if BS.length bs >= fromIntegral t
+      -- Compress data and annotate to match
+      then do
+        let compIdAndData = LBS.toStrict . Z.compress . LBS.fromStrict $ bs
+        let origSize = serialize $ ((fromIntegral (BS.length bs)) :: VarInt)
+        let ann = withLength (origSize <> compIdAndData)
+        runNetworking mEnc mThresh hdl (runTCQ q ann)
       -- Do not compress; annotate with length only
-      Nothing -> runNetworking mEnc mThresh hdl (qApp q (withLength bs))
-      Just t -> if BS.length bs >= fromIntegral t
-        -- Compress data and annotate to match
-        then do
-          let compIdAndData = LBS.toStrict . Z.compress . LBS.fromStrict $ bs
-          let origSize = serialize $ ((fromIntegral (BS.length bs)) :: VarInt)
-          let ann = withLength (origSize <> compIdAndData)
-          runNetworking mEnc mThresh hdl (qApp q ann)
-        -- Do not compress; annotate with length only
-        else do
-          let ann = withLength (BS.singleton 0x00 <> bs)
-          runNetworking mEnc mThresh hdl (qApp q ann)
-    match (RemoveCompression bs) = case mThresh of
-      Nothing -> case parse parseUncompPkt "" bs of
-        Left _ -> runNetworking mEnc mThresh hdl (qApp q bs)
-        Right pktData -> runNetworking mEnc mThresh hdl (qApp q pktData)
-      Just _ -> case parse parseCompPkt "" bs of
-        -- TODO: fix this
-        Left _ -> runNetworking mEnc mThresh hdl (qApp q bs)
-        Right (dataLen,compressedData) -> if dataLen == 0x00
-          then runNetworking mEnc mThresh hdl (qApp q compressedData)
-          else runNetworking mEnc mThresh hdl (qApp q (LBS.toStrict . Z.decompress . LBS.fromStrict $ compressedData))
+      else do
+        let ann = withLength (BS.singleton 0x00 <> bs)
+        runNetworking mEnc mThresh hdl (runTCQ q ann)
+  Inject (RemoveCompression bs) -> case mThresh of
+    Nothing -> case parse parseUncompPkt "" bs of
+      Left _ -> runNetworking mEnc mThresh hdl (runTCQ q bs)
+      Right pktData -> runNetworking mEnc mThresh hdl (runTCQ q pktData)
+    Just _ -> case parse parseCompPkt "" bs of
+      -- TODO: fix this
+      Left _ -> runNetworking mEnc mThresh hdl (runTCQ q bs)
+      Right (dataLen,compressedData) -> if dataLen == 0x00
+        then runNetworking mEnc mThresh hdl (runTCQ q compressedData)
+        else runNetworking mEnc mThresh hdl (runTCQ q (LBS.toStrict . Z.decompress . LBS.fromStrict $ compressedData))
 

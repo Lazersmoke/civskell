@@ -68,7 +68,10 @@ parseStatusPing = do
   Server.StatusPing <$> parseLong 
 
 parsePlayPacket :: Parser Server.Packet
-parsePlayPacket = parseTPConfirm <|> parseChatMessage <|> parseClientStatus <|> parseClientSettings <|> parseCloseWindow <|> parsePluginMessage <|> parseKeepAlive <|> parsePlayerPosition <|> parsePlayerPositionAndLook <|> parsePlayerLook <|> parsePlayer <|> parseHeldItemChange <|> parseCreativeInventoryAction <|> parseAnimation <?> "Play Packet"
+parsePlayPacket = parseTPConfirm <|> parseChatMessage <|> parseClientStatus <|> parseClientSettings <|> parseCloseWindow <|> parsePluginMessage <|> parseKeepAlive <|> parsePlayerPosition <|> parsePlayerPositionAndLook <|> parsePlayerLook <|> parsePlayer <|> parsePlayerDigging <|> parseEntityAction <|> parseHeldItemChange <|> parseCreativeInventoryAction <|> parseAnimation <|> parsePlayerBlockPlacement <|> parseUseItem <|> parseUnknownPacket <?> "Play Packet"
+
+parseUnknownPacket :: Parser Server.Packet
+parseUnknownPacket = anyByte >>= unexpected . show
 
 parseTPConfirm :: Parser Server.Packet
 parseTPConfirm = do
@@ -117,14 +120,14 @@ parsePlayerPosition :: Parser Server.Packet
 parsePlayerPosition = do
   try (specificVarInt 0x0C) <?> "Packet Id 0x0C"
   Server.PlayerPosition
-    <$> (Position <$> parseDouble <*> parseDouble <*> parseDouble)
+    <$> ((,,) <$> parseDouble <*> parseDouble <*> parseDouble)
     <*> parseBool
 
 parsePlayerPositionAndLook :: Parser Server.Packet
 parsePlayerPositionAndLook = do
   try (specificVarInt 0x0D) <?> "Packet Id 0x0D"
   Server.PlayerPositionAndLook 
-    <$> (Position <$> parseDouble <*> parseDouble <*> parseDouble)
+    <$> ((,,) <$> parseDouble <*> parseDouble <*> parseDouble)
     <*> ((,) <$> parseFloat <*> parseFloat)
     <*> parseBool
 
@@ -140,6 +143,22 @@ parsePlayer = do
   try (specificVarInt 0x0F) <?> "Packet Id 0x0F"
   Server.Player <$> parseBool
 
+parsePlayerDigging :: Parser Server.Packet
+parsePlayerDigging = do
+  try (specificVarInt 0x13) <?> "Packet Id 0x13"
+  Server.PlayerDigging
+    <$> parseVarInt
+    <*> parseBlockCoord
+    <*> anyByte
+
+parseEntityAction :: Parser Server.Packet
+parseEntityAction = do
+  try (specificVarInt 0x14) <?> "Packet Id 0x14"
+  Server.EntityAction
+    <$> parseVarInt
+    <*> parseVarInt
+    <*> parseVarInt
+
 parseHeldItemChange :: Parser Server.Packet
 parseHeldItemChange = do
   try (specificVarInt 0x17) <?> "Packet Id 0x17"
@@ -154,6 +173,20 @@ parseAnimation :: Parser Server.Packet
 parseAnimation = do
   try (specificVarInt 0x1A) <?> "Packet Id 0x1A"
   Server.Animation <$> parseVarInt
+
+parsePlayerBlockPlacement :: Parser Server.Packet
+parsePlayerBlockPlacement = do
+  try (specificVarInt 0x1C) <?> "Packet Id 0x1C"
+  Server.PlayerBlockPlacement
+    <$> parseBlockCoord
+    <*> parseVarInt
+    <*> parseVarInt
+    <*> ((,,) <$> parseFloat <*> parseFloat <*> parseFloat)
+
+parseUseItem :: Parser Server.Packet
+parseUseItem = do
+  try (specificVarInt 0x1D) <?> "Packet Id 0x1D"
+  Server.UseItem <$> parseVarInt
 
 parseVarString :: Parser String
 parseVarString = do
@@ -178,6 +211,20 @@ parseSlot = try emptySlot <|> nonEmptySlot
           ns <- BS.pack <$> many anyByte
           eof
           return $ Slot bid cnt dmg (Just . (\(Right (NBT _ a)) -> a) $ Ser.decode (n `BS.cons` ns))
+
+parseBlockCoord :: Parser BlockCoord
+parseBlockCoord = do
+  xyz <- parseLong
+  let x = u (shiftR xyz 38)
+  let x' = if x >= 2^(25 :: Integer) then x - 2^(26 :: Integer) else x
+  let y = u $ (shiftR xyz 26) .&. 0xFFF
+  let y' = if y >= 2^(11 :: Integer) then y - 2^(12 :: Integer) else y
+  let z = u $ xyz .&. 0x3FFFFFF
+  let z' = if z >= 2^(25 :: Integer) then z - 2^(26 :: Integer) else z
+  return $ BlockCoord (x',y',z')
+  where
+    u = unsafeCoerce :: Int64 -> Int
+
 
 parseShort :: Parser Int16
 parseShort = do

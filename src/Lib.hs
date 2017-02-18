@@ -12,9 +12,10 @@ import System.IO
 import qualified Crypto.PubKey.RSA.PKCS15 as RSA
 import qualified Crypto.PubKey.RSA as RSA
 import qualified Data.ByteString as BS
-import Control.Monad.Freer
-import Control.Monad.Freer.Reader
-import Control.Monad.Freer.State
+import Control.Eff
+import Control.Monad
+import qualified Data.Map.Lazy as Map
+import Data.Bits
 
 import CivNetwork
 import Data
@@ -36,17 +37,17 @@ connLoop sock = do
   -- Don't line buffer the network
   hSetBuffering handle NoBuffering
   -- We don't need the thread id
-  _ <- forkIO (runM $ runLogger $ runNetworking Nothing Nothing handle connHandler)
+  _ <- forkIO (runM $ runLogger $ runNetworking Nothing Nothing handle $ initWorld $ connHandler)
   -- Wait for another connection
   connLoop sock
 
-connHandler :: (r ~ (s ': s'),HasLogging r,HasIO r,HasNetworking r) => Eff r () 
+connHandler :: (HasLogging r,HasIO r,HasNetworking r,HasWorld r) => Eff r () 
 connHandler = do
   -- Get a packet from the client (should be a handshake)
   mHandshake <- getPacket Handshaking 
   maybe (logg "WTF no packet? REEEEEEEEEEEEE") handleHandshake mHandshake
 
-handleHandshake :: (r ~ (s ': s'),HasLogging r,HasIO r,HasNetworking r) => Server.Packet -> Eff r ()
+handleHandshake :: (HasLogging r,HasIO r,HasNetworking r,HasWorld r) => Server.Packet -> Eff r ()
 -- Normal handshake recieved
 handleHandshake (Server.Handshake protocol addr port newstate) = do
   -- Log to console that we have a handshaking connection
@@ -86,7 +87,7 @@ checkVTandSS priv vtFromClient ssFromClient actualVT = do
           Left e -> Left $ "Failed to parse Shared Secret: " ++ show e
           Right ss -> Right ss
 
-encryptionPhase :: (r ~ (s ': s'),HasIO r,HasLogging r,HasNetworking r) => String -> Eff r ()
+encryptionPhase :: (HasIO r,HasLogging r,HasNetworking r,HasWorld r) => String -> Eff r ()
 encryptionPhase nameFromLoginStart = do
   -- Get a new keypair to use with this client during the key exchange
   (pub,priv) <- getAKeypair
@@ -113,7 +114,7 @@ encryptionPhase nameFromLoginStart = do
     Just _ -> logg "Expected EncryptionResponse, got something else"
     Nothing -> logg "unable to parse encryptionresponse packet"
 
-authPhase :: (r ~ (s ': s'),HasIO r,HasLogging r,HasNetworking r) => String -> String -> Eff r ()
+authPhase :: (HasIO r,HasLogging r,HasNetworking r,HasWorld r) => String -> String -> Eff r ()
 authPhase name hash = do
   -- do the Auth stuff with Mojang
   authGetReq name hash >>= \case
@@ -134,7 +135,7 @@ authPhase name hash = do
       startPlaying
 
 -- Start Play Mode, where we have just sent "Login Success"
-startPlaying :: (r ~ (s ': s'),HasLogging r, HasNetworking r) => Eff r ()
+startPlaying :: (HasWorld r, HasLogging r, HasNetworking r) => Eff r ()
 startPlaying = do
   -- EID, Gamemode (Enum), Dimension (Enum), Difficulty (Enum), Max Players (deprecated), Level Type, reduce debug info?
   sendPacket (Client.JoinGame 0 0x01 0 0x00 0x00 "default" False)
@@ -143,22 +144,56 @@ startPlaying = do
   -- Difficulty to peacful
   sendPacket (Client.ServerDifficulty 0x00)
   -- Home spawn position
-  sendPacket (Client.SpawnPosition (Position 0 64 0))
+  sendPacket (Client.SpawnPosition (BlockCoord (0,64,0)))
   -- Player Abilities
   sendPacket (Client.PlayerAbilities 0x00 0.0 1.0)
   -- 0 is player inventory
   sendPacket (Client.WindowItems 0 (replicate 40 EmptySlot ++ [Slot 1 5 0 Nothing] ++ replicate 4 EmptySlot))
+  -- Send initial world
+  forM_ [0..48] $ \x -> do
+    let (cx,cz) = (fromIntegral $ (x `mod` 7)-3,fromIntegral $ (x `div` 7)-3)
+    forM_ [0..7] $ \v -> 
+      setChunk exampleChunk (ChunkCoord (cx,v,cz))
+    forM_ [8..15] $ \v -> 
+      setChunk emptyChunk (ChunkCoord (cx,v,cz))
+    sendCol ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
   initPlayer packetLoop
 
-packetLoop :: (r ~ (s ': s'),HasPlayer r, HasLogging r, HasNetworking r) => Eff r ()
+sendChunk :: (HasWorld r, HasNetworking r, HasLogging r) => ChunkCoord -> Eff r ()
+sendChunk cc@(ChunkCoord (x,y,z)) = do
+  c <- getChunk cc
+  sendPacket (Client.ChunkData (fromIntegral x,fromIntegral z) False (bit y) [c] Nothing [])
+
+sendCol :: (HasWorld r, HasNetworking r, HasLogging r) => (Int,Int) -> Maybe BS.ByteString -> Eff r ()
+sendCol (cx,cz) mbio = do
+  cs <- forM [0..15] $ \cy -> getChunk (ChunkCoord (cx,cy,cz))
+  sendPacket (Client.ChunkData (fromIntegral cx,fromIntegral cz) True (bitMask cs) (filter (not . isAirChunk) cs) mbio [])
+  where
+    -- [Bool] -> VarInt basically
+    bitMask as = foldl (\i b -> fromBool b .|. shiftL i 1) 0 (map isAirChunk as)
+    fromBool True = 1
+    fromBool False = 0
+
+isAirChunk :: ChunkSection -> Bool
+isAirChunk (ChunkSection m) = Map.null m
+
+emptyChunk :: ChunkSection
+emptyChunk = ChunkSection Map.empty
+
+exampleChunk :: ChunkSection
+exampleChunk = ChunkSection $ Map.fromList [(BlockCoord (x,y,z),stone) | x <- [0..15], y <- [0..15], z <- [0..15]]
+  where
+    stone = BlockState 1 0
+
+packetLoop :: (HasPlayer r, HasLogging r, HasNetworking r, HasWorld r) => Eff r ()
 packetLoop = do
   mPkt <- getPacket Playing 
   maybe (logLevel ErrorLog "Failed to parse incoming packet") gotPacket mPkt 
   packetLoop
 
-gotPacket :: (r ~ (s ': s'),HasPlayer r, HasLogging r, HasNetworking r) => Server.Packet -> Eff r ()
+gotPacket :: (HasPlayer r, HasLogging r, HasNetworking r, HasWorld r) => Server.Packet -> Eff r ()
 gotPacket (Server.PluginMessage "MC|Brand" cliBrand) = do
-  logg $ "Client brand is: " ++ show (BS.tail cliBrand)
+  --logg $ "Client brand is: " ++ show (BS.tail cliBrand)
   setBrand $ show (BS.tail cliBrand)
 gotPacket (Server.ClientSettings loc viewDist chatMode chatColors skin hand) = do
   logg $ "Client Settings:"
@@ -170,7 +205,7 @@ gotPacket (Server.ClientSettings loc viewDist chatMode chatColors skin hand) = d
   logg $ "  Main Hand: " ++ show hand
   -- 0x00 means all absolute, 0x01 is tp confirm Id
   let tid = 0x01
-  sendPacket (Client.PlayerPositionAndLook (Position 0.0 0.0 0.0) (0.0,0.0) 0x00 tid)
+  sendPacket (Client.PlayerPositionAndLook (1.0,200.0,1.0) (0.0,0.0) 0x00 tid)
   pendTeleport tid
   logg $ "Teleport with id " ++ show tid ++ " pending"
 gotPacket (Server.TPConfirm tid) = do
@@ -178,42 +213,60 @@ gotPacket (Server.TPConfirm tid) = do
   if c
     then logg $ "Client confirms teleport with id: " ++ show tid
     else logg $ "Client provided bad teleport id: " ++ show tid
-gotPacket (Server.Animation hand) = do
-  logg $ "Client is swinging " ++ (case hand of {0 -> "main hand"; 1 -> "off hand"})
+gotPacket (Server.Animation _) = do
   logg "Sending keep alive"
   sendPacket (Client.KeepAlive 5)
+  pendKeepAlive 5
   -- Player EID is 0; mc encoding is retarded, don't ask me why off hand is 3
   --sendPacket (Client.Animation 0 (case hand of {0 -> 0; 1 -> 3}))
 gotPacket (Server.HeldItemChange slotNum) = do
   logg $ "Player is holding slot number " ++ show slotNum
   setHolding slotNum
-gotPacket (Server.ClientStatus status) = do
-  logg $ "Client Status is: " ++ (case status of {0 -> "Perform Respawn"; 1 -> "Request Stats"; 2 -> "Open Inventory"})
+gotPacket (Server.ClientStatus _status) = return ()
+  --logg $ "Client Status is: " ++ (case status of {0 -> "Perform Respawn"; 1 -> "Request Stats"; 2 -> "Open Inventory"})
 gotPacket (Server.CreativeInventoryAction slotNum slotDat) = do
   logg $ "Player creatively set slot " ++ show slotNum ++ " to {" ++ show slotDat ++ "}"
 gotPacket (Server.KeepAlive kid) = do
-  logg $ "Player sent keep alive pong with id: " ++ show kid
-gotPacket (Server.PlayerPosition (Position x y z) grounded) = do
-  logg $ "Player is at " ++ show (x,y,z)
-  logg $ if grounded then "Player is on the ground" else "Player is not on the ground"
-gotPacket (Server.PlayerPositionAndLook (Position x y z) (yaw,pitch) grounded) = do
-  logg $ "Player is at " ++ show (x,y,z) 
-  logg $ "Player is looking to " ++ show (yaw,pitch)
-  logg $ if grounded then "Player is on the ground" else "Player is not on the ground"
+  c <- clearKeepAlive kid
+  if c
+    then logg $ "Player sent keep alive pong with id: " ++ show kid
+    else logg $ "Player sent bad keep alive id: " ++ show kid
+gotPacket (Server.PlayerPosition (x,y,z) grounded) = do
+  setPlayerPos (x,y,z)
+  logLevel VerboseLog $ "Player is at " ++ show (x,y,z)
+  logLevel VerboseLog $ if grounded then "Player is on the ground" else "Player is not on the ground"
+gotPacket (Server.PlayerPositionAndLook (x,y,z) (yaw,pitch) grounded) = do
+  setPlayerPos (x,y,z)
+  setPlayerViewAngle (yaw,pitch)
+  logLevel VerboseLog $ "Player is at " ++ show (x,y,z) 
+  logLevel VerboseLog $ "Player is looking to " ++ show (yaw,pitch)
+  logLevel VerboseLog $ if grounded then "Player is on the ground" else "Player is not on the ground"
 gotPacket (Server.PlayerLook (y,p) grounded) = do
-  logg $ "Player is looking to " ++ show (y,p)
-  logg $ if grounded then "Player is on the ground" else "Player is not on the ground"
+  setPlayerViewAngle (y,p)
+  logLevel VerboseLog $ "Player is looking to " ++ show (y,p)
+  logLevel VerboseLog $ if grounded then "Player is on the ground" else "Player is not on the ground"
 gotPacket (Server.Player grounded) = do
-  logg $ if grounded then "Player is on the ground" else "Player is not on the ground"
+  logLevel VerboseLog $ if grounded then "Player is on the ground" else "Player is not on the ground"
 gotPacket (Server.CloseWindow wid) = do
   logg $ "Player is closing a window with id: " ++ show wid
 gotPacket (Server.ChatMessage msg) = do
   logg $ "Player said: " ++ msg
+gotPacket (Server.PlayerDigging action block _side) = case action of
+  0 -> do
+    logg $ "Player started digging block: " ++ show block
+    sendPacket (Client.BlockChange block (BlockState 0 0))
+    removeBlock block
+  1 -> logg $ "Player stopped digging block: " ++ show block
+  2 -> logg $ "Player finished digging block: " ++ show block
+  3 -> logg "Player dropped held item (stack)"
+  4 -> logg "Player dropped held item (single)"
+  5 -> logg "Player shot an arrow *OR* is finished eating"
+  6 -> logg "Player Swapped the items in their hands"
+  _ -> logLevel ErrorLog $ "Unsupported Player Digging action: " ++ show action
 gotPacket a = logLevel ErrorLog $ "Unsupported packet: " ++ show a
-  
- 
+
 -- Do the login process
-initiateLogin :: (r ~ (s ': s'),HasIO r,HasLogging r,HasNetworking r) => Eff r ()
+initiateLogin :: (HasIO r,HasLogging r,HasNetworking r,HasWorld r) => Eff r ()
 initiateLogin = do
   -- Get a login start packet from the client
   mloginStart <- getPacket LoggingIn
@@ -227,7 +280,7 @@ initiateLogin = do
     Nothing -> logg "Unable to parse login start packet"
 
 -- Server list refresh ping/status cycle
-statusMode :: (HasLogging r,HasNetworking r) => Eff r ()
+statusMode :: (HasLogging r,HasNetworking r,HasWorld r) => Eff r ()
 statusMode = do
   -- Wait for them to ask our status
   mpkt <- getPacket Status
@@ -235,7 +288,8 @@ statusMode = do
     -- Make sure they are actually asking for our status
     Just Server.StatusRequest -> do
       -- TODO: dynamic response
-      let resp = "{\"version\":{\"name\":\"1.10.2\",\"protocol\":210},\"players\":{\"max\":1000,\"online\": 0},\"description\":{\"text\":\"meow\"}}"
+      playerCount <- length <$> allPlayers
+      let resp = "{\"version\":{\"name\":\"Civskell (1.11.2)\",\"protocol\":316},\"players\":{\"max\": 100,\"online\": " ++ show playerCount ++ "},\"description\":{\"text\":\"An Experimental Minecraft server written in Haskell | github.com/Lazersmoke/civskell\"}}"
       -- Send resp to clients
       sendPacket (Client.StatusResponse resp)
       -- Wait for them to start a ping

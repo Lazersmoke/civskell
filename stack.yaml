@@ -37,11 +37,16 @@ resolver: lts-7.15
 # will not be run. This is useful for tweaking upstream packages.
 packages:
 - '.'
+- location: 
+    git: git@github.com:Lazersmoke/reee-monads.git
+    commit: 30053dade0f26931ea1a3e0d4224177261d1943b
+  extra-dep: true
 # Dependency packages to be pulled from upstream that are not in the resolver
 # (e.g., acme-missiles-0.3)
 extra-deps:
 - AES-0.2.9
 - nbt-0.6
+- binary-strict-0.4.8.3
 
 # Override default flag values for local packages and extra-deps
 flags: {}
