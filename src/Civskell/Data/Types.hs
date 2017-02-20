@@ -31,6 +31,7 @@ import Control.Eff
 import Crypto.Cipher.AES
 import Data.NBT
 import qualified Data.Serialize as Ser
+import Debug.Trace
 
 instance Serialize NBT where
   serialize = Ser.encode
@@ -44,6 +45,9 @@ type Short = Int16
 
 type PlayerId = Int
 
+-- Simple way to inject a text message into a json chat string
+jsonyText :: String -> String
+jsonyText s = "{\"text\":\"" ++ s ++ "\"}"
 liftIO :: HasIO r => IO a -> Eff r a
 liftIO = send
 
@@ -155,14 +159,20 @@ instance Serialize ChunkSection where
       bitsPerBlock = 13 :: VarInt
       --palette = nub dataArray
       sPalette = BS.singleton 0x00 -- withLength $ sBlockStates palette
-      blockStateList = Map.elems (Map.union bs airChunk)
+      blockStateList = Map.elems merged
+      merged = Map.mergeWithKey (\_k a _b -> Just a) id id bs airChunk
       dataArray = blockStateList -- map ((\(Just a) -> a) . flip elemIndex palette . fst) bs
       sArray = LBS.toStrict . longChunks . BB.toLazyByteString $ sBlockStates dataArray
       sData = serialize (fromIntegral (BS.length sArray) `div` 8 :: VarInt) <> sArray
       writeDat :: [Word8] -> BB.BitBuilder
       writeDat (x:y:xs) = writeDat xs `BB.append` BB.fromBits 4 y `BB.append` BB.fromBits 4 x
       writeDat [] = BB.empty
-      writeDat (_:[]) = error $ "Bad chunksection block list size: " ++ show (Map.size $ Map.union bs airChunk) ++ " | " ++ show (Map.union bs airChunk)
+      -- 95 86 96
+      -- 91 77 96
+      writeDat (_:[]) = error $ "Bad chunksection block list size: " ++ show (Map.size merged) ++ " | " ++ show (Map.size bs) ++ " | " ++ show (Map.size airChunk) ++ " | " ++ show (Map.difference bs airChunk) ++ " | " ++ show (Map.difference airChunk merged) ++ " | " ++ show (allCoords \\ Map.keys merged) ++ " | " ++ show (airChunk Map.! (head $ allCoords \\ Map.keys merged))
+
+allCoords :: [BlockCoord]
+allCoords = [BlockCoord (x,y,z) | x <- [0..15], y <- [0..15], z <- [0..15]]
 
 airChunk :: Map BlockCoord BlockState
 airChunk = Map.fromList [(BlockCoord (x,y,z),BlockState 0 0) | x <- [0..15], y <- [0..15], z <- [0..15]]

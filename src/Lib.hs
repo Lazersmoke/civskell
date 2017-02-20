@@ -35,6 +35,11 @@ import qualified Civskell.Packet.Serverbound as Server
 startListening :: IO ()
 startListening = do
   wor <- newMVar initWorld
+  runM $ runLogger $ runWorld wor $ do
+    let exampleColumn = replicate 8 exampleChunk ++ replicate 8 emptyChunk
+    forM_ [0..48] $ \x -> setColumn exampleColumn ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
+    -- Flush inbox before any players join; If we don't do this, the first player will receive their starting chunks twice
+    dumpBroadcast
   _ <- forkIO (connLoop wor =<< listenOn (PortNumber 25565))
   terminal
 
@@ -163,8 +168,7 @@ startPlaying = initPlayer $ do
   -- Player Abilities
   sendPacket (Client.PlayerAbilities 0x00 0.0 1.0)
   -- Send initial world
-  let exampleColumn = replicate 8 exampleChunk ++ replicate 8 emptyChunk
-  forM_ [0..48] $ \x -> setColumn exampleColumn ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
+  forM_ [0..48] $ \x -> sendCol ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
   -- 0 is player inventory
   flushInbox
   do
@@ -205,7 +209,7 @@ packetLoop = do
   maybe (logLevel ErrorLog "Failed to parse incoming packet") gotPacket mPkt
   packetLoop
 
-gotPacket :: (HasPlayer r, HasLogging r, HasWorld r) => Server.Packet -> Eff r ()
+gotPacket :: (HasNetworking r,HasPlayer r, HasLogging r, HasWorld r) => Server.Packet -> Eff r ()
 gotPacket (Server.PluginMessage "MC|Brand" cliBrand) = do
   --logg $ "Client brand is: " ++ show (BS.tail cliBrand)
   setBrand $ show (BS.tail cliBrand)
@@ -264,7 +268,13 @@ gotPacket (Server.CloseWindow wid) = do
 gotPacket (Server.ChatMessage msg) = case msg of
   "/gamemode 1" -> setGamemode Creative
   "/gamemode 0" -> setGamemode Survival
-  _ -> logg $ "Player said: " ++ msg
+  "chunks" -> do
+    b <- getBlock (BlockCoord (0,125,0))
+    logg $ "Block: " ++ show b
+    forM_ [0..48] $ \x -> sendCol ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
+  _ -> do
+    broadcastPacket (Client.ChatMessage (jsonyText msg) 0)
+    logg $ "Player said: " ++ msg
 gotPacket p@(Server.PlayerDigging action) = case action of
   StartDig block _side -> do
     logg $ "Player started digging block: " ++ show block
@@ -401,7 +411,3 @@ statusMode = do
         Nothing -> logg "WTF bruh you got this far and fucked up"
     Just _ -> logg "Client gave non status-request packet, disconnecting"
     Nothing -> logg "WTF m8? you tried to ask for our status, then gave us a shitty packet? Who the fuck do you think I am!?!?!?"
-
--- Simple way to inject a text message into a json chat string
-jsonyText :: String -> String
-jsonyText s = "{\"text\":\"" ++ s ++ "\"}"

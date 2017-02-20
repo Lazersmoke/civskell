@@ -136,7 +136,7 @@ instance Serialize Packet where
     (BossBar _ {- BossBarAction NYI -}) -> BS.singleton 0x00
     (ServerDifficulty dif) -> serialize dif
     (TabComplete _) -> BS.singleton 0x00
-    (ChatMessage _ _) -> BS.singleton 0x00
+    (ChatMessage msg loc) -> serialize msg <> serialize loc
     (MultiBlockChange _ _) -> BS.singleton 0x00
     (ConfirmTransaction _ _ _) -> BS.singleton 0x00
     (CloseWindow _) -> BS.singleton 0x00

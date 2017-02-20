@@ -32,7 +32,7 @@ runLogger (Eff u q) = case u of
       liftIO (putStrLn ("[\x1b[32mSent\x1b[0m] " ++ str))
       runLogger (runTCQ q ())
     ServerboundPacket -> do
-      liftIO (putStrLn ("[\x1b[32mGot\x1b[0m] " ++ str))
+      liftIO (putStrLn ("[\x1b[32mRecv\x1b[0m] " ++ str))
       runLogger (runTCQ q ())
     ErrorLog -> do
       liftIO (putStrLn $ "[\x1b[31mERROR\x1b[0m] " ++ str)

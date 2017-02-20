@@ -15,7 +15,6 @@ import Civskell.Data.Types
 import Civskell.Data.Logging
 import qualified Civskell.Packet.Clientbound as Client
 import qualified Data.ByteString as BS
-import Debug.Trace
 
 data WorldData = WorldData {chunks :: Map ChunkCoord ChunkSection, players :: Map PlayerId PlayerInfo, nextPlayerId :: PlayerId, broadcastLog :: [([PlayerId],Client.Packet)]}
 
@@ -35,6 +34,7 @@ data World a where
   AllPlayers :: World [PlayerInfo]
   InboxForPlayer :: PlayerId -> World [Client.Packet]
   BroadcastPacket :: Client.Packet -> World ()
+  DumpBroadcast :: World ()
 
 getChunk :: Member World r => ChunkCoord -> Eff r ChunkSection
 getChunk = send . GetChunk
@@ -69,6 +69,9 @@ allPlayers = send AllPlayers
 inboxForPlayer :: Member World r => PlayerId -> Eff r [Client.Packet]
 inboxForPlayer = send . InboxForPlayer
 
+dumpBroadcast :: Member World r => Eff r ()
+dumpBroadcast = send DumpBroadcast
+
 broadcastPacket :: Member World r => Client.Packet -> Eff r ()
 broadcastPacket = send . BroadcastPacket
 
@@ -85,20 +88,20 @@ runWorld w' (Eff u q) = case u of
     Just theChunk -> runWorld w' (runTCQ q theChunk)
     Nothing -> error $ "Tried to load non-existant chunk section: " ++ show chunk
   Inject (SetBlock b' bc) -> do
-    w <- send (takeMVar w')
-    if b' == BlockState 0 0
-      then send (putMVar w' w {chunks = Map.adjust (\(ChunkSection c) -> ChunkSection $ Map.delete bc c) (blockToChunk bc) (chunks w )})
-      else send (putMVar w' w {chunks = Map.adjust (\(ChunkSection c) -> ChunkSection $ Map.insert bc b' c) (blockToChunk bc) (chunks w)})
+    send $ modifyMVar_ w' $ \w -> do
+      let f = if b' == BlockState 0 0 then Map.delete (blockToRelative bc) else Map.insert (blockToRelative bc) b'
+      return w {chunks = Map.adjust (\(ChunkSection c) -> ChunkSection $ f c) (blockToChunk bc) (chunks w)}
+    logg $ "SetBlock " ++ show b' ++ " " ++ show bc
+    actual <- runWorld w' $ getBlock bc
+    logg $ "Actual: " ++ show actual
     runWorld w' $ broadcastPacket (Client.BlockChange bc b')
     runWorld w' (runTCQ q ())
   Inject (SetChunk c' cc@(ChunkCoord (x,y,z))) -> do
-    w <- send (takeMVar w') 
-    send (putMVar w' w {chunks = Map.insert cc c' (chunks w)}) 
+    send $ modifyMVar_ w' $ \w -> return w {chunks = Map.insert cc c' (chunks w)}
     runWorld w' $ broadcastPacket (Client.ChunkData (fromIntegral x,fromIntegral z) False (bit y) [c'] Nothing [])
     runWorld w' (runTCQ q ())
   Inject (SetColumn col' (cx,cz) mBio) -> do
-    w <- send (takeMVar w')
-    send (putMVar w' w {chunks = fst $ foldl (\(m,i) c -> (Map.insert (ChunkCoord (cx,i,cz)) c m,i + 1)) (chunks w,0) col'})
+    send $ modifyMVar_ w' $ \w -> return w {chunks = fst $ foldl (\(m,i) c -> (Map.insert (ChunkCoord (cx,i,cz)) c m,i + 1)) (chunks w,0) col'}
     runWorld w' $ broadcastPacket (Client.ChunkData (fromIntegral cx,fromIntegral cz) True (bitMask col') (filter (not . isAirChunk) col') mBio [])
     runWorld w' (runTCQ q ())
     where
@@ -107,21 +110,24 @@ runWorld w' (Eff u q) = case u of
       fromBool True = 1
       fromBool False = 0
       isAirChunk (ChunkSection m) = Map.null m
-  Inject NewPlayer -> send (takeMVar w') >>= \w -> send (putMVar w' w {players = Map.insert (nextPlayerId w) defaultPlayerInfo (players w),nextPlayerId = succ (nextPlayerId w)}) >> runWorld w' (runTCQ q (nextPlayerId w))
-  -- TODO: re-examine how messy of a default it is to just return `defaultPlayerInfo` if they aren't in the map
-  Inject (GetPlayer i) -> send (readMVar w') >>= \w -> runWorld w' (runTCQ q ((Map.!) (players w) i))
-  Inject (SetPlayer i p) -> send (takeMVar w') >>= \w -> send (putMVar w' w {players = Map.insert i p (players w)}) >> runWorld w' (runTCQ q ())
-  Inject AllPlayers -> send (readMVar w') >>= \w -> runWorld w' (runTCQ q (Map.elems $ players w))
+  -- Create a new player with the default info, and return the new player's id. Also increment it for next time
+  Inject NewPlayer -> (runWorld w' . runTCQ q =<<) . send . modifyMVar w' $ \w -> return (w {players = Map.insert (nextPlayerId w) defaultPlayerInfo (players w),nextPlayerId = succ (nextPlayerId w)},nextPlayerId w)
+  -- Warning: throws error if player not found
+  Inject (GetPlayer i) -> send (readMVar w') >>= runWorld w' . runTCQ q . flip (Map.!) i . players
+  Inject (SetPlayer i p) -> do
+    send $ modifyMVar_ w' $ \w -> return w {players = Map.insert i p (players w)}
+    runWorld w' (runTCQ q ())
+  Inject AllPlayers -> send (readMVar w') >>= runWorld w' . runTCQ q . Map.elems . players
+  Inject DumpBroadcast -> do
+    send $ modifyMVar_ w' $ \w -> return w {broadcastLog = []}
+    runWorld w' (runTCQ q ())
   Inject (InboxForPlayer i) -> do
-    w <- send (takeMVar w')
-    let oldLog = broadcastLog w
-    let sentMsgs = map snd $ filter (\(ids,_) -> not $ elem i ids) oldLog
-    let newLog = filter (\(ids,_) -> not . null $ (Map.keys $ players w) \\ ids) . map (\(ids,pkt) -> (i:ids,pkt)) $ oldLog
-    traceM (show (broadcastLog w))
-    send (putMVar w' w {broadcastLog = newLog})
-    runWorld w' (runTCQ q sentMsgs)
+    (runWorld w' . runTCQ q =<<) . send . modifyMVar w' $ \w -> do
+      let oldLog = broadcastLog w
+      let sentMsgs = map snd $ filter (\(ids,_) -> not $ elem i ids) oldLog
+      let newLog = filter (\(ids,_) -> not . null $ (Map.keys $ players w) \\ ids) . map (\(ids,pkt) -> (i:ids,pkt)) $ oldLog
+      return (w {broadcastLog = newLog},sentMsgs)
   Inject (BroadcastPacket pkt) -> do
-    w <- send (takeMVar w') 
-    send (putMVar w' w {broadcastLog = ([],pkt) : broadcastLog w})
+    send $ modifyMVar_ w' $ \w -> return w {broadcastLog = ([],pkt) : broadcastLog w}
     runWorld w' (runTCQ q ())
   Weaken u' -> Eff u' (Singleton (runWorld w' . runTCQ q))
