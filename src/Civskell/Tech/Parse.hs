@@ -1,7 +1,7 @@
 {-# LANGUAGE BinaryLiterals #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
-module ParseBS where
+module Civskell.Tech.Parse where
 
 import Control.Monad
 import Data.Bits
@@ -15,15 +15,15 @@ import qualified Data.ByteString as BS
 import Data.NBT
 import qualified Data.Serialize as Ser
 
-import Data
-import qualified Serverbound as Server
+import Civskell.Data.Types
+import qualified Civskell.Packet.Serverbound as Server
 
 anyByte :: Parser Word8
 anyByte = fromIntegral . ord <$> anyChar
 
 parsePacket :: ServerState -> Parser Server.Packet
-parsePacket Handshaking = parseHandshakePacket 
-parsePacket LoggingIn = parseLoginPacket 
+parsePacket Handshaking = parseHandshakePacket
+parsePacket LoggingIn = parseLoginPacket
 parsePacket Status = parseStatusPacket
 parsePacket Playing = parsePlayPacket
 
@@ -32,10 +32,10 @@ parseHandshakePacket = parseHandshake <?> "Handshake Packet"
 
 parseHandshake :: Parser Server.Packet
 parseHandshake = do
-  try (specificVarInt 0x00)
-  Server.Handshake 
-    <$> parseVarInt 
-    <*> parseVarString 
+  specificVarInt 0x00
+  Server.Handshake
+    <$> parseVarInt
+    <*> parseVarString
     <*> parseUnsignedShort
     <*> parseVarInt
 
@@ -44,12 +44,12 @@ parseLoginPacket = parseLoginStart <|> parseEncryptionResponse <?> "Login Packet
 
 parseLoginStart :: Parser Server.Packet
 parseLoginStart = do
-  try (specificVarInt 0x00)
+  specificVarInt 0x00
   Server.LoginStart <$> parseVarString
 
 parseEncryptionResponse :: Parser Server.Packet
 parseEncryptionResponse = do
-  try (specificVarInt 0x01)
+  specificVarInt 0x01
   ssLen <- fromEnum <$> parseVarInt
   ss <- BS.pack <$> replicateM ssLen anyByte
   vtLen <- fromEnum <$> parseVarInt
@@ -64,33 +64,33 @@ parseStatusRequest = try (specificVarInt 0x00 >> eof) >> return Server.StatusReq
 
 parseStatusPing :: Parser Server.Packet
 parseStatusPing = do
-  try (specificVarInt 0x01)
-  Server.StatusPing <$> parseLong 
+  specificVarInt 0x01
+  Server.StatusPing <$> parseLong
 
 parsePlayPacket :: Parser Server.Packet
-parsePlayPacket = parseTPConfirm <|> parseChatMessage <|> parseClientStatus <|> parseClientSettings <|> parseCloseWindow <|> parsePluginMessage <|> parseKeepAlive <|> parsePlayerPosition <|> parsePlayerPositionAndLook <|> parsePlayerLook <|> parsePlayer <|> parsePlayerDigging <|> parseEntityAction <|> parseHeldItemChange <|> parseCreativeInventoryAction <|> parseAnimation <|> parsePlayerBlockPlacement <|> parseUseItem <|> parseUnknownPacket <?> "Play Packet"
+parsePlayPacket = parseTPConfirm <|> parseChatMessage <|> parseClientStatus <|> parseClientSettings <|> parseClickWindow <|> parseCloseWindow <|> parsePluginMessage <|> parseKeepAlive <|> parsePlayerPosition <|> parsePlayerPositionAndLook <|> parsePlayerLook <|> parsePlayer <|> parsePlayerDigging <|> parseEntityAction <|> parseHeldItemChange <|> parseCreativeInventoryAction <|> parseAnimation <|> parsePlayerBlockPlacement <|> parseUseItem <|> parseUnknownPacket <?> "Play Packet"
 
 parseUnknownPacket :: Parser Server.Packet
 parseUnknownPacket = anyByte >>= unexpected . show
 
 parseTPConfirm :: Parser Server.Packet
 parseTPConfirm = do
-  try (specificVarInt 0x00) <?> "Packet Id 0x00"
+  specificVarInt 0x00 <?> "Packet Id 0x00"
   Server.TPConfirm <$> parseVarInt
 
 parseChatMessage :: Parser Server.Packet
 parseChatMessage = do
-  try (specificVarInt 0x02) <?> "Packet Id 0x02"
+  specificVarInt 0x02 <?> "Packet Id 0x02"
   Server.ChatMessage <$> parseVarString
 
 parseClientStatus :: Parser Server.Packet
 parseClientStatus = do
-  try (specificVarInt 0x03) <?> "Packet Id 0x03"
+  specificVarInt 0x03 <?> "Packet Id 0x03"
   Server.ClientStatus <$> parseVarInt
 
 parseClientSettings :: Parser Server.Packet
 parseClientSettings = do
-  try (specificVarInt 0x04) <?> "Packet Id 0x04"
+  specificVarInt 0x04 <?> "Packet Id 0x04"
   Server.ClientSettings
     <$> parseVarString
     <*> anyByte
@@ -99,94 +99,147 @@ parseClientSettings = do
     <*> anyByte
     <*> parseVarInt
 
+parseClickWindow :: Parser Server.Packet
+parseClickWindow = do
+  specificVarInt 0x07 <?> "Packet Id 0x07"
+  wid <- anyByte
+  slotNum <- parseShort
+  b <- anyByte
+  transId <- parseShort
+  mode <- choice
+    [guard (elem b [0,1]) *> specificVarInt 0x00 *> pure (NormalClick (b == 1))
+    ,guard (elem b [0,1]) *> specificVarInt 0x01 *> pure (ShiftClick (b == 1))
+    ,guard (elem b [0..8]) *> specificVarInt 0x02 *> pure (NumberKey b)
+    ,guard (b == 2) *> specificVarInt 0x03 *> pure MiddleClick
+    ,guard (elem b [0,1]) *> specificVarInt 0x04 *> pure (ItemDropOut (b == 1))
+    ,guard (elem b [0,1,2,4,5,6,8,9,10]) *> specificVarInt 0x05 *> pure (PaintingMode b)
+    ,guard (b == 0) *> specificVarInt 0x06 *> pure DoubleClick
+    ]
+  sl <- parseSlot
+  return $ Server.ClickWindow wid slotNum transId mode sl
+
 parseCloseWindow :: Parser Server.Packet
 parseCloseWindow = do
-  try (specificVarInt 0x08) <?> "Packet Id 0x08"
+  specificVarInt 0x08 <?> "Packet Id 0x08"
   Server.CloseWindow <$> anyByte
 
 parsePluginMessage :: Parser Server.Packet
 parsePluginMessage = do
-  try (specificVarInt 0x09) <?> "Packet Id 0x09"
+  specificVarInt 0x09 <?> "Packet Id 0x09"
   Server.PluginMessage
     <$> parseVarString
     <*> (BS.pack <$> many anyByte) <* eof
 
 parseKeepAlive :: Parser Server.Packet
 parseKeepAlive  = do
-  try (specificVarInt 0x0B) <?> "Packet Id 0x0B"
+  specificVarInt 0x0B <?> "Packet Id 0x0B"
   Server.KeepAlive <$> parseVarInt
 
 parsePlayerPosition :: Parser Server.Packet
 parsePlayerPosition = do
-  try (specificVarInt 0x0C) <?> "Packet Id 0x0C"
+  specificVarInt 0x0C <?> "Packet Id 0x0C"
   Server.PlayerPosition
     <$> ((,,) <$> parseDouble <*> parseDouble <*> parseDouble)
     <*> parseBool
 
 parsePlayerPositionAndLook :: Parser Server.Packet
 parsePlayerPositionAndLook = do
-  try (specificVarInt 0x0D) <?> "Packet Id 0x0D"
-  Server.PlayerPositionAndLook 
+  specificVarInt 0x0D <?> "Packet Id 0x0D"
+  Server.PlayerPositionAndLook
     <$> ((,,) <$> parseDouble <*> parseDouble <*> parseDouble)
     <*> ((,) <$> parseFloat <*> parseFloat)
     <*> parseBool
 
 parsePlayerLook :: Parser Server.Packet
 parsePlayerLook = do
-  try (specificVarInt 0x0E) <?> "Packet Id 0x0E"
-  Server.PlayerLook 
+  specificVarInt 0x0E <?> "Packet Id 0x0E"
+  Server.PlayerLook
     <$> ((,) <$> parseFloat <*> parseFloat)
     <*> parseBool
 
 parsePlayer :: Parser Server.Packet
 parsePlayer = do
-  try (specificVarInt 0x0F) <?> "Packet Id 0x0F"
+  specificVarInt 0x0F <?> "Packet Id 0x0F"
   Server.Player <$> parseBool
 
 parsePlayerDigging :: Parser Server.Packet
 parsePlayerDigging = do
-  try (specificVarInt 0x13) <?> "Packet Id 0x13"
-  Server.PlayerDigging
-    <$> parseVarInt
-    <*> parseBlockCoord
-    <*> anyByte
+  specificVarInt 0x13 <?> "Packet Id 0x13"
+  Server.PlayerDigging <$> choice
+    [specificVarInt 0x00 *> (StartDig <$> parseBlockCoord <*> parseBlockFace)
+    ,specificVarInt 0x01 *> (StopDig <$> parseBlockCoord <*> parseBlockFace)
+    ,specificVarInt 0x02 *> (EndDig <$> parseBlockCoord <*> parseBlockFace)
+    ,specificVarInt 0x03 *> trashExtra (pure (DropItem True))
+    ,specificVarInt 0x04 *> trashExtra (pure (DropItem False))
+    ,specificVarInt 0x05 *> trashExtra (pure ShootArrowOrFinishEating)
+    ,specificVarInt 0x06 *> trashExtra (pure SwapHands)
+    ]
+  where
+    trashExtra = (<*(parseBlockCoord <* parseBlockFace))
 
 parseEntityAction :: Parser Server.Packet
 parseEntityAction = do
-  try (specificVarInt 0x14) <?> "Packet Id 0x14"
-  Server.EntityAction
-    <$> parseVarInt
-    <*> parseVarInt
-    <*> parseVarInt
+  specificVarInt 0x14 <?> "Packet Id 0x14"
+  Server.EntityAction <$> parseVarInt <*> choice
+    [specificVarInt 0x00 *> pure (Sneak True)
+    ,specificVarInt 0x01 *> pure (Sneak False)
+    ,specificVarInt 0x02 *> pure LeaveBed
+    ,specificVarInt 0x03 *> pure (Sprint True)
+    ,specificVarInt 0x04 *> pure (Sprint False)
+    ,specificVarInt 0x05 *> (HorseJump True <$> parseVarInt)
+    ,specificVarInt 0x06 *> (HorseJump False <$> parseVarInt)
+    ,specificVarInt 0x07 *> pure HorseInventory
+    ,specificVarInt 0x08 *> pure ElytraFly
+    ]
 
 parseHeldItemChange :: Parser Server.Packet
 parseHeldItemChange = do
-  try (specificVarInt 0x17) <?> "Packet Id 0x17"
+  specificVarInt 0x17 <?> "Packet Id 0x17"
   Server.HeldItemChange <$> parseShort
 
 parseCreativeInventoryAction :: Parser Server.Packet
 parseCreativeInventoryAction = do
-  try (specificVarInt 0x18) <?> "Packet Id 0x18"
+  specificVarInt 0x18 <?> "Packet Id 0x18"
   Server.CreativeInventoryAction <$> parseShort <*> parseSlot
 
 parseAnimation :: Parser Server.Packet
 parseAnimation = do
-  try (specificVarInt 0x1A) <?> "Packet Id 0x1A"
-  Server.Animation <$> parseVarInt
+  specificVarInt 0x1A <?> "Packet Id 0x1A"
+  Server.Animation <$> choice
+    [specificVarInt 0x00 *> return (SwingHand MainHand)
+    ,specificVarInt 0x01 *> return TakeDamage
+    ,specificVarInt 0x02 *> return LeaveBedAnimation
+    ,specificVarInt 0x03 *> return (SwingHand OffHand)
+    ,specificVarInt 0x04 *> return (Critical False)
+    ,specificVarInt 0x05 *> return (Critical True)
+    ]
 
 parsePlayerBlockPlacement :: Parser Server.Packet
 parsePlayerBlockPlacement = do
-  try (specificVarInt 0x1C) <?> "Packet Id 0x1C"
+  specificVarInt 0x1C <?> "Packet Id 0x1C"
   Server.PlayerBlockPlacement
     <$> parseBlockCoord
-    <*> parseVarInt
-    <*> parseVarInt
+    <*> parseBlockFace
+    <*> parseHand
     <*> ((,,) <$> parseFloat <*> parseFloat <*> parseFloat)
 
 parseUseItem :: Parser Server.Packet
 parseUseItem = do
-  try (specificVarInt 0x1D) <?> "Packet Id 0x1D"
-  Server.UseItem <$> parseVarInt
+  specificVarInt 0x1D <?> "Packet Id 0x1D"
+  Server.UseItem <$> parseHand
+
+parseHand :: Parser Hand
+parseHand = (specificVarInt 0x01 *> pure OffHand) <|> (specificVarInt 0x00 *> pure MainHand)
+
+parseBlockFace :: Parser BlockFace
+parseBlockFace = choice
+  [specificByte 0x00 *> pure Bottom
+  ,specificByte 0x01 *> pure Top
+  ,specificByte 0x02 *> pure North
+  ,specificByte 0x03 *> pure South
+  ,specificByte 0x04 *> pure West
+  ,specificByte 0x05 *> pure East
+  ]
 
 parseVarString :: Parser String
 parseVarString = do
@@ -201,8 +254,8 @@ parseSlot = try emptySlot <|> nonEmptySlot
       guard $ bid == -1
       return EmptySlot
     nonEmptySlot = do
-      bid <- parseShort 
-      cnt <- anyByte 
+      bid <- parseShort
+      cnt <- anyByte
       dmg <- parseShort
       nbtFlair <- anyByte
       case nbtFlair of
@@ -225,7 +278,6 @@ parseBlockCoord = do
   where
     u = unsafeCoerce :: Int64 -> Int
 
-
 parseShort :: Parser Int16
 parseShort = do
   firstByte <- (unsafeCoerce :: Word8 -> Int16) <$> anyByte
@@ -244,17 +296,22 @@ parseVarInt = do
   let thisPart = (unsafeCoerce :: Word8 -> VarInt) (clearBit b 7)
   if testBit b 7
     then do
-      nb <- parseVarInt 
+      nb <- parseVarInt
       return $ thisPart .|. (shiftL nb 7)
     else return thisPart
 
 specificVarInt :: VarInt -> Parser ()
-specificVarInt v = do
+specificVarInt v = try $ do
   v' <- parseVarInt
-  guard (v == v') <?> show v
+  guard (v == v') <?> ("VarInt " ++ show v)
+
+specificByte :: Word8 -> Parser ()
+specificByte v = try $ do
+  v' <- anyByte
+  guard (v == v') <?> ("Byte " ++ show v)
 
 parseBool :: Parser Bool
-parseBool = (try (specificVarInt 0x00) *> pure False) <|> (specificVarInt 0x01 *> pure True)
+parseBool = (specificVarInt 0x00 *> pure False) <|> (specificVarInt 0x01 *> pure True)
 
 parseLong :: Parser Int64
 parseLong = do

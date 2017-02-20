@@ -1,15 +1,18 @@
 {-# LANGUAGE BinaryLiterals #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-module Clientbound where
+module Civskell.Packet.Clientbound where
 
 import Data.Int
 import Data.Semigroup
 import Data.Word
 import Data.Maybe
+import Data.Bits
 import Data.List (genericLength)
 import qualified Data.ByteString as BS
+import Crypto.Hash (hash,Digest,SHA1)
+import Numeric (showHex)
 import Data.NBT
-import Data
+import Civskell.Data.Types
 
 data Packet
   -- Login
@@ -35,7 +38,7 @@ data Packet
   | SpawnGlobalEntity VarInt Word8 (Double,Double,Double)
   -- EID, UUID, Type, x, y, z, yaw, pitch, head pitch, velx, vely, velz, Metadata
   | SpawnMob VarInt String VarInt (Double,Double,Double) Word8 Word8 Word8 Short Short Short -- Metadata NYI
-  -- EID, UUID, Title, Location, 
+  -- EID, UUID, Title, Location,
   | SpawnPainting VarInt String String {-Position NYI-} Word8
   -- EID, UUID, x, y, z, yaw, pitch, metadata
   | SpawnPlayer VarInt String (Double,Double,Double) Word8 Word8 -- Metadata NYI
@@ -98,13 +101,13 @@ data Packet
   -- Particle
   -- | Particle
   -- EID, Gamemode (Enum), Dimension (Enum), Difficulty (Enum), Max Players (deprecated), Level Type, reduce debug info?
-  | JoinGame Int32 Word8 Int32 Word8 Word8 String Bool
+  | JoinGame Int32 Gamemode Int32 Word8 Word8 String Bool
   -- Flags bitfield, fly speed, fov modifier
   | PlayerAbilities Word8 Float Float
   -- x,y,z, yaw,pitch, relativity flags, TPconfirm Id
   | PlayerPositionAndLook (Double,Double,Double) (Float,Float) Word8 VarInt
   -- Block pos of player spawn
-  | SpawnPosition BlockCoord deriving Show
+  | SpawnPosition BlockCoord
 
 -- All packets have their length and pktId annotated
 instance Serialize Packet where
@@ -117,7 +120,7 @@ instance Serialize Packet where
     -- Status
     (StatusResponse s) -> serialize s
     (StatusPong l) -> serialize l
-    -- Play 
+    -- Play
     (SpawnObject _ _ _ _ _ _ _ _ _) -> BS.singleton 0x00
     (SpawnExpOrb _ _ _) -> BS.singleton 0x00
     (SpawnGlobalEntity _ _ _) -> BS.singleton 0x00
@@ -140,7 +143,7 @@ instance Serialize Packet where
     (OpenWindow _ _ _ _ _) -> BS.singleton 0x00
     (WindowItems winId slots) -> serialize winId <> serialize (genericLength slots :: Int16) <> BS.concat (map serialize slots)
     (WindowProperty _ _ _) -> BS.singleton 0x00
-    (SetSlot _ _ _) -> BS.singleton 0x00
+    (SetSlot wid slotNum slot) -> serialize wid <> serialize slotNum <> serialize slot
     (SetCooldown _ _) -> BS.singleton 0x00
     (PluginMessage str bs) -> serialize str <> bs
     (NamedSoundEffect _ _ _ _ _) -> BS.singleton 0x00
@@ -148,7 +151,7 @@ instance Serialize Packet where
     (EntityStatus _ _) -> BS.singleton 0x00
     (Explosion _ _ _ _) -> BS.singleton 0x00
     (UnloadChunk _) -> BS.singleton 0x00
-    (ChangeGameState _ _) -> BS.singleton 0x00
+    (ChangeGameState r v) -> serialize r <> serialize v
     (KeepAlive kid) -> serialize kid
     (ChunkData (cx,cz) guCont bitMask chunkSecs mBiomes blockEnts) -> serialize cx <> serialize cz <> serialize guCont <> serialize bitMask <> withLength (BS.concat $ (map serialize chunkSecs) ++ maybeToList mBiomes) <> withListLength blockEnts
     (Effect _ _ _ _) -> BS.singleton 0x00
@@ -306,4 +309,62 @@ instance PacketId Packet where
     (PlayerAbilities _ _ _) -> Playing
     (PlayerPositionAndLook _ _ _ _) -> Playing
     (SpawnPosition _) -> Playing
-    
+
+instance Show Packet where
+  show pkt = formatPacket (packetName pkt) $ case pkt of
+    -- Login
+    (Disconnect reason) -> [("Reason",reason)]
+    (EncryptionRequest sId pubKey vt) -> [("Server Id",sId),("Public Key Hash",(take 7 $ show (hash pubKey :: Digest SHA1)) ++ "..."),("Verify Token","0x" ++ (flip showHex "" =<< BS.unpack vt))]
+    (LoginSuccess uuid name) -> [("UUID",uuid),("Username",name)]
+    (SetCompression thresh) -> [("Compresion Threshold",show thresh)]
+    -- Status
+    (StatusResponse statusJSON) -> [("Status JSON",statusJSON)]
+    (StatusPong pongTok) -> [("Pong Token","0x" ++  showHex pongTok "")]
+    -- Play
+    (SpawnObject _ _ _ _ _ _ _ _ _) -> []
+    (SpawnExpOrb _ _ _) -> []
+    (SpawnGlobalEntity _ _ _) -> []
+    (SpawnMob _ _ _ _ _ _ _ _ _ _) -> []
+    (SpawnPainting _ _ _ {-NYI-} _) -> []
+    (SpawnPlayer _ _ _ _ _ {-Metadata NYI-}) -> []
+    (Animation _ _) -> []
+    (Statistics _) -> []
+    (BlockBreakAnimation _ _ _) -> []
+    (UpdateBlockEntity _ _ _) -> []
+    (BlockAction _ _ _) -> []
+    (BlockChange _ _) -> []
+    (BossBar _ {- BossBarAction NYI -}) -> []
+    (ServerDifficulty dif) -> [("Difficulty",show dif)]
+    (TabComplete _) -> []
+    (ChatMessage _ _) -> []
+    (MultiBlockChange _ _) -> []
+    (ConfirmTransaction _ _ _) -> []
+    (CloseWindow _) -> []
+    (OpenWindow _ _ _ _ _) -> []
+    (WindowItems wid slots) -> [("Window Id",show wid),("Slot Count",show (length slots))]
+    (WindowProperty _ _ _) -> []
+    (SetSlot wid slotNum slot) -> [("Window Id",show wid),("Slot Number",show slotNum),("Slot Data",show slot)]
+    (SetCooldown _ _) -> []
+    (PluginMessage chan msg) -> [("Plugin Channel",chan),("Message","0x" ++ (flip showHex "" =<< BS.unpack msg))]
+    (NamedSoundEffect _ _ _ _ _) -> []
+    (DisconnectPlay _) -> []
+    (EntityStatus _ _) -> []
+    (Explosion _ _ _ _) -> []
+    (UnloadChunk _) -> []
+    (ChangeGameState _ _) -> []
+    (KeepAlive _) -> []
+    (ChunkData (cx,cz) guCont _bitMask cs _mBio _nbt) -> [("Column",show (cx,cz))] ++ (if guCont then [("Full Chunk","")] else []) ++ [("Section Count",show (length cs))]
+    (Effect _ _ _ _) -> []
+    (JoinGame eid gm dim dif maxP lvl reduce) -> [("Entity Id",show eid),("Gamemode", show gm),("Dimension",show dim),("Difficulty",show dif),("Max Players",show maxP),("Level Type",lvl)] ++ if reduce then [("Reduce Debug Info","")] else []
+    (PlayerAbilities flags flySpeed fovMod) -> [("Flags",show flags),("Fly Speed",show flySpeed),("FOV Modifier",show fovMod)]
+    (PlayerPositionAndLook (x,y,z) (yaw,pitch) rel tid) ->
+      [("X",r 1 (show x))
+      ,("Y",r 2 (show y))
+      ,("Z",r 3 (show z))
+      ,("Yaw",r 4 (show yaw))
+      ,("Pitch",r 5 (show pitch))
+      ,("Teleport Id", show tid)
+      ]
+      where
+        r b = if testBit rel b then ("~" ++) else id
+    (SpawnPosition block) -> [("Spawn",show block)]

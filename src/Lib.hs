@@ -6,9 +6,11 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Lib where
 
+import Control.Concurrent.MVar
 import Control.Concurrent
 import Network
 import System.IO
+import System.Exit
 import qualified Crypto.PubKey.RSA.PKCS15 as RSA
 import qualified Crypto.PubKey.RSA as RSA
 import qualified Data.ByteString as BS
@@ -17,19 +19,32 @@ import Control.Monad
 import qualified Data.Map.Lazy as Map
 import Data.Bits
 
-import CivNetwork
-import Data
-import Encrypt
-import qualified Clientbound as Client
-import qualified Serverbound as Server
+import Civskell.Tech.Network
+import Civskell.Tech.Encrypt
+
+import Civskell.Data.Types
+import Civskell.Data.Player
+import Civskell.Data.World
+import Civskell.Data.Logging
+
+import qualified Civskell.Packet.Clientbound as Client
+import qualified Civskell.Packet.Serverbound as Server
 
 -- Send new connections to connLoop, and listen on 25565
 -- Note for testing: Use virtualbox port forwarding to test locally
 startListening :: IO ()
-startListening = connLoop =<< listenOn (PortNumber 25565)
+startListening = do
+  wor <- newMVar initWorld
+  _ <- forkIO (connLoop wor =<< listenOn (PortNumber 25565))
+  terminal
 
-connLoop :: Socket -> IO ()
-connLoop sock = do
+terminal :: IO ()
+terminal = do
+  l <- getLine
+  if l == "quit" then exitSuccess else terminal
+
+connLoop :: MVar WorldData -> Socket -> IO ()
+connLoop wor sock = do
   -- accept is what waits for a new connection
   (handle, cliHost, cliPort) <- accept sock
   -- Log that we got a connection
@@ -37,14 +52,14 @@ connLoop sock = do
   -- Don't line buffer the network
   hSetBuffering handle NoBuffering
   -- We don't need the thread id
-  _ <- forkIO (runM $ runLogger $ runNetworking Nothing Nothing handle $ initWorld $ connHandler)
+  _ <- forkIO (runM $ runLogger $ runNetworking Nothing Nothing handle $ runWorld wor $ connHandler)
   -- Wait for another connection
-  connLoop sock
+  connLoop wor sock
 
-connHandler :: (HasLogging r,HasIO r,HasNetworking r,HasWorld r) => Eff r () 
+connHandler :: (HasLogging r,HasIO r,HasNetworking r,HasWorld r) => Eff r ()
 connHandler = do
   -- Get a packet from the client (should be a handshake)
-  mHandshake <- getPacket Handshaking 
+  mHandshake <- getPacket Handshaking
   maybe (logg "WTF no packet? REEEEEEEEEEEEE") handleHandshake mHandshake
 
 handleHandshake :: (HasLogging r,HasIO r,HasNetworking r,HasWorld r) => Server.Packet -> Eff r ()
@@ -57,9 +72,9 @@ handleHandshake (Server.Handshake protocol addr port newstate) = do
   logg $ "  Next State: " ++ (case newstate of {1 -> "Status"; 2 -> "Login"; _ -> "Invalid"})
   case newstate of
     -- 1 for status
-    1 -> statusMode 
+    1 -> statusMode
     -- 2 for login
-    2 -> initiateLogin 
+    2 -> initiateLogin
     -- otherwise invalid TODO: This is invalid because it might have asked for status and fucked up, but this is only valid if it asks for login
     _ -> sendPacket (Client.Disconnect (jsonyText "Invalid Continuation State"))
 -- Non-handshake (this is an error)
@@ -68,7 +83,6 @@ handleHandshake pkt = do
   logLevel ErrorLog $ "Unexpected non-handshake packet with Id: " ++ show (packetId pkt)
   -- Tell client to fuck off because they gave us a bad packet
   sendPacket (Client.Disconnect (jsonyText "Bad Packet D:"))
-
 
 checkVTandSS :: RSA.PrivateKey -> BS.ByteString -> BS.ByteString -> BS.ByteString -> Either String BS.ByteString
 checkVTandSS priv vtFromClient ssFromClient actualVT = do
@@ -127,6 +141,7 @@ authPhase name hash = do
     Just (uuid,nameFromAuth) -> do
       -- Tell the client to compress starting now. Agressive for testing
       -- EDIT: setting this to 3 gave us a bad frame exception :S
+      -- TODO: merge this packet into `setCompression`
       sendPacket (Client.SetCompression 16)
       setCompression $ Just 16
       -- Send a login success. We are now in play mode
@@ -136,9 +151,9 @@ authPhase name hash = do
 
 -- Start Play Mode, where we have just sent "Login Success"
 startPlaying :: (HasWorld r, HasLogging r, HasNetworking r) => Eff r ()
-startPlaying = do
+startPlaying = initPlayer $ do
   -- EID, Gamemode (Enum), Dimension (Enum), Difficulty (Enum), Max Players (deprecated), Level Type, reduce debug info?
-  sendPacket (Client.JoinGame 0 0x01 0 0x00 0x00 "default" False)
+  sendPacket (Client.JoinGame 0 Survival 0 0x00 0x00 "default" False)
   -- Tell them we aren't vanilla so no one gets mad at mojang for our fuck ups
   sendPacket (Client.PluginMessage "MC|Brand" (serialize "civskell"))
   -- Difficulty to peacful
@@ -149,15 +164,16 @@ startPlaying = do
   sendPacket (Client.PlayerAbilities 0x00 0.0 1.0)
   -- 0 is player inventory
   sendPacket (Client.WindowItems 0 (replicate 40 EmptySlot ++ [Slot 1 5 0 Nothing] ++ replicate 4 EmptySlot))
+  setInventorySlot 4 (Slot 1 5 0 Nothing)
   -- Send initial world
   forM_ [0..48] $ \x -> do
     let (cx,cz) = (fromIntegral $ (x `mod` 7)-3,fromIntegral $ (x `div` 7)-3)
-    forM_ [0..7] $ \v -> 
+    forM_ [0..7] $ \v ->
       setChunk exampleChunk (ChunkCoord (cx,v,cz))
-    forM_ [8..15] $ \v -> 
+    forM_ [8..15] $ \v ->
       setChunk emptyChunk (ChunkCoord (cx,v,cz))
     sendCol ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
-  initPlayer packetLoop
+  packetLoop
 
 sendChunk :: (HasWorld r, HasNetworking r, HasLogging r) => ChunkCoord -> Eff r ()
 sendChunk cc@(ChunkCoord (x,y,z)) = do
@@ -187,8 +203,10 @@ exampleChunk = ChunkSection $ Map.fromList [(BlockCoord (x,y,z),stone) | x <- [0
 
 packetLoop :: (HasPlayer r, HasLogging r, HasNetworking r, HasWorld r) => Eff r ()
 packetLoop = do
-  mPkt <- getPacket Playing 
-  maybe (logLevel ErrorLog "Failed to parse incoming packet") gotPacket mPkt 
+  mPkt <- getPacket Playing
+  c <- getBlock (BlockCoord (0,128,0))
+  logg $ show c
+  maybe (logLevel ErrorLog "Failed to parse incoming packet") gotPacket mPkt
   packetLoop
 
 gotPacket :: (HasPlayer r, HasLogging r, HasNetworking r, HasWorld r) => Server.Packet -> Eff r ()
@@ -197,28 +215,24 @@ gotPacket (Server.PluginMessage "MC|Brand" cliBrand) = do
   setBrand $ show (BS.tail cliBrand)
 gotPacket (Server.ClientSettings loc viewDist chatMode chatColors skin hand) = do
   logg $ "Client Settings:"
-  logg $ "  Locale: " ++ loc 
-  logg $ "  View Distance: " ++ show viewDist 
-  logg $ "  Chat Mode: " ++ show chatMode 
-  logg $ "  Chat colors enabled: " ++ show chatColors 
-  logg $ "  Skin bitmask: " ++ show skin 
+  logg $ "  Locale: " ++ loc
+  logg $ "  View Distance: " ++ show viewDist
+  logg $ "  Chat Mode: " ++ show chatMode
+  logg $ "  Chat colors enabled: " ++ show chatColors
+  logg $ "  Skin bitmask: " ++ show skin
   logg $ "  Main Hand: " ++ show hand
   -- 0x00 means all absolute, 0x01 is tp confirm Id
   let tid = 0x01
-  sendPacket (Client.PlayerPositionAndLook (1.0,200.0,1.0) (0.0,0.0) 0x00 tid)
-  pendTeleport tid
+  -- This is sent in `pendTeleport` now
+  --sendPacket (Client.PlayerPositionAndLook (1.0,130.0,1.0) (0.0,0.0) 0x00 tid)
+  pendTeleport (1.0,130.0,1.0) (0.0,0.0) 0x00 tid
   logg $ "Teleport with id " ++ show tid ++ " pending"
 gotPacket (Server.TPConfirm tid) = do
   c <- clearTeleport tid
   if c
     then logg $ "Client confirms teleport with id: " ++ show tid
     else logg $ "Client provided bad teleport id: " ++ show tid
-gotPacket (Server.Animation _) = do
-  logg "Sending keep alive"
-  sendPacket (Client.KeepAlive 5)
-  pendKeepAlive 5
-  -- Player EID is 0; mc encoding is retarded, don't ask me why off hand is 3
-  --sendPacket (Client.Animation 0 (case hand of {0 -> 0; 1 -> 3}))
+gotPacket (Server.Animation _anim) = return ()
 gotPacket (Server.HeldItemChange slotNum) = do
   logg $ "Player is holding slot number " ++ show slotNum
   setHolding slotNum
@@ -226,19 +240,23 @@ gotPacket (Server.ClientStatus _status) = return ()
   --logg $ "Client Status is: " ++ (case status of {0 -> "Perform Respawn"; 1 -> "Request Stats"; 2 -> "Open Inventory"})
 gotPacket (Server.CreativeInventoryAction slotNum slotDat) = do
   logg $ "Player creatively set slot " ++ show slotNum ++ " to {" ++ show slotDat ++ "}"
+  setInventorySlot (clientToCivskellSlot slotNum) slotDat
 gotPacket (Server.KeepAlive kid) = do
   c <- clearKeepAlive kid
   if c
     then logg $ "Player sent keep alive pong with id: " ++ show kid
     else logg $ "Player sent bad keep alive id: " ++ show kid
 gotPacket (Server.PlayerPosition (x,y,z) grounded) = do
+  logg "Sending keep alive"
+  sendPacket (Client.KeepAlive 5)
+  pendKeepAlive 5
   setPlayerPos (x,y,z)
   logLevel VerboseLog $ "Player is at " ++ show (x,y,z)
   logLevel VerboseLog $ if grounded then "Player is on the ground" else "Player is not on the ground"
 gotPacket (Server.PlayerPositionAndLook (x,y,z) (yaw,pitch) grounded) = do
   setPlayerPos (x,y,z)
   setPlayerViewAngle (yaw,pitch)
-  logLevel VerboseLog $ "Player is at " ++ show (x,y,z) 
+  logLevel VerboseLog $ "Player is at " ++ show (x,y,z)
   logLevel VerboseLog $ "Player is looking to " ++ show (yaw,pitch)
   logLevel VerboseLog $ if grounded then "Player is on the ground" else "Player is not on the ground"
 gotPacket (Server.PlayerLook (y,p) grounded) = do
@@ -249,21 +267,133 @@ gotPacket (Server.Player grounded) = do
   logLevel VerboseLog $ if grounded then "Player is on the ground" else "Player is not on the ground"
 gotPacket (Server.CloseWindow wid) = do
   logg $ "Player is closing a window with id: " ++ show wid
-gotPacket (Server.ChatMessage msg) = do
-  logg $ "Player said: " ++ msg
-gotPacket (Server.PlayerDigging action block _side) = case action of
-  0 -> do
+gotPacket (Server.ChatMessage msg) = case msg of
+  "/gamemode 1" -> do
+    setGamemode Creative
+    sendPacket (Client.ChangeGameState 3 1)
+  "/gamemode 0" -> do
+    setGamemode Survival
+    sendPacket (Client.ChangeGameState 3 0)
+  _ -> logg $ "Player said: " ++ msg
+gotPacket p@(Server.PlayerDigging action) = case action of
+  StartDig block _side -> do
     logg $ "Player started digging block: " ++ show block
+    -- Instant Dig
     sendPacket (Client.BlockChange block (BlockState 0 0))
     removeBlock block
-  1 -> logg $ "Player stopped digging block: " ++ show block
-  2 -> logg $ "Player finished digging block: " ++ show block
-  3 -> logg "Player dropped held item (stack)"
-  4 -> logg "Player dropped held item (single)"
-  5 -> logg "Player shot an arrow *OR* is finished eating"
-  6 -> logg "Player Swapped the items in their hands"
-  _ -> logLevel ErrorLog $ "Unsupported Player Digging action: " ++ show action
+  SwapHands -> do
+    logg $ "Player is swapping their hands"
+    heldSlot <- getHolding
+    heldItem <- getInventorySlot heldSlot
+    offItem <- getInventorySlot 45
+    setInventorySlot heldSlot offItem
+    sendPacket (Client.SetSlot 0 (civskellToClientSlot heldSlot) offItem)
+    setInventorySlot 45 heldItem
+    sendPacket (Client.SetSlot 0 (civskellToClientSlot 45) heldItem)
+  _ -> logLevel ErrorLog $ "Unhandled Player Dig Action: " ++ show p
+gotPacket (Server.PlayerBlockPlacement block side hand _cursorCoord) = do
+  logg $ "Player is placing a block"
+  heldSlot <- if hand == MainHand then getHolding else pure 45
+  heldItem <- getInventorySlot heldSlot
+  logg $ "Slot " ++ show heldSlot ++ " is " ++ show heldItem
+  case heldItem of
+    EmptySlot -> logg "Player is tring to place air"
+    Slot bid count dmg nbt -> do
+      -- Remove item from inventory
+      let newSlot = if count == 1 then EmptySlot else (Slot bid (count - 1) dmg nbt)
+      setInventorySlot heldSlot newSlot
+      sendPacket (Client.SetSlot 0 (civskellToClientSlot heldSlot) newSlot)
+      let blockDmg = 0
+      setBlock (blockOnSide block side) (BlockState bid blockDmg)
+      sendPacket (Client.BlockChange (blockOnSide block side) (BlockState bid blockDmg))
+  -- WId SlotNum "Button" TransactionId InventoryMode ItemInSlot
+gotPacket (Server.ClickWindow wid slotNum _transId mode _slot) = if wid /= 0 then logLevel ErrorLog "Non-player inventories not supported" else case mode of
+  -- TODO: optimize and combine cases; right-click usually just means to move one item, but we consider it an entirely separate case here
+  NormalClick rClick -> do
+    actualSlot <- getInventorySlot (clientToCivskellSlot slotNum)
+    currHeld <- getInventorySlot (-1)
+    case actualSlot of
+      EmptySlot -> case currHeld of
+        -- Both empty -> No-op
+        EmptySlot -> pure ()
+        -- Putting something in an empty slot
+        Slot currbid currcount currdmg currnbt -> if rClick 
+          then do
+            let newHeld = if currcount == 1 then EmptySlot else Slot currbid (currcount - 1) currdmg currnbt
+            setInventorySlot (-1) newHeld
+            sendPacket (Client.SetSlot 0 (-1) newHeld)
+            let placed = Slot currbid 1 currdmg currnbt
+            setInventorySlot (clientToCivskellSlot slotNum) placed
+            sendPacket (Client.SetSlot 0 slotNum placed)
+          else do
+            setInventorySlot (-1) EmptySlot
+            sendPacket (Client.SetSlot 0 (-1) EmptySlot)
+            setInventorySlot (clientToCivskellSlot slotNum) currHeld
+            sendPacket (Client.SetSlot 0 slotNum currHeld)
+      Slot actbid actcount actdmg actnbt -> case currHeld of
+        -- Picking something up into an empty hand
+        EmptySlot -> if rClick
+          then do
+            let picked = Slot actbid (actcount - (actcount `div` 2)) actdmg actnbt
+            setInventorySlot (-1) picked
+            sendPacket (Client.SetSlot 0 (-1) picked)
+            let left = Slot actbid (actcount `div` 2) actdmg actnbt
+            setInventorySlot (clientToCivskellSlot slotNum) left
+            sendPacket (Client.SetSlot 0 slotNum left)
+          else do
+            setInventorySlot (-1) actualSlot
+            sendPacket (Client.SetSlot 0 (-1) actualSlot)
+            setInventorySlot (clientToCivskellSlot slotNum) EmptySlot
+            sendPacket (Client.SetSlot 0 slotNum EmptySlot)
+        -- Two item stacks interacting
+        Slot currbid currcount currdmg currnbt -> if currbid == actbid && currdmg == actdmg && currnbt == actnbt
+          -- Like stacks; combine
+          then if rClick 
+            then if currcount + 1 > 64
+              then pure ()
+              else do
+                setInventorySlot (clientToCivskellSlot slotNum) (Slot actbid (actcount + 1) actdmg actnbt)
+                sendPacket (Client.SetSlot 0 slotNum (Slot actbid (actcount + 1) actdmg actnbt))
+                let stillHeld = if currcount == 1 then EmptySlot else Slot currbid (currcount - 1) currdmg currnbt
+                setInventorySlot (-1) stillHeld
+                sendPacket (Client.SetSlot 0 (-1) stillHeld)
+            else if currcount + actcount > 64 
+              then do
+                let delta = 64 - actcount
+                setInventorySlot (-1) (Slot currbid (currcount - delta) currdmg currnbt)
+                sendPacket (Client.SetSlot 0 (-1) (Slot currbid (currcount - delta) currdmg currnbt))
+                setInventorySlot (clientToCivskellSlot slotNum) (Slot actbid 64 actdmg actnbt)
+                sendPacket (Client.SetSlot 0 slotNum (Slot actbid 64 actdmg actnbt))
+              else do
+                setInventorySlot (-1) EmptySlot
+                sendPacket (Client.SetSlot 0 (-1) EmptySlot)
+                setInventorySlot (clientToCivskellSlot slotNum) (Slot actbid (currcount + actcount) actdmg actnbt)
+                sendPacket (Client.SetSlot 0 slotNum (Slot actbid (currcount + actcount) actdmg actnbt))
+          -- Unlike stacks; swap
+          else do
+            setInventorySlot (-1) actualSlot
+            sendPacket (Client.SetSlot 0 (-1) actualSlot)
+            setInventorySlot (clientToCivskellSlot slotNum) currHeld
+            sendPacket (Client.SetSlot 0 slotNum currHeld)
+  -- Right click is exactly the same as left
+  ShiftClick _rClick -> pure ()
+  NumberKey _num -> pure ()
+  MiddleClick -> pure ()
+  ItemDropOut _isStack -> pure ()
+  -- "Painting" mode
+  PaintingMode _mode -> logLevel ErrorLog "Painting mode not supported"
+  -- Double click
+  DoubleClick -> logLevel ErrorLog "Double click not supported"
+
 gotPacket a = logLevel ErrorLog $ "Unsupported packet: " ++ show a
+
+blockOnSide :: BlockCoord -> BlockFace -> BlockCoord
+blockOnSide (BlockCoord (x,y,z)) Bottom = BlockCoord (x,y-1,z)
+blockOnSide (BlockCoord (x,y,z)) Top = BlockCoord (x,y+1,z)
+blockOnSide (BlockCoord (x,y,z)) North = BlockCoord (x,y,z-1)
+blockOnSide (BlockCoord (x,y,z)) South = BlockCoord (x,y,z+1)
+blockOnSide (BlockCoord (x,y,z)) West = BlockCoord (x-1,y,z)
+blockOnSide (BlockCoord (x,y,z)) East = BlockCoord (x+1,y,z)
 
 -- Do the login process
 initiateLogin :: (HasIO r,HasLogging r,HasNetworking r,HasWorld r) => Eff r ()

@@ -1,5 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
-module Encrypt where
+module Civskell.Tech.Encrypt where
 
 import Data.Bits
 import Data.Semigroup
@@ -13,11 +13,11 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8
 import Control.Eff
 
-import Data
+import Civskell.Data.Types
 
 -- 128 is 128 bytes, so 1024 bit key
 getAKeypair :: HasIO r => Eff r (RSA.PublicKey,RSA.PrivateKey)
-getAKeypair = liftIO $ RSA.generate 128 65537 
+getAKeypair = liftIO $ RSA.generate 128 65537
 
 -- Observe the cancer, but don't touch it or you'll contract it.
 encodePubKey :: RSA.PublicKey -> BS.ByteString
@@ -48,8 +48,8 @@ encodePubKey k = asnSequence <> withLengthAsn (algIdentifier <> pubKeyBitstring)
     -- MSB is set ^     ^two more bytes
     lenOf bs = if BS.length bs < 128
       then BS.singleton . fromIntegral . BS.length $ bs
-      else 
-        let b = (intBytesRaw . fromIntegral . BS.length $ bs) 
+      else
+        let b = (intBytesRaw . fromIntegral . BS.length $ bs)
         in (0x80 .|. (fromIntegral . BS.length $ b)) `BS.cons` b
     -- A thing and its length
     withLengthAsn a = lenOf a <> a
@@ -76,14 +76,14 @@ intBytesRaw :: Integer -> BS.ByteString
 intBytesRaw = BS.reverse . BS.unfoldr (\i -> if i == 0 then Nothing else Just $ (fromIntegral i, shiftR i 8))
 
 -- unIntBytesRaw gets the Integer represented by a BS
-unIntBytesRaw :: BS.ByteString -> Integer 
+unIntBytesRaw :: BS.ByteString -> Integer
 unIntBytesRaw = BS.foldr' (\b i -> shiftL i 8 + fromIntegral b) 0 . BS.reverse
 
 makeEncrypter :: BS.ByteString -> AES128
 makeEncrypter ss = throwCryptoError $ cipherInit ss
 
 cfb8Encrypt :: AES128 -> BS.ByteString -> BS.ByteString -> (BS.ByteString,BS.ByteString)
-cfb8Encrypt c i = BS.foldl magic (BS.empty,i) 
+cfb8Encrypt c i = BS.foldl magic (BS.empty,i)
   where
     -- Does a single step (one byte) of a CFB8 encryption
     -- add the cipher text to the output, and return the updated shift register
@@ -103,18 +103,15 @@ cfb8Decrypt c i = BS.foldl magic (BS.empty,i)
         -- snoc on cipher always
         ivFinal = BS.tail iv `BS.snoc` d
 
-
 --bsFoldlM :: Monad m => (b -> Word8 -> m b) -> b -> BS.ByteString -> m b
 --bsFoldlM f i bs = BS.foldr f' return bs i
   --where f' x k z = f z x >>= k
-
-
 
 --semCipherEncrypt :: BS.ByteString -> BS.ByteString -> BS.ByteString
 
 -- Get a login hash from a sId, shared secret, and public key
 genLoginHash :: String -> BS.ByteString -> BS.ByteString -> String
-genLoginHash sId ss pubKey = 
+genLoginHash sId ss pubKey =
   -- bit 159 (0-indexed from right) is the negativity bit
   if testBit theHashInt 159
     -- If its negative, then do the reverse two's comp. and add a negative sign

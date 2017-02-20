@@ -1,1 +1,1 @@
-stack build --pedantic
+stack build --pedantic --file-watch

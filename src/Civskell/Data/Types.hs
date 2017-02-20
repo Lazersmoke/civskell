@@ -44,26 +44,48 @@ type Short = Int16
 
 type PlayerId = Int
 
+liftIO :: HasIO r => IO a -> Eff r a
+liftIO = send
+
 type HasIO = Member IO
-type HasNetworking = Member Networking
-type HasLogging = Member Logging
-type HasPlayer = Member Player
-type HasWorld = Member World
 -- Cipher, Enc, Dec
 type EncryptionCouplet = (AES128, BS.ByteString, BS.ByteString)
 
 -- Enums for parsing, etc
-data Side = Server | Client
+data Side = Server | Client deriving Show
 
-data ServerState = Handshaking | Playing | LoggingIn | Status
+data ServerState = Handshaking | Playing | LoggingIn | Status deriving Show
 
-data Gamemode = Creative
+data Gamemode = Survival | Creative deriving Show
 
-newtype BlockCoord = BlockCoord (Int,Int,Int) deriving Eq
+instance Serialize Gamemode where
+  serialize Survival = BS.singleton 0x00
+  serialize Creative = BS.singleton 0x01
+
+data Hand = MainHand | OffHand deriving (Show,Eq,Enum)
+
+data AnimationAction = SwingHand Hand | Critical Bool | TakeDamage | LeaveBedAnimation deriving Show
+
+data PlayerDigAction = StartDig BlockCoord BlockFace | StopDig BlockCoord BlockFace | EndDig BlockCoord BlockFace | DropItem Bool | ShootArrowOrFinishEating | SwapHands deriving (Show,Eq)
+
+data PlayerEntityAction = Sneak Bool | Sprint Bool | HorseJump Bool VarInt | LeaveBed | ElytraFly | HorseInventory
+
+data BlockFace = Bottom | Top | North | South | West | East deriving (Show,Eq)
+
+data InventoryClickMode = NormalClick Bool | ShiftClick Bool | NumberKey Word8 | MiddleClick | ItemDropOut Bool | PaintingMode Word8 | DoubleClick deriving (Show,Eq)
+
+data MoveMode = Sprinting | Sneaking | Walking deriving (Show,Eq)
+
+newtype BlockBreak = BlockBreak Word8 deriving (Show,Eq)
+
+newtype BlockCoord = BlockCoord (Int,Int,Int) deriving (Eq)
+
 instance Show BlockCoord where
   show (BlockCoord (x,y,z)) = "(Block)<" ++ show x ++ "," ++ show y ++ "," ++ show z ++ ">"
+
 instance Ord BlockCoord where
   compare a@(BlockCoord (xa,ya,za)) b@(BlockCoord (xb,yb,zb)) = if a == b then EQ else if yb > ya then GT else if zb > za then GT else if xb > xa then GT else LT
+
 newtype ChunkCoord = ChunkCoord (Int,Int,Int) deriving (Eq,Ord)
 instance Show ChunkCoord where
   show (ChunkCoord (x,y,z)) = "(Chunk)<" ++ show x ++ "," ++ show y ++ "," ++ show z ++ ">"
@@ -111,9 +133,10 @@ instance Serialize Slot where
   serialize (Slot bid count dmg Nothing) = serialize bid <> serialize count <> serialize dmg <> BS.singleton 0x00
 
 instance Serialize BlockState where
-  serialize (BlockState bid dmg) = BS.pack [u (shiftR bid 4),u (shiftL bid 4) .|. dmg]
+  serialize (BlockState bid dmg) = serialize $ shiftL (u bid) 4 .|. (v dmg .&. 0x0f)
     where
-      u = unsafeCoerce :: Short -> Word8
+      u = unsafeCoerce :: Short -> VarInt
+      v = unsafeCoerce :: Word8 -> VarInt
 
 instance Serialize ChunkSection where
   serialize (ChunkSection bs) = serialize bitsPerBlock <> sPalette <> sData <> lights <> lights
@@ -122,14 +145,17 @@ instance Serialize ChunkSection where
       bitsPerBlock = 13 :: VarInt
       --palette = nub dataArray
       sPalette = BS.singleton 0x00 -- withLength $ sBlockStates palette
-      blockStateList = map snd (Map.toList bs)
+      blockStateList = Map.elems (Map.union bs airChunk)
       dataArray = blockStateList -- map ((\(Just a) -> a) . flip elemIndex palette . fst) bs
       sArray = LBS.toStrict . longChunks . BB.toLazyByteString $ sBlockStates dataArray
       sData = serialize (fromIntegral (BS.length sArray) `div` 8 :: VarInt) <> sArray
       writeDat :: [Word8] -> BB.BitBuilder
       writeDat (x:y:xs) = writeDat xs `BB.append` BB.fromBits 4 y `BB.append` BB.fromBits 4 x
       writeDat [] = BB.empty
-      writeDat (_:[]) = error "Bad chunksection block list size"
+      writeDat (_:[]) = error $ "Bad chunksection block list size: " ++ show (Map.size $ Map.union bs airChunk) ++ " | " ++ show (Map.union bs airChunk)
+
+airChunk :: Map BlockCoord BlockState
+airChunk = Map.fromList [(BlockCoord (x,y,z),BlockState 0 0) | x <- [0..15], y <- [0..15], z <- [0..15]]
 
 -- Mojang felt like packing chunks into arrays of longs lol
 longChunks :: LBS.ByteString -> LBS.ByteString
@@ -178,11 +204,80 @@ instance Serialize Double where
   serialize = serialize . (unsafeCoerce :: Double -> Int64)
 
 instance Serialize BlockCoord where
-  serialize (BlockCoord (x,y,z)) = serialize $ 
-    (shiftL (u x .&. 0x3FFFFFF) 38) .|. 
+  serialize (BlockCoord (x,y,z)) = serialize $
+    (shiftL (u x .&. 0x3FFFFFF) 38) .|.
     (shiftL (u y .&. 0xFFF) 26) .|.
     (u z .&. 0x3FFFFFF)
     where
       u = unsafeCoerce :: Int -> Int64
 
+type HasNetworking = Member Networking
 
+data Networking a where
+  SetCompressionLevel :: Maybe VarInt -> Networking ()
+  AddCompression :: BS.ByteString -> Networking BS.ByteString
+  RemoveCompression :: BS.ByteString -> Networking BS.ByteString
+  SetupEncryption :: EncryptionCouplet -> Networking ()
+  GetFromNetwork :: Int -> Networking BS.ByteString
+  PutIntoNetwork :: BS.ByteString -> Networking ()
+
+rGet :: HasNetworking n => Int -> Eff n BS.ByteString
+rGet = send . GetFromNetwork
+
+rPut :: HasNetworking n => BS.ByteString -> Eff n ()
+rPut = send . PutIntoNetwork
+
+setupEncryption :: HasNetworking n => EncryptionCouplet -> Eff n ()
+setupEncryption = send . SetupEncryption
+
+setCompression :: HasNetworking n => Maybe VarInt -> Eff n ()
+setCompression = send . SetCompressionLevel
+
+addCompression :: HasNetworking n => BS.ByteString -> Eff n BS.ByteString
+addCompression = send . AddCompression
+
+removeCompression :: HasNetworking n => BS.ByteString -> Eff n BS.ByteString
+removeCompression = send . RemoveCompression
+
+formatPacket :: String -> [(String,String)] -> String
+formatPacket n [] = "{" ++ n ++ "}"
+formatPacket n xs = flip (++) "]" . (++) ("{" ++ n ++ "} [") . intercalate " | " . map (\(name,val) -> if val == "" then name else name ++ ": " ++ val) $ xs
+
+-- Annotate a BS with its length as a VarInt
+withLength :: BS.ByteString -> BS.ByteString
+withLength bs = serialize ((fromIntegral $ BS.length bs) :: VarInt) <> bs
+
+withListLength :: Serialize s => [s] -> BS.ByteString
+withListLength ls = serialize ((fromIntegral $ length ls) :: VarInt) <> BS.concat (map serialize ls)
+
+data PlayerInfo = PlayerInfo
+  {teleportConfirmationQue :: Set.Set VarInt
+  ,keepAliveQue :: Set.Set VarInt
+  ,clientBrand :: Maybe String
+  ,holdingSlot :: Short
+  ,playerPosition :: (Double,Double,Double)
+  ,viewAngle :: (Float,Float)
+  ,gameMode :: Gamemode
+  ,playerInventory :: Map Short Slot
+  ,diggingBlocks :: Map BlockCoord BlockBreak
+  ,moveMode :: MoveMode
+  }
+
+defaultPlayerInfo :: PlayerInfo
+defaultPlayerInfo = PlayerInfo
+  {teleportConfirmationQue = Set.empty
+  ,keepAliveQue = Set.empty
+  ,clientBrand = Nothing
+  ,holdingSlot = 0
+  ,playerPosition = (0,0,0)
+  ,viewAngle = (0,0)
+  ,gameMode = Survival
+  ,playerInventory = Map.empty
+  ,diggingBlocks = Map.empty
+  ,moveMode = Walking
+  }
+
+data WorldData = WorldData {chunks :: Map ChunkCoord ChunkSection, players :: Map PlayerId PlayerInfo, nextPlayerId :: PlayerId, chatLog :: [String]}
+
+initWorld :: WorldData
+initWorld = WorldData {chunks = Map.empty,players = Map.empty, nextPlayerId = 0, chatLog = []}

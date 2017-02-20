@@ -2,7 +2,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
-module CivNetwork where
+module Civskell.Tech.Network where
 
 import Data.Bits
 import Data.Word
@@ -20,11 +20,12 @@ import Control.Eff
 import qualified Codec.Compression.Zlib as Z
 import Data.Semigroup
 
-import Data
-import ParseBS
-import qualified Serverbound as Server
-import qualified Clientbound as Client
-import Encrypt
+import Civskell.Data.Types
+import Civskell.Tech.Parse
+import Civskell.Data.Logging
+import qualified Civskell.Packet.Serverbound as Server
+import qualified Civskell.Packet.Clientbound as Client
+import Civskell.Tech.Encrypt
 
 -- Send something serializeable over the network
 sendPacket :: (HasLogging r,HasNetworking r) => Client.Packet -> Eff r ()
@@ -42,7 +43,7 @@ getPacket st = do
   pkt <- removeCompression =<< getRawPacket
   -- parse it
   case parse (parsePacket st) "" pkt of
-    -- If it parsed ok, then 
+    -- If it parsed ok, then
     Right serverPkt -> do
       -- return it
       -- TODO: make this a debugmode only putStrLn
@@ -62,7 +63,7 @@ getPacket st = do
 getRawPacket :: (HasNetworking r) => Eff r BS.ByteString
 getRawPacket = do
   -- Get the length it should be
-  (l,lbs) <- getPacketLength 
+  (l,lbs) <- getPacketLength
   -- Get (length) bytes more for the rest of the packet
   pktData <- rGet (fromIntegral l)
   -- Return the actual data (no length annotation, but yes pktId)
@@ -80,7 +81,7 @@ getPacketLength = do
   if testBit l 7
     then do
       -- get the rest of the bytes recursively
-      (next,bs) <- getPacketLength 
+      (next,bs) <- getPacketLength
       -- return after shifting everything into place
       return $ (thisPart .|. (shiftL next 7),l `BS.cons` bs)
     -- If its not set, then this is the last byte, so we return thisPart
@@ -129,7 +130,7 @@ parseAuthJSON = do
 
 runNetworking :: HasIO r => Maybe EncryptionCouplet -> Maybe VarInt -> Handle -> Eff (Networking ': r) a -> Eff r a
 runNetworking _ _ _ (Pure x) = Pure x
-runNetworking mEnc mThresh hdl (Eff u q) = case u of 
+runNetworking mEnc mThresh hdl (Eff u q) = case u of
   Weaken restOfU -> Eff restOfU (Singleton (runNetworking mEnc mThresh hdl . runTCQ q))
   Inject (GetFromNetwork len) -> do
     case mEnc of
