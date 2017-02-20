@@ -57,7 +57,7 @@ data Packet
   -- UUID, Action (from enum)
   | BossBar String {- BossBarAction NYI -}
   -- Difficulty (0-3)
-  | ServerDifficulty Word8
+  | ServerDifficulty Difficulty
   -- List of matches for tab completion. Prefixed with length when sent
   | TabComplete [String]
   -- JSON chat string, place to appear in (0:chatbox,1:sys msg. chatbox,2:hotbar)
@@ -91,7 +91,7 @@ data Packet
   -- Chunk X, Chunk Z
   | UnloadChunk (Int32,Int32)
   -- Reason (Enum), Value (from Enum)
-  | ChangeGameState Word8 Float
+  | ChangeGameState GameStateChange
   -- Random Id <-- Prevents Timeout
   | KeepAlive VarInt
   -- Chunk X, Chunk Z, Full Chunk?, Bitmask of slices present, [Chunk Section], optional: 256 byte array of biome data, [Block entity NBT tag]
@@ -101,7 +101,7 @@ data Packet
   -- Particle
   -- | Particle
   -- EID, Gamemode (Enum), Dimension (Enum), Difficulty (Enum), Max Players (deprecated), Level Type, reduce debug info?
-  | JoinGame Int32 Gamemode Int32 Word8 Word8 String Bool
+  | JoinGame Int32 Gamemode Int32 Difficulty Word8 String Bool
   -- Flags bitfield, fly speed, fov modifier
   | PlayerAbilities Word8 Float Float
   -- x,y,z, yaw,pitch, relativity flags, TPconfirm Id
@@ -134,7 +134,7 @@ instance Serialize Packet where
     (BlockAction _ _ _) -> BS.singleton 0x00
     (BlockChange block bs) -> serialize block <> serialize bs
     (BossBar _ {- BossBarAction NYI -}) -> BS.singleton 0x00
-    (ServerDifficulty dif) -> BS.singleton dif
+    (ServerDifficulty dif) -> serialize dif
     (TabComplete _) -> BS.singleton 0x00
     (ChatMessage _ _) -> BS.singleton 0x00
     (MultiBlockChange _ _) -> BS.singleton 0x00
@@ -151,7 +151,15 @@ instance Serialize Packet where
     (EntityStatus _ _) -> BS.singleton 0x00
     (Explosion _ _ _ _) -> BS.singleton 0x00
     (UnloadChunk _) -> BS.singleton 0x00
-    (ChangeGameState r v) -> serialize r <> serialize v
+    (ChangeGameState InvalidBed) -> BS.singleton 0x00 <> serialize (0 :: Float)
+    (ChangeGameState (Raining isStarting)) -> BS.singleton (if isStarting then 0x01 else 0x02) <> serialize (0 :: Float)
+    (ChangeGameState (ChangeGamemode g)) -> BS.singleton 0x03 <> serialize (case g of {Survival -> 0; Creative -> 1;} :: Float)
+    (ChangeGameState (ExitTheEnd showCredits)) -> BS.singleton 0x04 <> if showCredits then serialize (1 :: Float) else serialize (0 :: Float)
+    (ChangeGameState DemoMessage) -> BS.singleton 0x05 <> serialize (0 :: Float)
+    (ChangeGameState ArrowHitOtherPlayer) -> BS.singleton 0x06 <> serialize (0 :: Float)
+    (ChangeGameState (FadeValue f)) -> BS.singleton 0x07 <> serialize f
+    (ChangeGameState (FadeTime f)) -> BS.singleton 0x08 <> serialize f
+    (ChangeGameState ElderGuardian) -> BS.singleton 0x09 <> serialize (0 :: Float)
     (KeepAlive kid) -> serialize kid
     (ChunkData (cx,cz) guCont bitMask chunkSecs mBiomes blockEnts) -> serialize cx <> serialize cz <> serialize guCont <> serialize bitMask <> withLength (BS.concat $ (map serialize chunkSecs) ++ maybeToList mBiomes) <> withListLength blockEnts
     (Effect _ _ _ _) -> BS.singleton 0x00
@@ -203,7 +211,7 @@ instance PacketId Packet where
     (EntityStatus _ _) -> "EntityStatus"
     (Explosion _ _ _ _) -> "Explosion"
     (UnloadChunk _) -> "UnloadChunk"
-    (ChangeGameState _ _) -> "ChangeGameState"
+    (ChangeGameState _) -> "ChangeGameState"
     (KeepAlive _) -> "KeepAlive"
     (ChunkData _ _ _ _ _ _) -> "ChunkData"
     (Effect _ _ _ _) -> "Effect"
@@ -252,7 +260,7 @@ instance PacketId Packet where
     (EntityStatus _ _) -> 0x1B
     (Explosion _ _ _ _) -> 0x1C
     (UnloadChunk _) -> 0x1D
-    (ChangeGameState _ _) -> 0x1E
+    (ChangeGameState _) -> 0x1E
     (KeepAlive _) -> 0x1F
     (ChunkData _ _ _ _ _ _) -> 0x20
     (Effect _ _ _ _) -> 0x21
@@ -301,7 +309,7 @@ instance PacketId Packet where
     (EntityStatus _ _) -> Playing
     (Explosion _ _ _ _) -> Playing
     (UnloadChunk _) -> Playing
-    (ChangeGameState _ _) -> Playing
+    (ChangeGameState _) -> Playing
     (KeepAlive _) -> Playing
     (ChunkData _ _ _ _ _ _) -> Playing
     (Effect _ _ _ _) -> Playing
@@ -332,7 +340,7 @@ instance Show Packet where
     (BlockBreakAnimation _ _ _) -> []
     (UpdateBlockEntity _ _ _) -> []
     (BlockAction _ _ _) -> []
-    (BlockChange _ _) -> []
+    (BlockChange bc bs) -> [("Block",show bc),("New State",show bs)]
     (BossBar _ {- BossBarAction NYI -}) -> []
     (ServerDifficulty dif) -> [("Difficulty",show dif)]
     (TabComplete _) -> []
@@ -351,9 +359,9 @@ instance Show Packet where
     (EntityStatus _ _) -> []
     (Explosion _ _ _ _) -> []
     (UnloadChunk _) -> []
-    (ChangeGameState _ _) -> []
+    (ChangeGameState _) -> []
     (KeepAlive _) -> []
-    (ChunkData (cx,cz) guCont _bitMask cs _mBio _nbt) -> [("Column",show (cx,cz))] ++ (if guCont then [("Full Chunk","")] else []) ++ [("Section Count",show (length cs))]
+    (ChunkData (cx,cz) guCont bitMask cs _mBio _nbt) -> [("Column",show (cx,cz)),("Bit Mask",show bitMask)] ++ (if guCont then [("Full Chunk","")] else []) ++ [("Section Count",show (length cs))]
     (Effect _ _ _ _) -> []
     (JoinGame eid gm dim dif maxP lvl reduce) -> [("Entity Id",show eid),("Gamemode", show gm),("Dimension",show dim),("Difficulty",show dif),("Max Players",show maxP),("Level Type",lvl)] ++ if reduce then [("Reduce Debug Info","")] else []
     (PlayerAbilities flags flySpeed fovMod) -> [("Flags",show flags),("Fly Speed",show flySpeed),("FOV Modifier",show fovMod)]

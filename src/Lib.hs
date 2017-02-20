@@ -153,27 +153,24 @@ authPhase name hash = do
 startPlaying :: (HasWorld r, HasLogging r, HasNetworking r) => Eff r ()
 startPlaying = initPlayer $ do
   -- EID, Gamemode (Enum), Dimension (Enum), Difficulty (Enum), Max Players (deprecated), Level Type, reduce debug info?
-  sendPacket (Client.JoinGame 0 Survival 0 0x00 0x00 "default" False)
+  sendPacket (Client.JoinGame 0 Survival 0 Peaceful 100 "default" False)
   -- Tell them we aren't vanilla so no one gets mad at mojang for our fuck ups
   sendPacket (Client.PluginMessage "MC|Brand" (serialize "civskell"))
   -- Difficulty to peacful
-  sendPacket (Client.ServerDifficulty 0x00)
+  sendPacket (Client.ServerDifficulty Peaceful)
   -- Home spawn position
   sendPacket (Client.SpawnPosition (BlockCoord (0,64,0)))
   -- Player Abilities
   sendPacket (Client.PlayerAbilities 0x00 0.0 1.0)
-  -- 0 is player inventory
-  sendPacket (Client.WindowItems 0 (replicate 40 EmptySlot ++ [Slot 1 5 0 Nothing] ++ replicate 4 EmptySlot))
-  setInventorySlot 4 (Slot 1 5 0 Nothing)
   -- Send initial world
-  forM_ [0..48] $ \x -> do
-    let (cx,cz) = (fromIntegral $ (x `mod` 7)-3,fromIntegral $ (x `div` 7)-3)
-    forM_ [0..7] $ \v ->
-      setChunk exampleChunk (ChunkCoord (cx,v,cz))
-    forM_ [8..15] $ \v ->
-      setChunk emptyChunk (ChunkCoord (cx,v,cz))
-    sendCol ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
-  packetLoop
+  let exampleColumn = replicate 8 exampleChunk ++ replicate 8 emptyChunk
+  forM_ [0..48] $ \x -> setColumn exampleColumn ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
+  -- 0 is player inventory
+  flushInbox
+  do
+    sendPacket (Client.WindowItems 0 (replicate 45 EmptySlot))
+    setInventorySlot 4 (Slot 1 5 0 Nothing)
+    packetLoop
 
 sendChunk :: (HasWorld r, HasNetworking r, HasLogging r) => ChunkCoord -> Eff r ()
 sendChunk cc@(ChunkCoord (x,y,z)) = do
@@ -204,12 +201,11 @@ exampleChunk = ChunkSection $ Map.fromList [(BlockCoord (x,y,z),stone) | x <- [0
 packetLoop :: (HasPlayer r, HasLogging r, HasNetworking r, HasWorld r) => Eff r ()
 packetLoop = do
   mPkt <- getPacket Playing
-  c <- getBlock (BlockCoord (0,128,0))
-  logg $ show c
+  flushInbox
   maybe (logLevel ErrorLog "Failed to parse incoming packet") gotPacket mPkt
   packetLoop
 
-gotPacket :: (HasPlayer r, HasLogging r, HasNetworking r, HasWorld r) => Server.Packet -> Eff r ()
+gotPacket :: (HasPlayer r, HasLogging r, HasWorld r) => Server.Packet -> Eff r ()
 gotPacket (Server.PluginMessage "MC|Brand" cliBrand) = do
   --logg $ "Client brand is: " ++ show (BS.tail cliBrand)
   setBrand $ show (BS.tail cliBrand)
@@ -221,12 +217,9 @@ gotPacket (Server.ClientSettings loc viewDist chatMode chatColors skin hand) = d
   logg $ "  Chat colors enabled: " ++ show chatColors
   logg $ "  Skin bitmask: " ++ show skin
   logg $ "  Main Hand: " ++ show hand
-  -- 0x00 means all absolute, 0x01 is tp confirm Id
-  let tid = 0x01
-  -- This is sent in `pendTeleport` now
-  --sendPacket (Client.PlayerPositionAndLook (1.0,130.0,1.0) (0.0,0.0) 0x00 tid)
-  pendTeleport (1.0,130.0,1.0) (0.0,0.0) 0x00 tid
-  logg $ "Teleport with id " ++ show tid ++ " pending"
+  -- 0x00 means all absolute (It's a relativity flag bitfield)
+  pendTeleport (1.0,130.0,1.0) (0.0,0.0) 0x00
+  --logg $ "Teleport with id " ++ show tid ++ " pending"
 gotPacket (Server.TPConfirm tid) = do
   c <- clearTeleport tid
   if c
@@ -240,7 +233,8 @@ gotPacket (Server.ClientStatus _status) = return ()
   --logg $ "Client Status is: " ++ (case status of {0 -> "Perform Respawn"; 1 -> "Request Stats"; 2 -> "Open Inventory"})
 gotPacket (Server.CreativeInventoryAction slotNum slotDat) = do
   logg $ "Player creatively set slot " ++ show slotNum ++ " to {" ++ show slotDat ++ "}"
-  setInventorySlot (clientToCivskellSlot slotNum) slotDat
+  -- TODO: This will echo back a SetSlot packet, add another way to access the effect inventory
+  --setInventorySlot (clientToCivskellSlot slotNum) slotDat
 gotPacket (Server.KeepAlive kid) = do
   c <- clearKeepAlive kid
   if c
@@ -248,8 +242,8 @@ gotPacket (Server.KeepAlive kid) = do
     else logg $ "Player sent bad keep alive id: " ++ show kid
 gotPacket (Server.PlayerPosition (x,y,z) grounded) = do
   logg "Sending keep alive"
-  sendPacket (Client.KeepAlive 5)
-  pendKeepAlive 5
+  -- Counting is an effect
+  pendKeepAlive
   setPlayerPos (x,y,z)
   logLevel VerboseLog $ "Player is at " ++ show (x,y,z)
   logLevel VerboseLog $ if grounded then "Player is on the ground" else "Player is not on the ground"
@@ -268,18 +262,13 @@ gotPacket (Server.Player grounded) = do
 gotPacket (Server.CloseWindow wid) = do
   logg $ "Player is closing a window with id: " ++ show wid
 gotPacket (Server.ChatMessage msg) = case msg of
-  "/gamemode 1" -> do
-    setGamemode Creative
-    sendPacket (Client.ChangeGameState 3 1)
-  "/gamemode 0" -> do
-    setGamemode Survival
-    sendPacket (Client.ChangeGameState 3 0)
+  "/gamemode 1" -> setGamemode Creative
+  "/gamemode 0" -> setGamemode Survival
   _ -> logg $ "Player said: " ++ msg
 gotPacket p@(Server.PlayerDigging action) = case action of
   StartDig block _side -> do
     logg $ "Player started digging block: " ++ show block
     -- Instant Dig
-    sendPacket (Client.BlockChange block (BlockState 0 0))
     removeBlock block
   SwapHands -> do
     logg $ "Player is swapping their hands"
@@ -287,9 +276,7 @@ gotPacket p@(Server.PlayerDigging action) = case action of
     heldItem <- getInventorySlot heldSlot
     offItem <- getInventorySlot 45
     setInventorySlot heldSlot offItem
-    sendPacket (Client.SetSlot 0 (civskellToClientSlot heldSlot) offItem)
     setInventorySlot 45 heldItem
-    sendPacket (Client.SetSlot 0 (civskellToClientSlot 45) heldItem)
   _ -> logLevel ErrorLog $ "Unhandled Player Dig Action: " ++ show p
 gotPacket (Server.PlayerBlockPlacement block side hand _cursorCoord) = do
   logg $ "Player is placing a block"
@@ -302,10 +289,9 @@ gotPacket (Server.PlayerBlockPlacement block side hand _cursorCoord) = do
       -- Remove item from inventory
       let newSlot = if count == 1 then EmptySlot else (Slot bid (count - 1) dmg nbt)
       setInventorySlot heldSlot newSlot
-      sendPacket (Client.SetSlot 0 (civskellToClientSlot heldSlot) newSlot)
       let blockDmg = 0
-      setBlock (blockOnSide block side) (BlockState bid blockDmg)
-      sendPacket (Client.BlockChange (blockOnSide block side) (BlockState bid blockDmg))
+      -- Updates client as well
+      setBlock (BlockState bid blockDmg) (blockOnSide block side)
   -- WId SlotNum "Button" TransactionId InventoryMode ItemInSlot
 gotPacket (Server.ClickWindow wid slotNum _transId mode _slot) = if wid /= 0 then logLevel ErrorLog "Non-player inventories not supported" else case mode of
   -- TODO: optimize and combine cases; right-click usually just means to move one item, but we consider it an entirely separate case here
@@ -321,30 +307,22 @@ gotPacket (Server.ClickWindow wid slotNum _transId mode _slot) = if wid /= 0 the
           then do
             let newHeld = if currcount == 1 then EmptySlot else Slot currbid (currcount - 1) currdmg currnbt
             setInventorySlot (-1) newHeld
-            sendPacket (Client.SetSlot 0 (-1) newHeld)
             let placed = Slot currbid 1 currdmg currnbt
             setInventorySlot (clientToCivskellSlot slotNum) placed
-            sendPacket (Client.SetSlot 0 slotNum placed)
           else do
             setInventorySlot (-1) EmptySlot
-            sendPacket (Client.SetSlot 0 (-1) EmptySlot)
             setInventorySlot (clientToCivskellSlot slotNum) currHeld
-            sendPacket (Client.SetSlot 0 slotNum currHeld)
       Slot actbid actcount actdmg actnbt -> case currHeld of
         -- Picking something up into an empty hand
         EmptySlot -> if rClick
           then do
             let picked = Slot actbid (actcount - (actcount `div` 2)) actdmg actnbt
             setInventorySlot (-1) picked
-            sendPacket (Client.SetSlot 0 (-1) picked)
             let left = Slot actbid (actcount `div` 2) actdmg actnbt
             setInventorySlot (clientToCivskellSlot slotNum) left
-            sendPacket (Client.SetSlot 0 slotNum left)
           else do
             setInventorySlot (-1) actualSlot
-            sendPacket (Client.SetSlot 0 (-1) actualSlot)
             setInventorySlot (clientToCivskellSlot slotNum) EmptySlot
-            sendPacket (Client.SetSlot 0 slotNum EmptySlot)
         -- Two item stacks interacting
         Slot currbid currcount currdmg currnbt -> if currbid == actbid && currdmg == actdmg && currnbt == actnbt
           -- Like stacks; combine
@@ -353,28 +331,20 @@ gotPacket (Server.ClickWindow wid slotNum _transId mode _slot) = if wid /= 0 the
               then pure ()
               else do
                 setInventorySlot (clientToCivskellSlot slotNum) (Slot actbid (actcount + 1) actdmg actnbt)
-                sendPacket (Client.SetSlot 0 slotNum (Slot actbid (actcount + 1) actdmg actnbt))
                 let stillHeld = if currcount == 1 then EmptySlot else Slot currbid (currcount - 1) currdmg currnbt
                 setInventorySlot (-1) stillHeld
-                sendPacket (Client.SetSlot 0 (-1) stillHeld)
             else if currcount + actcount > 64 
               then do
                 let delta = 64 - actcount
                 setInventorySlot (-1) (Slot currbid (currcount - delta) currdmg currnbt)
-                sendPacket (Client.SetSlot 0 (-1) (Slot currbid (currcount - delta) currdmg currnbt))
                 setInventorySlot (clientToCivskellSlot slotNum) (Slot actbid 64 actdmg actnbt)
-                sendPacket (Client.SetSlot 0 slotNum (Slot actbid 64 actdmg actnbt))
               else do
                 setInventorySlot (-1) EmptySlot
-                sendPacket (Client.SetSlot 0 (-1) EmptySlot)
                 setInventorySlot (clientToCivskellSlot slotNum) (Slot actbid (currcount + actcount) actdmg actnbt)
-                sendPacket (Client.SetSlot 0 slotNum (Slot actbid (currcount + actcount) actdmg actnbt))
           -- Unlike stacks; swap
           else do
             setInventorySlot (-1) actualSlot
-            sendPacket (Client.SetSlot 0 (-1) actualSlot)
             setInventorySlot (clientToCivskellSlot slotNum) currHeld
-            sendPacket (Client.SetSlot 0 slotNum currHeld)
   -- Right click is exactly the same as left
   ShiftClick _rClick -> pure ()
   NumberKey _num -> pure ()

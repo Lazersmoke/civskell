@@ -62,6 +62,14 @@ instance Serialize Gamemode where
   serialize Survival = BS.singleton 0x00
   serialize Creative = BS.singleton 0x01
 
+data Difficulty = Peaceful | Easy | Normal | Hard deriving (Eq,Show)
+
+instance Serialize Difficulty where
+  serialize Peaceful = BS.singleton 0x00
+  serialize Easy = BS.singleton 0x01
+  serialize Normal = BS.singleton 0x02
+  serialize Hard = BS.singleton 0x03
+
 data Hand = MainHand | OffHand deriving (Show,Eq,Enum)
 
 data AnimationAction = SwingHand Hand | Critical Bool | TakeDamage | LeaveBedAnimation deriving Show
@@ -75,6 +83,8 @@ data BlockFace = Bottom | Top | North | South | West | East deriving (Show,Eq)
 data InventoryClickMode = NormalClick Bool | ShiftClick Bool | NumberKey Word8 | MiddleClick | ItemDropOut Bool | PaintingMode Word8 | DoubleClick deriving (Show,Eq)
 
 data MoveMode = Sprinting | Sneaking | Walking deriving (Show,Eq)
+
+data GameStateChange = InvalidBed | Raining Bool | ChangeGamemode Gamemode | ExitTheEnd Bool | DemoMessage | ArrowHitOtherPlayer | FadeValue Float | FadeTime Float | ElderGuardian
 
 newtype BlockBreak = BlockBreak Word8 deriving (Show,Eq)
 
@@ -117,7 +127,7 @@ data BlockState = BlockState Short Word8 deriving (Eq,Show)
 
 -- Things that can be serialized into a BS for the network
 -- Show req lets us print them if need be (might be removed later)
-class Show s => Serialize s where
+class {-Show s =>-} Serialize s where
   serialize :: s -> BS.ByteString
 
 -- Instances for Haskell types
@@ -252,7 +262,9 @@ withListLength ls = serialize ((fromIntegral $ length ls) :: VarInt) <> BS.conca
 
 data PlayerInfo = PlayerInfo
   {teleportConfirmationQue :: Set.Set VarInt
+  ,nextTid :: VarInt
   ,keepAliveQue :: Set.Set VarInt
+  ,nextKid :: VarInt
   ,clientBrand :: Maybe String
   ,holdingSlot :: Short
   ,playerPosition :: (Double,Double,Double)
@@ -266,7 +278,9 @@ data PlayerInfo = PlayerInfo
 defaultPlayerInfo :: PlayerInfo
 defaultPlayerInfo = PlayerInfo
   {teleportConfirmationQue = Set.empty
+  ,nextTid = 0
   ,keepAliveQue = Set.empty
+  ,nextKid = 0
   ,clientBrand = Nothing
   ,holdingSlot = 0
   ,playerPosition = (0,0,0)
@@ -277,7 +291,3 @@ defaultPlayerInfo = PlayerInfo
   ,moveMode = Walking
   }
 
-data WorldData = WorldData {chunks :: Map ChunkCoord ChunkSection, players :: Map PlayerId PlayerInfo, nextPlayerId :: PlayerId, chatLog :: [String]}
-
-initWorld :: WorldData
-initWorld = WorldData {chunks = Map.empty,players = Map.empty, nextPlayerId = 0, chatLog = []}
