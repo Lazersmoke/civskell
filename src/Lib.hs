@@ -184,10 +184,11 @@ sendChunk cc@(ChunkCoord (x,y,z)) = do
 sendCol :: (HasWorld r, HasNetworking r, HasLogging r) => (Int,Int) -> Maybe BS.ByteString -> Eff r ()
 sendCol (cx,cz) mbio = do
   cs <- forM [0..15] $ \cy -> getChunk (ChunkCoord (cx,cy,cz))
+  logg $ show $ map (not . isAirChunk) cs
   sendPacket (Client.ChunkData (fromIntegral cx,fromIntegral cz) True (bitMask cs) (filter (not . isAirChunk) cs) mbio [])
   where
     -- [Bool] -> VarInt basically
-    bitMask as = foldl (\i b -> fromBool b .|. shiftL i 1) 0 (map isAirChunk as)
+    bitMask as = foldr (\b i -> fromBool b .|. shiftL i 1) 0 (map (not . isAirChunk) as)
     fromBool True = 1
     fromBool False = 0
 
@@ -206,6 +207,8 @@ packetLoop :: (HasPlayer r, HasLogging r, HasNetworking r, HasWorld r) => Eff r 
 packetLoop = do
   mPkt <- getPacket Playing
   flushInbox
+  b <- getBlock (BlockCoord (0,125,0))
+  logg $ "Block: " ++ show b
   maybe (logLevel ErrorLog "Failed to parse incoming packet") gotPacket mPkt
   packetLoop
 
@@ -269,8 +272,6 @@ gotPacket (Server.ChatMessage msg) = case msg of
   "/gamemode 1" -> setGamemode Creative
   "/gamemode 0" -> setGamemode Survival
   "chunks" -> do
-    b <- getBlock (BlockCoord (0,125,0))
-    logg $ "Block: " ++ show b
     forM_ [0..48] $ \x -> sendCol ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
   _ -> do
     broadcastPacket (Client.ChatMessage (jsonyText msg) 0)

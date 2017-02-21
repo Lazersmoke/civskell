@@ -106,7 +106,7 @@ runWorld w' (Eff u q) = case u of
     runWorld w' (runTCQ q ())
     where
       -- [Bool] -> VarInt basically
-      bitMask as = foldl (\i b -> fromBool b .|. shiftL i 1) 0 (map isAirChunk as)
+      bitMask as = foldr (\b i -> fromBool b .|. shiftL i 1) 0 (map (not . isAirChunk) as)
       fromBool True = 1
       fromBool False = 0
       isAirChunk (ChunkSection m) = Map.null m
