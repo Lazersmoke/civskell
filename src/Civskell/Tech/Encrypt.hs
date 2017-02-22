@@ -1,23 +1,32 @@
 {-# LANGUAGE FlexibleContexts #-}
-module Civskell.Tech.Encrypt where
+module Civskell.Tech.Encrypt 
+  (getAKeypair
+  ,encodePubKey
+  ,checkVTandSS
+  ,genLoginHash
+  ,cfb8Encrypt,cfb8Decrypt
+  ,makeEncrypter
+  ) where
 
+import Control.Eff (Eff,send)
+import Crypto.Cipher.AES (AES128)
+import Crypto.Cipher.Types (ecbEncrypt,cipherInit)
+import Crypto.Error (throwCryptoError)
+import Crypto.Hash (SHA1,Context,hashInit,hashUpdates,hashFinalize)
 import Data.Bits
-import Data.Semigroup
+import Data.Semigroup ((<>))
+import Numeric (showHex,readHex)
 import qualified Crypto.PubKey.RSA as RSA
-import Numeric
-import Crypto.Hash
-import Crypto.Cipher.Types
-import Crypto.Cipher.AES
-import Crypto.Error
+import qualified Crypto.PubKey.RSA.PKCS15 as RSA
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8
-import Control.Eff
 
 import Civskell.Data.Types
 
 -- 128 is 128 bytes, so 1024 bit key
+-- We need to specify the type here because RSA.generate works in any MonadRandom
 getAKeypair :: HasIO r => Eff r (RSA.PublicKey,RSA.PrivateKey)
-getAKeypair = liftIO $ RSA.generate 128 65537
+getAKeypair = send (RSA.generate 128 65537 :: IO (RSA.PublicKey,RSA.PrivateKey))
 
 -- Observe the cancer, but don't touch it or you'll contract it.
 encodePubKey :: RSA.PublicKey -> BS.ByteString
@@ -76,8 +85,8 @@ intBytesRaw :: Integer -> BS.ByteString
 intBytesRaw = BS.reverse . BS.unfoldr (\i -> if i == 0 then Nothing else Just $ (fromIntegral i, shiftR i 8))
 
 -- unIntBytesRaw gets the Integer represented by a BS
-unIntBytesRaw :: BS.ByteString -> Integer
-unIntBytesRaw = BS.foldr' (\b i -> shiftL i 8 + fromIntegral b) 0 . BS.reverse
+--unIntBytesRaw :: BS.ByteString -> Integer
+--unIntBytesRaw = BS.foldr' (\b i -> shiftL i 8 + fromIntegral b) 0 . BS.reverse
 
 makeEncrypter :: BS.ByteString -> AES128
 makeEncrypter ss = throwCryptoError $ cipherInit ss
@@ -123,3 +132,22 @@ genLoginHash sId ss pubKey =
     theHashInt = fst . head . (readHex :: ReadS Integer) $ theHash
     -- the hash as a String of and SHA1 hash (this is the only way to export it)
     theHash = show . hashFinalize $ hashUpdates (hashInit :: Context SHA1) [Data.ByteString.UTF8.fromString sId,ss,pubKey]
+
+checkVTandSS :: RSA.PrivateKey -> BS.ByteString -> BS.ByteString -> BS.ByteString -> Either String BS.ByteString
+checkVTandSS priv vtFromClient ssFromClient actualVT = do
+  -- Try to decrypt their vt response
+  case RSA.decrypt Nothing priv vtFromClient of
+    -- If it fails, print the error
+    Left e -> Left $ "Failed to parse Verify Token: " ++ show e
+    -- If it decrypts properly, make sure it matches the original vt
+    Right vtHopefully -> if vtHopefully /= actualVT
+      -- If it isn't, error out with a Left
+      then Left "Invalid Verify Token"
+      -- If the verify token was ok, then decrypt the ss
+      else case RSA.decrypt Nothing priv ssFromClient of
+        -- If it fails to decrypt, error out with a Left
+        Left e -> Left $ "Failed to decrpyt Shared Secret: " ++ show e
+        -- If everything worked properly, then return the shared secret
+        Right ss -> Right ss
+
+

@@ -326,7 +326,8 @@ instance Show Packet where
     (LoginSuccess uuid name) -> [("UUID",uuid),("Username",name)]
     (SetCompression thresh) -> [("Compresion Threshold",show thresh)]
     -- Status
-    (StatusResponse statusJSON) -> [("Status JSON",statusJSON)]
+    -- Beware: statusJSON includes a base64 encoded png, so it is very very long
+    (StatusResponse _statusJSON) -> [("Status JSON","")]
     (StatusPong pongTok) -> [("Pong Token","0x" ++  showHex pongTok "")]
     -- Play
     (SpawnObject _ _ _ _ _ _ _ _ _) -> []

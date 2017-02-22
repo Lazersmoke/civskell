@@ -2,30 +2,31 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
-module Civskell.Tech.Network where
+module Civskell.Tech.Network 
+  (module Civskell.Data.Networking
+  ,sendPacket,getPacket,authGetReq
+  ) where
 
+import Control.Eff (Eff,send)
 import Data.Bits
-import Data.Word
-import Hexdump
-import System.IO
+import Data.Semigroup ((<>))
+import Data.Word (Word8)
+import Hexdump (prettyHex)
+import Network.HTTP.Client
+import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Text.Parsec
-import Unsafe.Coerce
+import Text.Parsec.ByteString (Parser)
+import Unsafe.Coerce (unsafeCoerce)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
-import Network.HTTP.Client.TLS (tlsManagerSettings)
-import Network.HTTP.Client
-import Text.Parsec.ByteString
 import qualified Text.Parsec.Char as C
-import Control.Eff
-import qualified Codec.Compression.Zlib as Z
-import Data.Semigroup
 
 import Civskell.Data.Types
 import Civskell.Tech.Parse
 import Civskell.Data.Logging
+import Civskell.Data.Networking
 import qualified Civskell.Packet.Serverbound as Server
 import qualified Civskell.Packet.Clientbound as Client
-import Civskell.Tech.Encrypt
 
 -- Send something serializeable over the network
 sendPacket :: (HasLogging r,HasNetworking r) => Client.Packet -> Eff r ()
@@ -99,11 +100,11 @@ indentedHex = shittyIndent . prettyHex
 authGetReq :: (HasLogging r,HasIO r) => String -> String -> Eff r (Maybe (String,String))
 authGetReq name hash = do
   -- use SSL
-  manager <- liftIO $ newManager tlsManagerSettings
+  manager <- send $ newManager tlsManagerSettings
   -- create the request, using sId and username from LoginStart
-  req <- liftIO $ parseRequest $ "https://sessionserver.mojang.com/session/minecraft/hasJoined?username=" ++ name ++ "&serverId=" ++ hash
+  req <- send $ (parseRequest :: String -> IO Request) $ "https://sessionserver.mojang.com/session/minecraft/hasJoined?username=" ++ name ++ "&serverId=" ++ hash
   -- actually make the request and store it
-  resp <- liftIO $ httpLbs req manager
+  resp <- send $ httpLbs req manager
   -- parse the response into something useful
   case parse parseAuthJSON "" (LBS.toStrict . responseBody $ resp) of
     Left e -> do
@@ -127,53 +128,3 @@ parseAuthJSON = do
     ins i s = let (a,b) = splitAt i s in a ++ "-" ++ b
     -- reformat the uuid to what the client expects
     reformat = ins 8 . ins 12 . ins 16 . ins 20
-
-runNetworking :: HasIO r => Maybe EncryptionCouplet -> Maybe VarInt -> Handle -> Eff (Networking ': r) a -> Eff r a
-runNetworking _ _ _ (Pure x) = Pure x
-runNetworking mEnc mThresh hdl (Eff u q) = case u of
-  Weaken restOfU -> Eff restOfU (Singleton (runNetworking mEnc mThresh hdl . runTCQ q))
-  Inject (GetFromNetwork len) -> do
-    case mEnc of
-      Nothing -> do
-        dat <- liftIO (BS.hGet hdl len)
-        runNetworking mEnc mThresh hdl (runTCQ q dat)
-      Just (c,e,d) -> do
-        bs <- liftIO (BS.hGet hdl len)
-        let (bs',d') = cfb8Decrypt c d bs
-        runNetworking (Just (c,e,d')) mThresh hdl (runTCQ q bs')
-  Inject (PutIntoNetwork bs) -> do
-    case mEnc of
-      Nothing -> do
-        liftIO (BS.hPut hdl bs)
-        runNetworking mEnc mThresh hdl (runTCQ q ())
-      Just (c,e,d) -> do
-        let (bs',e') = cfb8Encrypt c e bs
-        liftIO (BS.hPut hdl bs')
-        runNetworking (Just (c,e',d)) mThresh hdl (runTCQ q ())
-  Inject (SetCompressionLevel thresh) -> runNetworking mEnc thresh hdl (runTCQ q ())
-  Inject (SetupEncryption couplet) -> runNetworking (Just couplet) mThresh hdl (runTCQ q ())
-  Inject (AddCompression bs) -> case mThresh of
-    -- Do not compress; annotate with length only
-    Nothing -> runNetworking mEnc mThresh hdl (runTCQ q (withLength bs))
-    Just t -> if BS.length bs >= fromIntegral t
-      -- Compress data and annotate to match
-      then do
-        let compIdAndData = LBS.toStrict . Z.compress . LBS.fromStrict $ bs
-        let origSize = serialize $ ((fromIntegral (BS.length bs)) :: VarInt)
-        let ann = withLength (origSize <> compIdAndData)
-        runNetworking mEnc mThresh hdl (runTCQ q ann)
-      -- Do not compress; annotate with length only
-      else do
-        let ann = withLength (BS.singleton 0x00 <> bs)
-        runNetworking mEnc mThresh hdl (runTCQ q ann)
-  Inject (RemoveCompression bs) -> case mThresh of
-    Nothing -> case parse parseUncompPkt "" bs of
-      Left _ -> runNetworking mEnc mThresh hdl (runTCQ q bs)
-      Right pktData -> runNetworking mEnc mThresh hdl (runTCQ q pktData)
-    Just _ -> case parse parseCompPkt "" bs of
-      -- TODO: fix this
-      Left _ -> runNetworking mEnc mThresh hdl (runTCQ q bs)
-      Right (dataLen,compressedData) -> if dataLen == 0x00
-        then runNetworking mEnc mThresh hdl (runTCQ q compressedData)
-        else runNetworking mEnc mThresh hdl (runTCQ q (LBS.toStrict . Z.decompress . LBS.fromStrict $ compressedData))
-

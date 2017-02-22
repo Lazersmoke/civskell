@@ -3,9 +3,15 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
-module Civskell.Data.Logging where
+module Civskell.Data.Logging 
+  (logg,logLevel
+  ,LogLevel(..)
+  ,runLogger
+  ,HasLogging
+  ) where
 
 import Control.Eff
+
 import Civskell.Data.Types
 
 type HasLogging = Member Logging
@@ -26,22 +32,22 @@ runLogger (Pure x) = return x
 runLogger (Eff u q) = case u of
   Inject (LogString level str) -> case level of
     HexDump -> do
-      --liftIO (putStrLn str)
+      --send (putStrLn str)
       runLogger (runTCQ q ())
     ClientboundPacket -> do
-      liftIO (putStrLn ("[\x1b[32mSent\x1b[0m] " ++ str))
+      send (putStrLn ("[\x1b[32mSent\x1b[0m] " ++ str))
       runLogger (runTCQ q ())
     ServerboundPacket -> do
-      liftIO (putStrLn ("[\x1b[32mRecv\x1b[0m] " ++ str))
+      send (putStrLn ("[\x1b[32mRecv\x1b[0m] " ++ str))
       runLogger (runTCQ q ())
     ErrorLog -> do
-      liftIO (putStrLn $ "[\x1b[31mERROR\x1b[0m] " ++ str)
+      send (putStrLn $ "[\x1b[31mERROR\x1b[0m] " ++ str)
       runLogger (runTCQ q ())
     VerboseLog -> do
-      --liftIO (putStrLn $ "[\x1b[36mCivSkell/Verbose\x1b[0m] " ++ str)
+      --send (putStrLn $ "[\x1b[36mCivSkell/Verbose\x1b[0m] " ++ str)
       runLogger (runTCQ q ())
     NormalLog -> do
-      liftIO (putStrLn $ "[\x1b[36mCivSkell\x1b[0m] " ++ str)
+      send (putStrLn $ "[\x1b[36mCivSkell\x1b[0m] " ++ str)
       runLogger (runTCQ q ())
   Weaken otherEffects -> Eff otherEffects (Singleton (\x -> runLogger (runTCQ q x)))
 
