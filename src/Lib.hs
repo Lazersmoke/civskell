@@ -22,6 +22,7 @@ import Civskell.Data.Types
 import Civskell.Data.World
 import Civskell.Tech.Encrypt
 import Civskell.Tech.Network
+import Civskell.Tech.Serialization
 import qualified Civskell.Packet.Clientbound as Client
 import qualified Civskell.Packet.Serverbound as Server
 
@@ -75,6 +76,34 @@ handleHandshake (Server.Handshake protocol _addr _port newstate) = if fromIntegr
     _ -> return ()
   -- They are using the incorrect protocol version. Disconnect packet will probably work even if they have a different version.
   else sendPacket (Client.Disconnect (jsonyText $ "Unsupported protocol version. Please use " ++ show protocolVersion))
+-- Legacy response
+handleHandshake Server.LegacyHandshake = rPut $ BS.pack [0xFF,0x00,0x1b,0x00,0xa7
+  ,0x00,0x31 -- 1
+  ,0x00,0x00 -- Seperator
+  ,0x00,0x33 -- 3
+  ,0x00,0x31 -- 1
+  ,0x00,0x36 -- 6
+  ,0x00,0x00 -- Seperator
+  ,0x00,0x31 -- 1
+  ,0x00,0x2e -- .
+  ,0x00,0x31 -- 1
+  ,0x00,0x31 -- 1
+  ,0x00,0x2e -- .
+  ,0x00,0x32 -- 2
+  ,0x00,0x00 -- Seperator
+  ,0x00,0x43 -- C
+  ,0x00,0x69 -- i
+  ,0x00,0x76 -- v
+  ,0x00,0x73 -- s
+  ,0x00,0x6b -- k
+  ,0x00,0x65 -- e
+  ,0x00,0x6c -- l
+  ,0x00,0x6c -- l
+  ,0x00,0x00 -- Seperator
+  ,0x00,0x00 -- 0
+  ,0x00,0x00 -- Seperator
+  ,0x00,0x00 -- 0
+  ]
 -- If its not a handshake packet, Log to console that we have a bad packet
 -- Drop the connection by returning, since the client can't receive normal disconnect packets yet
 handleHandshake pkt = logLevel ErrorLog $ "Unexpected non-handshake packet with Id: " ++ show (packetId pkt)
@@ -151,8 +180,6 @@ startPlaying = do
   sendPacket (Client.PlayerAbilities 0x00 0.0 1.0)
   -- Send initial world. Need a 7x7 grid or the client gets angry with us
   forM_ [0..48] $ \x -> sendPacket =<< colPacket ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
-  -- Flush inbox right away so the player gets their chunks ASAP
-  flushInbox
   -- Send an initial blank inventory
   sendPacket (Client.WindowItems 0 (replicate 45 EmptySlot))
   -- Give them some stone (for testing)
@@ -162,35 +189,45 @@ startPlaying = do
 
 packetLoop :: (HasPlayer r,HasLogging r,HasNetworking r,HasWorld r) => Eff r ()
 packetLoop = do
-  mPkt <- getPacket Playing
-  flushInbox
-  maybe (logLevel ErrorLog "Failed to parse incoming packet") gotPacket mPkt
+  isPacketReady >>= \case
+    -- If there is a packet ready
+    True -> do
+      -- Get the packet and act on it
+      getPacket Playing >>= maybe (logLevel ErrorLog "Failed to parse incoming packet") gotPacket
+    -- Otherwise, just flush the inbox
+    False -> flushInbox
+  -- Either way, we recurse after we are done
   packetLoop
 
 gotPacket :: (HasNetworking r,HasPlayer r,HasLogging r,HasWorld r) => Server.Packet -> Eff r ()
 gotPacket (Server.PluginMessage "MC|Brand" cliBrand) = do
   setBrand $ show (BS.tail cliBrand)
-gotPacket (Server.ClientSettings _loc _viewDist _chatMode _chatColors _skin _hand) = do
-  -- Teleport the client when they send this packet because reasons
-  -- 0x00 means all absolute (It's a relativity flag bitfield)
-  pendTeleport (1.0,130.0,1.0) (0.0,0.0) 0x00
-gotPacket (Server.TPConfirm tid) = do
-  c <- clearTeleport tid
-  if c
-    then logg $ "Client confirms teleport with id: " ++ show tid
-    else logg $ "Client provided bad teleport id: " ++ show tid
+-- Teleport the client when they send this packet because reasons
+-- 0x00 means all absolute (It's a relativity flag bitfield)
+gotPacket (Server.ClientSettings _loc _viewDist _chatMode _chatColors _skin _hand) = pendTeleport (1.0,130.0,1.0) (0.0,0.0) 0x00
+-- Check the tid presented against all the tid's we have stored
+gotPacket (Server.TPConfirm tid) = clearTeleport tid >>= \case
+    -- If it's valid, say so
+    True -> logLevel VerboseLog $ "Client confirms teleport with id: " ++ show tid
+    -- If it's not, complain
+    False -> logLevel ErrorLog $ "Client provided bad teleport id: " ++ show tid
+-- Don't do anything about the spammy animation packets
 gotPacket (Server.Animation _anim) = return ()
+-- Update the slot they are holding in the player data
 gotPacket (Server.HeldItemChange slotNum) = setHolding slotNum
-gotPacket (Server.ClientStatus _status) = return ()
+gotPacket (Server.ClientStatus status) = case status of
+  PerformRespawn -> logg "Client wants to perform respawn"
+  RequestStats -> logg "Client requests stats"
+  OpenInventory -> logg "Client is opening their inventory"
+-- Clients handle all the dirty details such that this is just a "set slot" packet
 gotPacket (Server.CreativeInventoryAction slotNum slotDat) = do
   logg $ "Player creatively set slot " ++ show slotNum ++ " to {" ++ show slotDat ++ "}"
   -- TODO: This will echo back a SetSlot packet, add another way to access the effect inventory
+  -- Maybe that is ok? idk requires further testing to be sure
   setInventorySlot (clientToCivskellSlot slotNum) slotDat
-gotPacket (Server.KeepAlive kid) = do
-  c <- clearKeepAlive kid
-  if c
-    then logLevel VerboseLog $ "Player sent keep alive pong with id: " ++ show kid
-    else logg $ "Player sent bad keep alive id: " ++ show kid
+gotPacket (Server.KeepAlive kid) = clearKeepAlive kid >>= \case
+    True -> logLevel VerboseLog $ "Player sent keep alive pong with id: " ++ show kid
+    False -> logLevel ErrorLog $ "Player sent bad keep alive id: " ++ show kid
 gotPacket (Server.PlayerPosition (x,y,z) grounded) = do
   logLevel VerboseLog "Sending keep alive"
   -- Counting is an effect
@@ -252,59 +289,25 @@ gotPacket (Server.PlayerBlockPlacement block side hand _cursorCoord) = do
       -- Updates client as well
       -- TODO: map item damage to block damage somehow
       setBlock (BlockState bid 0) (blockOnSide block side)
-gotPacket (Server.ClickWindow wid slotNum _transId mode _slot) = if wid /= 0 then logLevel ErrorLog "Non-player inventories not supported" else case mode of
+gotPacket (Server.ClickWindow wid slotNum transId mode clientProvidedSlot) = if wid /= 0 then logLevel ErrorLog "Non-player inventories not supported" else case mode of
   -- TODO: optimize and combine cases; right-click usually just means to move one item, but we consider it an entirely separate case here
   NormalClick rClick -> do
-    actualSlot <- getInventorySlot (clientToCivskellSlot slotNum)
-    currHeld <- getInventorySlot (-1)
-    case actualSlot of
-      EmptySlot -> case currHeld of
-        -- Both empty -> No-op
-        EmptySlot -> pure ()
-        -- Putting something in an empty slot
-        Slot currbid currcount currdmg currnbt -> if rClick 
-          then do
-            let newHeld = if currcount == 1 then EmptySlot else Slot currbid (currcount - 1) currdmg currnbt
-            setInventorySlot (-1) newHeld
-            let placed = Slot currbid 1 currdmg currnbt
-            setInventorySlot (clientToCivskellSlot slotNum) placed
-          else do
-            setInventorySlot (-1) EmptySlot
-            setInventorySlot (clientToCivskellSlot slotNum) currHeld
-      Slot actbid actcount actdmg actnbt -> case currHeld of
-        -- Picking something up into an empty hand
-        EmptySlot -> if rClick
-          then do
-            let picked = Slot actbid (actcount - (actcount `div` 2)) actdmg actnbt
-            setInventorySlot (-1) picked
-            let left = Slot actbid (actcount `div` 2) actdmg actnbt
-            setInventorySlot (clientToCivskellSlot slotNum) left
-          else do
-            setInventorySlot (-1) actualSlot
-            setInventorySlot (clientToCivskellSlot slotNum) EmptySlot
-        -- Two item stacks interacting
-        Slot currbid currcount currdmg currnbt -> if currbid == actbid && currdmg == actdmg && currnbt == actnbt
-          -- Like stacks; combine
-          then if rClick 
-            then if currcount + 1 > 64
-              then pure ()
-              else do
-                setInventorySlot (clientToCivskellSlot slotNum) (Slot actbid (actcount + 1) actdmg actnbt)
-                let stillHeld = if currcount == 1 then EmptySlot else Slot currbid (currcount - 1) currdmg currnbt
-                setInventorySlot (-1) stillHeld
-            else if currcount + actcount > 64 
-              then do
-                let delta = 64 - actcount
-                setInventorySlot (-1) (Slot currbid (currcount - delta) currdmg currnbt)
-                setInventorySlot (clientToCivskellSlot slotNum) (Slot actbid 64 actdmg actnbt)
-              else do
-                setInventorySlot (-1) EmptySlot
-                setInventorySlot (clientToCivskellSlot slotNum) (Slot actbid (currcount + actcount) actdmg actnbt)
-          -- Unlike stacks; swap
-          else do
-            setInventorySlot (-1) actualSlot
-            setInventorySlot (clientToCivskellSlot slotNum) currHeld
-  -- Right click is exactly the same as left when shiftclicking
+    -- Get the current state of affairs, and purely decide what to do with them
+    doInventoryClick <$> getInventorySlot (clientToCivskellSlot slotNum) <*> getInventorySlot (-1) <*> pure rClick <*> pure clientProvidedSlot >>= \case
+      -- If everything is in order
+      Just (newSlot,newHand) -> do
+        -- Set the slots to their new values
+        setInventorySlot (-1) newHand
+        setInventorySlot (clientToCivskellSlot slotNum) newSlot
+        -- Confirm the transaction was successful
+        sendPacket (Client.ConfirmTransaction wid transId True)
+      -- If something went wrong
+      Nothing -> do
+        -- Log to console
+        logLevel ErrorLog "Failed to confirm client transaction"
+        -- And tell the client it should say sorry
+        sendPacket (Client.ConfirmTransaction wid transId False)
+     -- Right click is exactly the same as left when shiftclicking
   -- TODO: implement the rest of the clicking bs that minecraft does
   ShiftClick _rClick -> pure ()
   NumberKey _num -> pure ()
@@ -326,6 +329,48 @@ blockOnSide (BlockCoord (x,y,z)) South = BlockCoord (x,y,z+1)
 blockOnSide (BlockCoord (x,y,z)) West = BlockCoord (x-1,y,z)
 blockOnSide (BlockCoord (x,y,z)) East = BlockCoord (x+1,y,z)
 
+-- First, check if the slot matches the client provided one
+doInventoryClick :: Slot -> Slot -> Bool -> Slot -> Maybe (Slot,Slot)
+doInventoryClick actualSlot currHeld rClick shouldBeSlot = if actualSlot /= shouldBeSlot then Nothing else case actualSlot of
+  EmptySlot -> case currHeld of
+    -- Both empty -> No-op
+    EmptySlot -> Just (actualSlot,currHeld)
+    -- Putting something in an empty slot
+    Slot currbid currcount currdmg currnbt -> Just (placed,newHeld)
+      where
+        -- If we right click, only place one item, left click places all of them
+        delta = if rClick then 1 else 64
+        -- If we don't have enough items to fill the delta, place them all and end up with an EmptySlot, otherwise remove the delta
+        newHeld = if currcount <= delta then EmptySlot else Slot currbid (currcount - delta) currdmg currnbt
+        -- The slot now has either the full delta, or our best attempt at filling the delta
+        placed = Slot currbid (min delta currcount) currdmg currnbt
+  Slot actbid actcount actdmg actnbt -> case currHeld of
+    -- Picking something up into an empty hand
+    EmptySlot -> Just (left,picked)
+      where
+        -- If we right click, take half, otherwise take as much as we can
+        delta = if rClick then actcount `div` 2 else min actcount 64
+        -- If we took it all, leave nothing, otherwise take what we took
+        left = if actcount == delta then EmptySlot else Slot actbid (actcount - delta) actdmg actnbt
+        -- We are now holding everything we picked up
+        picked = Slot actbid delta actdmg actnbt
+    -- Two item stacks interacting
+    Slot currbid currcount currdmg currnbt -> case currbid == actbid && currdmg == actdmg && currnbt == actnbt of
+      -- Like stacks; combine
+      True -> Just (inSlot,stillHeld)
+        where
+          -- How many items we can possibly place in the slot
+          spaceRemaining = 64 - actcount
+          -- If we right click, try to put one in, but put zero in if its already full, otherwise put as many as we can in
+          -- NOTE: delta <= currcount and spaceRemaining
+          delta = if rClick then min 1 spaceRemaining else max currcount spaceRemaining
+          -- If we put down everything, empty our hand, otherwise remove what we put down
+          stillHeld = if currcount == delta then EmptySlot else Slot currbid (currcount - delta) currdmg currnbt
+          -- Put the stuff we put into the slot, into the slot
+          inSlot = Slot actbid (actcount + delta) actdmg actnbt
+      -- Unlike stacks; swap
+      False -> Just (currHeld,actualSlot)
+ 
 -- Do the login process
 initiateLogin :: (HasIO r,HasLogging r,HasNetworking r,HasWorld r) => Eff r ()
 initiateLogin = do

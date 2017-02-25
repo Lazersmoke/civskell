@@ -24,12 +24,12 @@ initWorld :: WorldData
 initWorld = WorldData {chunks = Map.empty,players = Map.empty, nextPlayerId = 0, broadcastLog = []}
 
 testInitWorld :: WorldData
-testInitWorld = initWorld {chunks = Map.fromList [(ChunkCoord (cx,cy,cz),exampleChunk) | cx <- [-3..3], cz <- [-3,3], cy <- [0..7]]}
+testInitWorld = initWorld {chunks = Map.fromList [(ChunkCoord (cx,cy,cz),exampleChunk) | cx <- [-3..3], cz <- [-3..3], cy <- [0..7]]}
   where
     exampleChunk = ChunkSection $ Map.fromList [(BlockCoord (x,y,z),stone) | x <- [0..15], y <- [0..15], z <- [0..15]]
     stone = BlockState 1 0
 
-type HasWorld = Member World
+type HasWorld r = Member World r
 
 data World a where
   GetChunk :: ChunkCoord -> World ChunkSection
@@ -44,21 +44,27 @@ data World a where
   BroadcastPacket :: Client.Packet -> World ()
   DumpBroadcast :: World ()
 
+{-# INLINE getChunk #-}
 getChunk :: Member World r => ChunkCoord -> Eff r ChunkSection
 getChunk = send . GetChunk
 
+{-# INLINE getBlock #-}
 getBlock :: Member World r => BlockCoord -> Eff r BlockState
 getBlock b = blockInChunk (blockToRelative b) <$> getChunk (blockToChunk b)
 
+{-# INLINE setChunk #-}
 setChunk :: Member World r => ChunkSection -> ChunkCoord -> Eff r ()
 setChunk c' cc = send $ SetChunk c' cc
 
+{-# INLINE setBlock #-}
 setBlock :: Member World r => BlockState -> BlockCoord -> Eff r ()
 setBlock b' bc = send $ SetBlock b' bc
 
+{-# INLINE setColumn #-}
 setColumn :: Member World r => [ChunkSection] -> (Int,Int) -> Maybe BS.ByteString -> Eff r ()
 setColumn cs cxz mBio = send $ SetColumn cs cxz mBio
 
+{-# INLINE colPacket #-}
 colPacket :: HasWorld r => (Int,Int) -> Maybe BS.ByteString -> Eff r Client.Packet
 colPacket (cx,cz) mbio = forM [0..15] (\cy -> getChunk (ChunkCoord (cx,cy,cz))) >>= \cs -> return (chunksToColumnPacket cs (cx,cz) mbio)
 
@@ -71,39 +77,46 @@ chunksToColumnPacket cs (cx,cz) mbio = Client.ChunkData (fromIntegral cx,fromInt
     fromBool False = 0
     isAirChunk (ChunkSection m) = Map.null m
 
+{-# INLINE removeBlock #-}
 removeBlock :: Member World r => BlockCoord -> Eff r ()
 removeBlock = setBlock (BlockState 0 0)
 
+{-# INLINE setPlayer #-}
 setPlayer :: Member World r => PlayerId -> PlayerInfo -> Eff r ()
 setPlayer i p = send $ SetPlayer i p
 
+{-# INLINE getPlayer #-}
 getPlayer :: Member World r => PlayerId -> Eff r PlayerInfo
 getPlayer = send . GetPlayer
 
+{-# INLINE modifyPlayer #-}
 modifyPlayer :: Member World r => PlayerId -> (PlayerInfo -> PlayerInfo) -> Eff r ()
 modifyPlayer i f = setPlayer i =<< f <$> getPlayer i
 
+{-# INLINE newPlayer #-}
 newPlayer :: Member World r => Eff r PlayerId
 newPlayer = send NewPlayer
 
+{-# INLINE allPlayers #-}
 allPlayers :: Member World r => Eff r [PlayerInfo]
 allPlayers = send AllPlayers
 
+{-# INLINE inboxForPlayer #-}
 inboxForPlayer :: Member World r => PlayerId -> Eff r [Client.Packet]
 inboxForPlayer = send . InboxForPlayer
 
+{-# INLINE dumpBroadcast #-}
 dumpBroadcast :: Member World r => Eff r ()
 dumpBroadcast = send DumpBroadcast
 
+{-# INLINE broadcastPacket #-}
 broadcastPacket :: Member World r => Client.Packet -> Eff r ()
 broadcastPacket = send . BroadcastPacket
 
 runWorld :: (HasLogging r, HasIO r) => MVar WorldData -> Eff (World ': r) a -> Eff r a
 runWorld _ (Pure x) = Pure x
 runWorld w' (Eff u q) = case u of
-  Inject (GetChunk chunk) -> send (readMVar w') >>= \w -> case Map.lookup chunk (chunks w) of
-    Just theChunk -> runWorld w' (runTCQ q theChunk)
-    Nothing -> error $ "Tried to load non-existant chunk section: " ++ show chunk
+  Inject (GetChunk chunk) -> runWorld w' . runTCQ q . Map.findWithDefault (ChunkSection Map.empty) chunk . chunks =<< send (readMVar w')
   Inject (SetBlock b' bc) -> do
     send $ modifyMVar_ w' $ \w -> do
       let f = if b' == BlockState 0 0 then Map.delete (blockToRelative bc) else Map.insert (blockToRelative bc) b'

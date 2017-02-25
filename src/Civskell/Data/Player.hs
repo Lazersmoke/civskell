@@ -17,7 +17,7 @@ import Civskell.Tech.Network
 import Civskell.Data.World
 import Civskell.Data.Logging
 
-type HasPlayer = Member Player
+type HasPlayer r = Member Player r
 
 data Player a where
   -- Simple maybe state for brand
@@ -58,72 +58,95 @@ data Player a where
   -- Flush Inbox
   FlushInbox :: Player ()
 
+{-# INLINE getBrand #-}
 getBrand :: HasPlayer r => Eff r String
 getBrand = send PlayerBrand
 
+{-# INLINE setBrand #-}
 setBrand :: HasPlayer r => String -> Eff r ()
 setBrand = send . SetPlayerBrand
 
+{-# INLINE getUsername #-}
 getUsername :: HasPlayer r => Eff r String
 getUsername = send PlayerName
 
+{-# INLINE setUsername #-}
 setUsername :: HasPlayer r => String -> Eff r ()
 setUsername = send . SetPlayerName
 
+{-# INLINE getUUID #-}
 getUUID :: HasPlayer r => Eff r String
 getUUID = send PlayerUUID
 
+{-# INLINE setUUID #-}
 setUUID :: HasPlayer r => String -> Eff r ()
 setUUID = send . SetPlayerUUID
 
+{-# INLINE getHolding #-}
 getHolding :: HasPlayer r => Eff r Short
 getHolding = send PlayerHolding
 
+{-# INLINE setHolding #-}
 setHolding :: HasPlayer r => Short -> Eff r ()
 setHolding = send . SetPlayerHolding
 
+{-# INLINE pendTeleport #-}
 pendTeleport :: HasPlayer r => (Double,Double,Double) -> (Float,Float) -> Word8 -> Eff r ()
 pendTeleport xyz yp r = send (PlayerAddTP xyz yp r)
 
+{-# INLINE clearTeleport #-}
 clearTeleport :: HasPlayer r => VarInt -> Eff r Bool
 clearTeleport = send . PlayerClearTP
 
+{-# INLINE pendKeepAlive #-}
 pendKeepAlive :: HasPlayer r => Eff r ()
 pendKeepAlive = send PlayerAddKeepAlive
 
+{-# INLINE clearKeepAlive #-}
 clearKeepAlive :: HasPlayer r => VarInt -> Eff r Bool
 clearKeepAlive = send . PlayerClearKeepAlive
 
+{-# INLINE initPlayer #-}
 initPlayer :: (HasWorld r, HasNetworking r, HasLogging r) => Eff (Player ': r) a -> Eff r a
 initPlayer = (newPlayer >>=) . flip runPlayer
 
+{-# INLINE getGamemode #-}
 getGamemode :: HasPlayer r => Eff r Gamemode
 getGamemode = send PlayerGamemode
 
+{-# INLINE setGamemode #-}
 setGamemode :: HasPlayer r => Gamemode -> Eff r ()
 setGamemode = send . SetPlayerGamemode
 
+{-# INLINE setPlayerPos #-}
 setPlayerPos :: HasPlayer r => (Double,Double,Double) -> Eff r ()
 setPlayerPos = send . SetPlayerPosition
 
+{-# INLINE getPlayerPos #-}
 getPlayerPos :: HasPlayer r => Eff r (Double,Double,Double)
 getPlayerPos = send GetPlayerPosition
 
+{-# INLINE setPlayerViewAngle #-}
 setPlayerViewAngle :: HasPlayer r => (Float,Float) -> Eff r ()
 setPlayerViewAngle = send . SetPlayerViewAngle
 
+{-# INLINE getPlayerViewAngle #-}
 getPlayerViewAngle :: HasPlayer r => Eff r (Float,Float)
 getPlayerViewAngle = send GetPlayerViewAngle
 
+{-# INLINE setInventorySlot #-}
 setInventorySlot :: HasPlayer r => Short -> Slot -> Eff r ()
 setInventorySlot a b = send $ SetPlayerSlot a b
 
+{-# INLINE getMoveMode #-}
 getMoveMode :: HasPlayer r => Eff r MoveMode
 getMoveMode = send GetMoveMode
 
+{-# INLINE setMoveMode #-}
 setMoveMode :: HasPlayer r => MoveMode -> Eff r ()
 setMoveMode = send . SetMoveMode
 
+{-# INLINE flushInbox #-}
 flushInbox :: HasPlayer r => Eff r ()
 flushInbox = send FlushInbox
 
@@ -132,6 +155,7 @@ flushInbox = send FlushInbox
 -- Armor: Head to Toe: 36,37,38,39
 -- Crafting: output: 40, inputs: tl: 41, tr: 42, bl: 43, br: 44
 -- off hand: 45
+{-# INLINE getInventorySlot #-}
 getInventorySlot :: HasPlayer r => Short -> Eff r Slot
 getInventorySlot = send . GetPlayerSlot
 
@@ -155,7 +179,7 @@ civskellToClientSlot s
   | s == 45 = s
   | otherwise = error "Bad Slot Number"
 
--- TODO: Check if bad things can happen in between getPlayer and setPlayer here. What if the MVar changes in the meantime?
+-- NOTE: always be atomic wrt [get,set,modify]Player
 runPlayer :: (HasNetworking r, HasWorld r, HasLogging r) => PlayerId -> Eff (Player ': r) a -> Eff r a
 runPlayer _ (Pure x) = return x
 runPlayer i (Eff u q) = case u of
@@ -176,7 +200,6 @@ runPlayer i (Eff u q) = case u of
   -- Set the player's selected slot
   Inject (SetPlayerGamemode g) -> do
     modifyPlayer i $ \p -> p {gameMode = g}
-    -- 0x03 means "Change gamemode"
     sendPacket (Client.ChangeGameState (ChangeGamemode g))
     runPlayer i (runTCQ q ())
   -- Get the player's selected slot

@@ -2,7 +2,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
-module Civskell.Tech.Network 
+module Civskell.Tech.Network
   (module Civskell.Data.Networking
   ,sendPacket,getPacket,authGetReq
   ) where
@@ -21,12 +21,13 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Text.Parsec.Char as C
 
-import Civskell.Data.Types
-import Civskell.Tech.Parse
 import Civskell.Data.Logging
 import Civskell.Data.Networking
-import qualified Civskell.Packet.Serverbound as Server
+import Civskell.Data.Types
+import Civskell.Tech.Parse
+import Civskell.Tech.Serialization
 import qualified Civskell.Packet.Clientbound as Client
+import qualified Civskell.Packet.Serverbound as Server
 
 -- Send something serializeable over the network
 sendPacket :: (HasLogging r,HasNetworking r) => Client.Packet -> Eff r ()
@@ -37,21 +38,20 @@ sendPacket s = do
   -- Send it
   rPut =<< addCompression (serialize s)
 
--- Get a packet from the network (high level) using a parser context
+-- Get a packet from the network (high level) using a parser context to decide which parser set to use
 getPacket :: (HasLogging r,HasNetworking r) => ServerState -> Eff r (Maybe Server.Packet)
 getPacket st = do
-  -- get the raw data (sans length)
+  -- Get the raw data (sans length)
   pkt <- removeCompression =<< getRawPacket
-  -- parse it
+  -- Parse it
   case parse (parsePacket st) "" pkt of
     -- If it parsed ok, then
     Right serverPkt -> do
-      -- return it
-      -- TODO: make this a debugmode only putStrLn
+      -- Return it
       logLevel ServerboundPacket $ show serverPkt
       logLevel HexDump $ indentedHex $ pkt
       return $ Just serverPkt
-    -- If it didn't parse correctly, print the error and return that it parsed bad
+    -- If it didn't parse correctly, print the error and return Nothing
     Left e -> do
       logLevel ErrorLog "Failed to parse incoming packet"
       logLevel ErrorLog (show e)
@@ -76,36 +76,36 @@ getPacketLength = do
   -- Get the first byte
   l' <- rGet 1
   let l = if BS.null l' then error "No more data on socket" else BS.head l'
-  -- the value part is the 7 least significant bits
+  -- The value part is the 7 least significant bits
   let thisPart = (unsafeCoerce :: Word8 -> VarInt) (clearBit l 7)
   -- If the msb is set, we have more bytes after this one
   if testBit l 7
     then do
-      -- get the rest of the bytes recursively
+      -- Get the rest of the bytes recursively
       (next,bs) <- getPacketLength
-      -- return after shifting everything into place
+      -- Return after shifting everything into place
       return $ (thisPart .|. (shiftL next 7),l `BS.cons` bs)
     -- If its not set, then this is the last byte, so we return thisPart
     else return (thisPart,BS.singleton l)
 
--- add "  " to each line
+-- Add "  " to each line
 shittyIndent :: String -> String
 shittyIndent = init . unlines . map ("  "++) . lines
 
--- indent the hexdump
+-- Indent the hexdump
 indentedHex :: BS.ByteString -> String
 indentedHex = shittyIndent . prettyHex
 
--- get the auth info from the mojang server
+-- Get the auth info from the mojang server
 authGetReq :: (HasLogging r,HasIO r) => String -> String -> Eff r (Maybe (String,String))
 authGetReq name hash = do
-  -- use SSL
+  -- Use SSL
   manager <- send $ newManager tlsManagerSettings
-  -- create the request, using sId and username from LoginStart
+  -- Create the request, using sId and username from LoginStart
   req <- send $ (parseRequest :: String -> IO Request) $ "https://sessionserver.mojang.com/session/minecraft/hasJoined?username=" ++ name ++ "&serverId=" ++ hash
-  -- actually make the request and store it
+  -- Actually make the request and store it
   resp <- send $ httpLbs req manager
-  -- parse the response into something useful
+  -- Parse the response into something useful
   case parse parseAuthJSON "" (LBS.toStrict . responseBody $ resp) of
     Left e -> do
       logLevel ErrorLog "Failed to parse Auth JSON"
@@ -124,7 +124,7 @@ parseAuthJSON = do
   eof
   return (reformat uuid,plaName)
   where
-    -- add a hyphen at an index
+    -- Add a hyphen at an index
     ins i s = let (a,b) = splitAt i s in a ++ "-" ++ b
-    -- reformat the uuid to what the client expects
+    -- Reformat the uuid to what the client expects
     reformat = ins 8 . ins 12 . ins 16 . ins 20

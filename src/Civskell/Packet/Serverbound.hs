@@ -14,20 +14,22 @@ data Packet
   -- Handshake Packet
   -- Protocol Version, Server Address, Server Port, Next State
   = Handshake VarInt String Word16 VarInt
+  | LegacyHandshake
   -- Play Packet
   | TPConfirm VarInt
   | TabComplete
   | ChatMessage String
-  | ClientStatus VarInt
+  | ClientStatus ClientStatusAction
   | ClientSettings String Word8 VarInt Bool Word8 VarInt
-  | ConfirmTransaction
+  -- Transaction accpeted?
+  | ConfirmTransaction WindowId TransactionId Bool
   | EnchantItem
-  -- WId SlotNum "Button" TransactionId InventoryMode ItemInSlot
-  | ClickWindow Word8 Short Short InventoryClickMode Slot
-  | CloseWindow Word8
+  -- Slot Number
+  | ClickWindow WindowId Short TransactionId InventoryClickMode Slot
+  | CloseWindow WindowId
   | PluginMessage String BS.ByteString
   | UseEntity
-  | KeepAlive VarInt
+  | KeepAlive KeepAliveId
   -- x,y,z (abs), on ground
   | PlayerPosition (Double,Double,Double) Bool
   -- x,y,z, yaw,pitch, onground
@@ -40,13 +42,13 @@ data Packet
   | SteerBoat
   | PlayerAbilities
   | PlayerDigging PlayerDigAction
-  | EntityAction VarInt PlayerEntityAction
+  | EntityAction PlayerId PlayerEntityAction
   | SteerVehicle
   | ResourcePackStatus
   | HeldItemChange Short
   | CreativeInventoryAction Short Slot
   | UpdateSign
-  | Animation AnimationAction
+  | Animation Hand
   | Spectate
   | PlayerBlockPlacement BlockCoord BlockFace Hand (Float,Float,Float)
   | UseItem Hand
@@ -68,12 +70,13 @@ instance PacketId Packet where
   packetSide _ = Server
   packetName p = case p of
     (Handshake _ _ _ _) -> "Handshake"
+    LegacyHandshake -> "LegacyHandshake"
     (TPConfirm _) -> "TPConfirm"
     (TabComplete) -> "TabComplete"
     (ChatMessage _) -> "ChatMessage"
     (ClientStatus _) -> "ClientStatus"
     (ClientSettings _ _ _ _ _ _) -> "ClientSettings"
-    (ConfirmTransaction) -> "ConfirmTransaction"
+    (ConfirmTransaction _ _ _) -> "ConfirmTransaction"
     (EnchantItem) -> "EnchantItem"
     (ClickWindow _ _ _ _ _) -> "ClickWindow"
     (CloseWindow _) -> "CloseWindow"
@@ -104,12 +107,13 @@ instance PacketId Packet where
     (StatusPing _) -> "StatusPing"
   packetId p = case p of
     (Handshake _ _ _ _) -> 0x00
+    LegacyHandshake -> 0xFE
     (TPConfirm _) -> 0x00
     (TabComplete) -> 0x01
     (ChatMessage _) -> 0x02
     (ClientStatus _) -> 0x03
     (ClientSettings _ _ _ _ _ _) -> 0x04
-    (ConfirmTransaction) -> 0x05
+    (ConfirmTransaction _ _ _) -> 0x05
     (EnchantItem) -> 0x06
     (ClickWindow _ _ _ _ _) -> 0x07
     (CloseWindow _) -> 0x08
@@ -140,12 +144,13 @@ instance PacketId Packet where
     (StatusPing _) -> 0x01
   packetState p = case p of
     (Handshake _ _ _ _) -> Handshaking
+    LegacyHandshake -> Handshaking
     (TPConfirm _) -> Playing
     (TabComplete) -> Playing
     (ChatMessage _) -> Playing
     (ClientStatus _) -> Playing
     (ClientSettings _ _ _ _ _ _) -> Playing
-    (ConfirmTransaction) -> Playing
+    (ConfirmTransaction _ _ _) -> Playing
     (EnchantItem) -> Playing
     (ClickWindow _ _ _ _ _) -> Playing
     (CloseWindow _) -> Playing
@@ -184,10 +189,11 @@ instance Show Packet where
       ,("Server Address",addr ++ ":" ++ show port)
       ,("Requesting change to",case newstate of {1 -> "Status"; 2 -> "Login"; _ -> "Invalid"})
       ]
+    LegacyHandshake -> []
     (TPConfirm i) -> [("Teleport Id",show i)]
     (TabComplete) -> []
     (ChatMessage msg) -> [("Message",msg)]
-    (ClientStatus status) -> [("Status",case status of {0 -> "Perform Respawn"; 1 -> "Request Stats"; 2 -> "Open Inventory"; s -> "Invalid Status (" ++ show s ++ ")"})]
+    (ClientStatus status) -> [("Status",show status)]
     (ClientSettings loc viewDist chatMode chatColors skin hand) ->
       [("Locale",loc)
       ,("View Distance",show viewDist)
@@ -196,12 +202,12 @@ instance Show Packet where
       ,("Skin bitmask",show skin)
       ,("Main Hand",show hand)
       ]
-    (ConfirmTransaction) -> []
+    (ConfirmTransaction wid transId acc) -> [("Window Id",show wid),("Transaction Id",show transId),("Accepted",if acc then "Yes" else "No")]
     (EnchantItem) -> []
     (ClickWindow wid slotNum transId invMode item) -> [("Window Id",show wid),("Slot Number",show slotNum),("Transaction Id",show transId),("Inventory Mode",show invMode),("Subject Item",show item)]
     (CloseWindow wid) -> [("Window Id", show wid)]
     (PluginMessage "MC|Brand" cliBrand) -> [("Client Brand",show (BS.tail cliBrand))]
-    (PluginMessage _ _) -> []
+    (PluginMessage chan bs) -> [("Channel",show chan),("Payload",show bs)]
     (UseEntity) -> []
     (KeepAlive i) -> [("Keep Alive Id",show i)]
     (PlayerPosition (x,y,z) grounded) -> [("Positon",show (x,y,z)),("On Ground",show grounded)]
@@ -230,7 +236,7 @@ instance Show Packet where
     (HeldItemChange i) -> [("Slot",show i)]
     (CreativeInventoryAction slot item) -> [("Slot",show slot),("New Item", show item)]
     (UpdateSign) -> []
-    (Animation anim) -> [("Animation",show anim)]
+    (Animation hand) -> [("Hand",show hand)]
     (Spectate) -> []
     (PlayerBlockPlacement block _side hand _cursorCoord) -> [("Block",show block),("Hand",show hand)]
     (UseItem hand) -> [("Hand",show hand)]

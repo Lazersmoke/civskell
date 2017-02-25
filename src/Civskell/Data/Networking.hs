@@ -16,8 +16,9 @@ import qualified Data.ByteString.Lazy as LBS
 import Civskell.Data.Types
 import Civskell.Tech.Encrypt
 import Civskell.Tech.Parse
+import Civskell.Tech.Serialization
 
-type HasNetworking = Member Networking
+type HasNetworking r = Member Networking r
 
 data Networking a where
   SetCompressionLevel :: Maybe VarInt -> Networking ()
@@ -26,24 +27,35 @@ data Networking a where
   SetupEncryption :: EncryptionCouplet -> Networking ()
   GetFromNetwork :: Int -> Networking BS.ByteString
   PutIntoNetwork :: BS.ByteString -> Networking ()
+  IsPacketReady :: Networking Bool
 
+{-# INLINE rGet #-}
 rGet :: HasNetworking n => Int -> Eff n BS.ByteString
 rGet = send . GetFromNetwork
 
+{-# INLINE rPut #-}
 rPut :: HasNetworking n => BS.ByteString -> Eff n ()
 rPut = send . PutIntoNetwork
 
+{-# INLINE setupEncryption #-}
 setupEncryption :: HasNetworking n => EncryptionCouplet -> Eff n ()
 setupEncryption = send . SetupEncryption
 
+{-# INLINE setCompression #-}
 setCompression :: HasNetworking n => Maybe VarInt -> Eff n ()
 setCompression = send . SetCompressionLevel
 
+{-# INLINE addCompression #-}
 addCompression :: HasNetworking n => BS.ByteString -> Eff n BS.ByteString
 addCompression = send . AddCompression
 
+{-# INLINE removeCompression #-}
 removeCompression :: HasNetworking n => BS.ByteString -> Eff n BS.ByteString
 removeCompression = send . RemoveCompression
+
+{-# INLINE isPacketReady #-}
+isPacketReady :: HasNetworking n => Eff n Bool
+isPacketReady = send IsPacketReady
 
 runNetworking :: HasIO r => Maybe EncryptionCouplet -> Maybe VarInt -> Handle -> Eff (Networking ': r) a -> Eff r a
 runNetworking _ _ _ (Pure x) = Pure x
@@ -93,4 +105,5 @@ runNetworking mEnc mThresh hdl (Eff u q) = case u of
       Right (dataLen,compressedData) -> if dataLen == 0x00
         then runNetworking mEnc mThresh hdl (runTCQ q compressedData)
         else runNetworking mEnc mThresh hdl (runTCQ q (LBS.toStrict . Z.decompress . LBS.fromStrict $ compressedData))
+  Inject IsPacketReady -> runNetworking mEnc mThresh hdl . runTCQ q =<< send (hReady hdl)
 

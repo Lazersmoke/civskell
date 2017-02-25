@@ -14,16 +14,18 @@ import Control.Eff
 
 import Civskell.Data.Types
 
-type HasLogging = Member Logging
+type HasLogging r = Member Logging r
 
 data Logging a where
   LogString :: LogLevel -> String -> Logging ()
 
 data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | VerboseLog | NormalLog deriving Eq
 
+{-# INLINE logg #-}
 logg :: HasLogging r => String -> Eff r ()
 logg = send . LogString NormalLog
 
+{-# INLINE logLevel #-}
 logLevel :: HasLogging r => LogLevel -> String -> Eff r ()
 logLevel l s = send (LogString l s)
 
@@ -44,7 +46,7 @@ runLogger (Eff u q) = case u of
       send (putStrLn $ "[\x1b[31mERROR\x1b[0m] " ++ str)
       runLogger (runTCQ q ())
     VerboseLog -> do
-      --send (putStrLn $ "[\x1b[36mCivSkell/Verbose\x1b[0m] " ++ str)
+      send (putStrLn $ "[\x1b[36mCivSkell/Verbose\x1b[0m] " ++ str)
       runLogger (runTCQ q ())
     NormalLog -> do
       send (putStrLn $ "[\x1b[36mCivSkell\x1b[0m] " ++ str)

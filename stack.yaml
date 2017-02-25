@@ -39,7 +39,7 @@ packages:
 - '.'
 - location: 
     git: git@github.com:Lazersmoke/reee-monads.git
-    commit: 30053dade0f26931ea1a3e0d4224177261d1943b
+    commit: 0346c6ba5cb010b8dd2c4037cf9263275009c56f
   extra-dep: true
 # Dependency packages to be pulled from upstream that are not in the resolver
 # (e.g., acme-missiles-0.3)

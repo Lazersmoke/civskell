@@ -28,7 +28,7 @@ parsePacket Status = parseStatusPacket
 parsePacket Playing = parsePlayPacket
 
 parseHandshakePacket :: Parser Server.Packet
-parseHandshakePacket = parseHandshake <?> "Handshake Packet"
+parseHandshakePacket = parseHandshake <|> parseLegacyHandshake <?> "Handshake Packet"
 
 parseHandshake :: Parser Server.Packet
 parseHandshake = do
@@ -38,6 +38,12 @@ parseHandshake = do
     <*> parseVarString
     <*> parseUnsignedShort
     <*> parseVarInt
+
+parseLegacyHandshake :: Parser Server.Packet
+parseLegacyHandshake = do
+  _ <- specificByte 0xFE
+  _ <- many anyByte <* eof
+  return Server.LegacyHandshake
 
 parseLoginPacket :: Parser Server.Packet
 parseLoginPacket = parseLoginStart <|> parseEncryptionResponse <?> "Login Packet"
@@ -68,7 +74,7 @@ parseStatusPing = do
   Server.StatusPing <$> parseLong
 
 parsePlayPacket :: Parser Server.Packet
-parsePlayPacket = parseTPConfirm <|> parseChatMessage <|> parseClientStatus <|> parseClientSettings <|> parseClickWindow <|> parseCloseWindow <|> parsePluginMessage <|> parseKeepAlive <|> parsePlayerPosition <|> parsePlayerPositionAndLook <|> parsePlayerLook <|> parsePlayer <|> parsePlayerDigging <|> parseEntityAction <|> parseHeldItemChange <|> parseCreativeInventoryAction <|> parseAnimation <|> parsePlayerBlockPlacement <|> parseUseItem <|> parseUnknownPacket <?> "Play Packet"
+parsePlayPacket = parseTPConfirm <|> parseChatMessage <|> parseClientStatus <|> parseClientSettings <|> parseConfirmTransaction <|> parseClickWindow <|> parseCloseWindow <|> parsePluginMessage <|> parseKeepAlive <|> parsePlayerPosition <|> parsePlayerPositionAndLook <|> parsePlayerLook <|> parsePlayer <|> parsePlayerDigging <|> parseEntityAction <|> parseHeldItemChange <|> parseCreativeInventoryAction <|> parseAnimation <|> parsePlayerBlockPlacement <|> parseUseItem <|> parseUnknownPacket <?> "Play Packet"
 
 parseUnknownPacket :: Parser Server.Packet
 parseUnknownPacket = anyByte >>= unexpected . show
@@ -86,7 +92,11 @@ parseChatMessage = do
 parseClientStatus :: Parser Server.Packet
 parseClientStatus = do
   specificVarInt 0x03 <?> "Packet Id 0x03"
-  Server.ClientStatus <$> parseVarInt
+  Server.ClientStatus <$> choice
+    [specificVarInt 0x00 *> pure PerformRespawn
+    ,specificVarInt 0x01 *> pure RequestStats
+    ,specificVarInt 0x02 *> pure OpenInventory
+    ]
 
 parseClientSettings :: Parser Server.Packet
 parseClientSettings = do
@@ -99,10 +109,18 @@ parseClientSettings = do
     <*> anyByte
     <*> parseVarInt
 
+parseConfirmTransaction :: Parser Server.Packet
+parseConfirmTransaction = do
+  specificVarInt 0x05 <?> "Packet Id 0x05"
+  Server.ConfirmTransaction
+    <$> parseWID
+    <*> parseShort
+    <*> parseBool
+
 parseClickWindow :: Parser Server.Packet
 parseClickWindow = do
   specificVarInt 0x07 <?> "Packet Id 0x07"
-  wid <- anyByte
+  wid <- parseWID
   slotNum <- parseShort
   b <- anyByte
   transId <- parseShort
@@ -121,7 +139,7 @@ parseClickWindow = do
 parseCloseWindow :: Parser Server.Packet
 parseCloseWindow = do
   specificVarInt 0x08 <?> "Packet Id 0x08"
-  Server.CloseWindow <$> anyByte
+  Server.CloseWindow <$> parseWID
 
 parsePluginMessage :: Parser Server.Packet
 parsePluginMessage = do
@@ -180,7 +198,7 @@ parsePlayerDigging = do
 parseEntityAction :: Parser Server.Packet
 parseEntityAction = do
   specificVarInt 0x14 <?> "Packet Id 0x14"
-  Server.EntityAction <$> parseVarInt <*> choice
+  Server.EntityAction <$> parseEID <*> choice
     [specificVarInt 0x00 *> pure (Sneak True)
     ,specificVarInt 0x01 *> pure (Sneak False)
     ,specificVarInt 0x02 *> pure LeaveBed
@@ -205,14 +223,7 @@ parseCreativeInventoryAction = do
 parseAnimation :: Parser Server.Packet
 parseAnimation = do
   specificVarInt 0x1A <?> "Packet Id 0x1A"
-  Server.Animation <$> choice
-    [specificVarInt 0x00 *> return (SwingHand MainHand)
-    ,specificVarInt 0x01 *> return TakeDamage
-    ,specificVarInt 0x02 *> return LeaveBedAnimation
-    ,specificVarInt 0x03 *> return (SwingHand OffHand)
-    ,specificVarInt 0x04 *> return (Critical False)
-    ,specificVarInt 0x05 *> return (Critical True)
-    ]
+  Server.Animation <$> parseHand
 
 parsePlayerBlockPlacement :: Parser Server.Packet
 parsePlayerBlockPlacement = do
@@ -299,6 +310,12 @@ parseVarInt = do
       nb <- parseVarInt
       return $ thisPart .|. (shiftL nb 7)
     else return thisPart
+
+parseWID :: Parser WindowId
+parseWID = WindowId <$> anyByte
+
+parseEID :: Parser EntityId
+parseEID = EntityId <$> parseVarInt
 
 specificVarInt :: VarInt -> Parser ()
 specificVarInt v = try $ do

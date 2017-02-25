@@ -2,17 +2,19 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 module Civskell.Packet.Clientbound where
 
+import Crypto.Hash (hash,Digest,SHA1)
+import Data.Bits
 import Data.Int
+import Data.List (genericLength)
+import Data.Maybe
+import Data.NBT
 import Data.Semigroup
 import Data.Word
-import Data.Maybe
-import Data.Bits
-import Data.List (genericLength)
-import qualified Data.ByteString as BS
-import Crypto.Hash (hash,Digest,SHA1)
 import Numeric (showHex)
-import Data.NBT
+import qualified Data.ByteString as BS
+
 import Civskell.Data.Types
+import Civskell.Tech.Serialization
 
 data Packet
   -- Login
@@ -31,23 +33,23 @@ data Packet
   | StatusPong Int64
   -- Play
   -- EID, UUID, Type of Object, x, y, z, pitch, yaw, Object Data, velx, vely, velz
-  | SpawnObject VarInt String Word8 (Double,Double,Double) (Word8,Word8) Int32 Short Short Short
+  | SpawnObject EntityId String Word8 (Double,Double,Double) (Word8,Word8) Int32 Short Short Short
   -- EID, x, y, z, count
-  | SpawnExpOrb VarInt (Double,Double,Double) Short
+  | SpawnExpOrb EntityId (Double,Double,Double) Short
   -- EID, Type (always 1 for thunderbolt), x, y, z
-  | SpawnGlobalEntity VarInt Word8 (Double,Double,Double)
+  | SpawnGlobalEntity EntityId Word8 (Double,Double,Double)
   -- EID, UUID, Type, x, y, z, yaw, pitch, head pitch, velx, vely, velz, Metadata
-  | SpawnMob VarInt String VarInt (Double,Double,Double) Word8 Word8 Word8 Short Short Short -- Metadata NYI
+  | SpawnMob EntityId String VarInt (Double,Double,Double) Word8 Word8 Word8 Short Short Short -- Metadata NYI
   -- EID, UUID, Title, Location,
-  | SpawnPainting VarInt String String {-Position NYI-} Word8
+  | SpawnPainting EntityId String String {-Position NYI-} Word8
   -- EID, UUID, x, y, z, yaw, pitch, metadata
-  | SpawnPlayer VarInt String (Double,Double,Double) Word8 Word8 -- Metadata NYI
+  | SpawnPlayer EntityId String (Double,Double,Double) Word8 Word8 -- Metadata NYI
   -- EID, Animation ID (from table)
-  | Animation VarInt Word8
+  | Animation EntityId Word8
   -- List of all stats
   | Statistics [(String,VarInt)]
   -- EID, Block coord, stage (0-9)
-  | BlockBreakAnimation VarInt BlockCoord Word8
+  | BlockBreakAnimation EntityId BlockCoord Word8
   -- Block coord, action (from enum), NBT tag
   | UpdateBlockEntity BlockCoord Word8 BS.ByteString
   -- Block coord, Action Id (enum), Action Param, Block Type ; http://wiki.vg/Block_Actions
@@ -64,18 +66,17 @@ data Packet
   | ChatMessage String Word8
   -- Chunk x, Chunk z, List of (chunk relative coords, Block Id (global palette))
   | MultiBlockChange (Int32,Int32) [((Word8,Word8,Word8),VarInt)]
-  -- Window Id, Action Number (Enum?), Accepted
-  | ConfirmTransaction Word8 Short Bool
-  -- Window Id
-  | CloseWindow Word8
+  -- Window Id, Transaction Id, Accepted
+  | ConfirmTransaction WindowId TransactionId Bool
+  | CloseWindow WindowId
   -- Window Id, Window Type (Enum), JSON chat string of Window Title, Num of Slots, optionally: EID of horse
-  | OpenWindow Word8 String String Word8 (Maybe Int32)
+  | OpenWindow WindowId String String Word8 (Maybe EntityId)
   -- Window Id, List of <Slot>
-  | WindowItems Word8 [Slot]
+  | WindowItems WindowId [Slot]
   -- Window Id, Property (enum), Value (enum)
-  | WindowProperty Word8 Short Short
+  | WindowProperty WindowId Short Short
   -- Window Id, Slot num, <Slot>
-  | SetSlot Word8 Short Slot
+  | SetSlot WindowId Short Slot
   -- Item Id (applies to all instances), Cooldown Ticks
   | SetCooldown VarInt VarInt
   -- Plugin Channel, Data
@@ -85,15 +86,15 @@ data Packet
   -- Reason (JSON chat string)
   | DisconnectPlay String
   -- EID, Status (Enum)
-  | EntityStatus Int32 Word8
+  | EntityStatus EntityId Word8
   -- x,y,z, radius, affected block offsets, velocity of pushed player
-  | Explosion (Float,Float,Float) Float [(Word8,Word8,Word8)] (Float,Float,Float)
+  | Explosion (Float,Float,Float) Float [BlockCoord] (Float,Float,Float)
   -- Chunk X, Chunk Z
   | UnloadChunk (Int32,Int32)
   -- Reason (Enum), Value (from Enum)
   | ChangeGameState GameStateChange
   -- Random Id <-- Prevents Timeout
-  | KeepAlive VarInt
+  | KeepAlive KeepAliveId
   -- Chunk X, Chunk Z, Full Chunk?, Bitmask of slices present, [Chunk Section], optional: 256 byte array of biome data, [Block entity NBT tag]
   | ChunkData (Int32,Int32) Bool VarInt [ChunkSection] (Maybe BS.ByteString) [NBT]
   -- Effect Id (Enum), block coord, extra data (from Enum), disable relative?
@@ -101,11 +102,11 @@ data Packet
   -- Particle
   -- | Particle
   -- EID, Gamemode (Enum), Dimension (Enum), Difficulty (Enum), Max Players (deprecated), Level Type, reduce debug info?
-  | JoinGame Int32 Gamemode Int32 Difficulty Word8 String Bool
+  | JoinGame EntityId Gamemode Int32 Difficulty Word8 String Bool
   -- Flags bitfield, fly speed, fov modifier
   | PlayerAbilities Word8 Float Float
   -- x,y,z, yaw,pitch, relativity flags, TPconfirm Id
-  | PlayerPositionAndLook (Double,Double,Double) (Float,Float) Word8 VarInt
+  | PlayerPositionAndLook (Double,Double,Double) (Float,Float) Word8 TPConfirmId
   -- Block pos of player spawn
   | SpawnPosition BlockCoord
 
@@ -121,36 +122,36 @@ instance Serialize Packet where
     (StatusResponse s) -> serialize s
     (StatusPong l) -> serialize l
     -- Play
-    (SpawnObject _ _ _ _ _ _ _ _ _) -> BS.singleton 0x00
-    (SpawnExpOrb _ _ _) -> BS.singleton 0x00
-    (SpawnGlobalEntity _ _ _) -> BS.singleton 0x00
-    (SpawnMob _ _ _ _ _ _ _ _ _ _) -> BS.singleton 0x00
-    (SpawnPainting _ _ _ {-NYI-} _) -> BS.singleton 0x00
-    (SpawnPlayer _ _ _ _ _ {-Metadata NYI-}) -> BS.singleton 0x00
+    (SpawnObject _ _ _ _ _ _ _ _ _) -> error "Unimplemented Serialization"
+    (SpawnExpOrb _ _ _) -> error "Unimplemented Serialization"
+    (SpawnGlobalEntity _ _ _) -> error "Unimplemented Serialization"
+    (SpawnMob _ _ _ _ _ _ _ _ _ _) -> error "Unimplemented Serialization"
+    (SpawnPainting _ _ _ {-NYI-} _) -> error "Unimplemented Serialization"
+    (SpawnPlayer _ _ _ _ _ {-Metadata NYI-}) -> error "Unimplemented Serialization"
     (Animation eid anim) -> serialize eid <> serialize anim
-    (Statistics _) -> BS.singleton 0x00
-    (BlockBreakAnimation _ _ _) -> BS.singleton 0x00
-    (UpdateBlockEntity _ _ _) -> BS.singleton 0x00
-    (BlockAction _ _ _) -> BS.singleton 0x00
+    (Statistics _) -> error "Unimplemented Serialization"
+    (BlockBreakAnimation _ _ _) -> error "Unimplemented Serialization"
+    (UpdateBlockEntity _ _ _) -> error "Unimplemented Serialization"
+    (BlockAction _ _ _) -> error "Unimplemented Serialization"
     (BlockChange block bs) -> serialize block <> serialize bs
-    (BossBar _ {- BossBarAction NYI -}) -> BS.singleton 0x00
+    (BossBar _ {- BossBarAction NYI -}) -> error "Unimplemented Serialization"
     (ServerDifficulty dif) -> serialize dif
-    (TabComplete _) -> BS.singleton 0x00
+    (TabComplete _) -> error "Unimplemented Serialization"
     (ChatMessage msg loc) -> serialize msg <> serialize loc
-    (MultiBlockChange _ _) -> BS.singleton 0x00
-    (ConfirmTransaction _ _ _) -> BS.singleton 0x00
-    (CloseWindow _) -> BS.singleton 0x00
-    (OpenWindow _ _ _ _ _) -> BS.singleton 0x00
+    (MultiBlockChange _ _) -> error "Unimplemented Serialization"
+    (ConfirmTransaction wid transId acc) -> serialize wid <> serialize transId <> serialize acc
+    (CloseWindow _) -> error "Unimplemented Serialization"
+    (OpenWindow _ _ _ _ _) -> error "Unimplemented Serialization"
     (WindowItems winId slots) -> serialize winId <> serialize (genericLength slots :: Int16) <> BS.concat (map serialize slots)
-    (WindowProperty _ _ _) -> BS.singleton 0x00
+    (WindowProperty _ _ _) -> error "Unimplemented Serialization"
     (SetSlot wid slotNum slot) -> serialize wid <> serialize slotNum <> serialize slot
-    (SetCooldown _ _) -> BS.singleton 0x00
+    (SetCooldown _ _) -> error "Unimplemented Serialization"
     (PluginMessage str bs) -> serialize str <> bs
-    (NamedSoundEffect _ _ _ _ _) -> BS.singleton 0x00
-    (DisconnectPlay _) -> BS.singleton 0x00
-    (EntityStatus _ _) -> BS.singleton 0x00
-    (Explosion _ _ _ _) -> BS.singleton 0x00
-    (UnloadChunk _) -> BS.singleton 0x00
+    (NamedSoundEffect _ _ _ _ _) -> error "Unimplemented Serialization"
+    (DisconnectPlay _) -> error "Unimplemented Serialization"
+    (EntityStatus _ _) -> error "Unimplemented Serialization"
+    (Explosion _ _ _ _) -> error "Unimplemented Serialization"
+    (UnloadChunk _) -> error "Unimplemented Serialization"
     (ChangeGameState InvalidBed) -> BS.singleton 0x00 <> serialize (0 :: Float)
     (ChangeGameState (Raining isStarting)) -> BS.singleton (if isStarting then 0x01 else 0x02) <> serialize (0 :: Float)
     (ChangeGameState (ChangeGamemode g)) -> BS.singleton 0x03 <> serialize (case g of {Survival -> 0; Creative -> 1;} :: Float)
@@ -162,7 +163,7 @@ instance Serialize Packet where
     (ChangeGameState ElderGuardian) -> BS.singleton 0x09 <> serialize (0 :: Float)
     (KeepAlive kid) -> serialize kid
     (ChunkData (cx,cz) guCont bitMask chunkSecs mBiomes blockEnts) -> serialize cx <> serialize cz <> serialize guCont <> serialize bitMask <> withLength (BS.concat $ (map serialize chunkSecs) ++ maybeToList mBiomes) <> withListLength blockEnts
-    (Effect _ _ _ _) -> BS.singleton 0x00
+    (Effect _ _ _ _) -> error "Unimplemented Serialization"
     (JoinGame eid gamemode dim dif maxp leveltype reduce) -> serialize eid <> serialize gamemode <> serialize dim <> serialize dif <> serialize maxp <> serialize leveltype <> serialize reduce
     (PlayerAbilities flag fly fov) -> serialize flag <> serialize fly <> serialize fov
     (PlayerPositionAndLook (x,y,z) (yaw,pitch) relFlag tpId) -> serialize x <> serialize y <> serialize z <> serialize yaw <> serialize pitch <> serialize relFlag <> serialize tpId
@@ -336,7 +337,7 @@ instance Show Packet where
     (SpawnMob _ _ _ _ _ _ _ _ _ _) -> []
     (SpawnPainting _ _ _ {-NYI-} _) -> []
     (SpawnPlayer _ _ _ _ _ {-Metadata NYI-}) -> []
-    (Animation _ _) -> []
+    (Animation eid anim) -> [("Entity Id",show eid),("Animation",show anim)]
     (Statistics _) -> []
     (BlockBreakAnimation _ _ _) -> []
     (UpdateBlockEntity _ _ _) -> []
@@ -345,7 +346,7 @@ instance Show Packet where
     (BossBar _ {- BossBarAction NYI -}) -> []
     (ServerDifficulty dif) -> [("Difficulty",show dif)]
     (TabComplete _) -> []
-    (ChatMessage _ _) -> []
+    (ChatMessage msg loc) -> [("Message",show msg),("Location",show loc)]
     (MultiBlockChange _ _) -> []
     (ConfirmTransaction _ _ _) -> []
     (CloseWindow _) -> []
@@ -361,7 +362,7 @@ instance Show Packet where
     (Explosion _ _ _ _) -> []
     (UnloadChunk _) -> []
     (ChangeGameState _) -> []
-    (KeepAlive _) -> []
+    (KeepAlive kid) -> [("Keep Alive Id",show kid)]
     (ChunkData (cx,cz) guCont bitMask cs _mBio _nbt) -> [("Column",show (cx,cz)),("Bit Mask",show bitMask)] ++ (if guCont then [("Full Chunk","")] else []) ++ [("Section Count",show (length cs))]
     (Effect _ _ _ _) -> []
     (JoinGame eid gm dim dif maxP lvl reduce) -> [("Entity Id",show eid),("Gamemode", show gm),("Dimension",show dim),("Difficulty",show dif),("Max Players",show maxP),("Level Type",lvl)] ++ if reduce then [("Reduce Debug Info","")] else []
