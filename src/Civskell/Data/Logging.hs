@@ -4,52 +4,59 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 module Civskell.Data.Logging 
-  (logg,logLevel
+  (logg,loge,logt
+  ,logLevel
   ,LogLevel(..)
   ,runLogger
-  ,HasLogging
   ) where
 
 import Control.Eff
+import Control.Concurrent.MVar
 
 import Civskell.Data.Types
-
-type HasLogging r = Member Logging r
-
-data Logging a where
-  LogString :: LogLevel -> String -> Logging ()
-
-data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | VerboseLog | NormalLog deriving Eq
 
 {-# INLINE logg #-}
 logg :: HasLogging r => String -> Eff r ()
 logg = send . LogString NormalLog
 
+{-# INLINE loge #-}
+loge :: HasLogging r => String -> Eff r ()
+loge = send . LogString ErrorLog
+
+{-# INLINE logt #-}
+logt :: HasLogging r => String -> String -> Eff r ()
+logt tag msg = send $ LogString (TaggedLog tag) msg
+
 {-# INLINE logLevel #-}
 logLevel :: HasLogging r => LogLevel -> String -> Eff r ()
 logLevel l s = send (LogString l s)
 
-runLogger :: HasIO r => Eff (Logging ': r) a -> Eff r a
-runLogger (Pure x) = return x
-runLogger (Eff u q) = case u of
+runLogger :: HasIO r => MVar () -> Eff (Logging ': r) a -> Eff r a
+runLogger _ (Pure x) = return x
+runLogger s (Eff u q) = case u of
   Inject (LogString level str) -> case level of
     HexDump -> do
-      --send (putStrLn str)
-      runLogger (runTCQ q ())
+      --withLock s (putStrLn str)
+      runLogger s (runTCQ q ())
     ClientboundPacket -> do
-      send (putStrLn ("[\x1b[32mSent\x1b[0m] " ++ str))
-      runLogger (runTCQ q ())
+      withLock s (putStrLn ("[\x1b[32mSent\x1b[0m] " ++ str))
+      runLogger s (runTCQ q ())
     ServerboundPacket -> do
-      send (putStrLn ("[\x1b[32mRecv\x1b[0m] " ++ str))
-      runLogger (runTCQ q ())
+      withLock s (putStrLn ("[\x1b[32mRecv\x1b[0m] " ++ str))
+      runLogger s (runTCQ q ())
     ErrorLog -> do
-      send (putStrLn $ "[\x1b[31mERROR\x1b[0m] " ++ str)
-      runLogger (runTCQ q ())
+      withLock s (putStrLn $ "[\x1b[31m\x1b[1mError\x1b[0m] " ++ str)
+      runLogger s (runTCQ q ())
     VerboseLog -> do
-      send (putStrLn $ "[\x1b[36mCivSkell/Verbose\x1b[0m] " ++ str)
-      runLogger (runTCQ q ())
+      withLock s (putStrLn $ "[\x1b[36mCivSkell/Verbose\x1b[0m] " ++ str)
+      runLogger s (runTCQ q ())
+    (TaggedLog tag) -> do
+      withLock s (putStrLn $ "[\x1b[36m" ++ tag ++ "\x1b[0m] " ++ str)
+      runLogger s (runTCQ q ())
     NormalLog -> do
-      send (putStrLn $ "[\x1b[36mCivSkell\x1b[0m] " ++ str)
-      runLogger (runTCQ q ())
-  Weaken otherEffects -> Eff otherEffects (Singleton (\x -> runLogger (runTCQ q x)))
+      withLock s (putStrLn $ "[\x1b[36mCivSkell\x1b[0m] " ++ str)
+      runLogger s (runTCQ q ())
+  Weaken otherEffects -> Eff otherEffects (Singleton (\x -> runLogger s (runTCQ q x)))
 
+withLock :: HasIO r => MVar () -> IO a -> Eff r a
+withLock lock ma = send (withMVar lock $ const ma)

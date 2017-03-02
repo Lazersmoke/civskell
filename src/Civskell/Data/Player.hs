@@ -17,47 +17,6 @@ import Civskell.Tech.Network
 import Civskell.Data.World
 import Civskell.Data.Logging
 
-type HasPlayer r = Member Player r
-
-data Player a where
-  -- Simple maybe state for brand
-  PlayerBrand :: Player String
-  SetPlayerBrand :: String -> Player ()
-  -- Simple maybe state for username
-  PlayerName :: Player String
-  SetPlayerName :: String -> Player ()
-  -- Simple maybe state for UUID
-  PlayerUUID :: Player String
-  SetPlayerUUID :: String -> Player ()
-  -- Simple state for selected slot
-  PlayerHolding :: Player Short
-  SetPlayerHolding :: Short -> Player ()
-  -- Simple state for Gamemode
-  PlayerGamemode :: Player Gamemode
-  SetPlayerGamemode :: Gamemode -> Player ()
-  -- Teleport confirm que
-  PlayerAddTP :: (Double,Double,Double) -> (Float,Float) -> Word8 -> Player ()
-  PlayerClearTP :: VarInt -> Player Bool
-  -- Keep Alive confirm que
-  PlayerAddKeepAlive :: Player ()
-  PlayerClearKeepAlive :: VarInt -> Player Bool
-  -- Position and Look
-  GetPlayerPosition :: Player (Double,Double,Double)
-  SetPlayerPosition :: (Double,Double,Double) -> Player ()
-  GetPlayerViewAngle :: Player (Float,Float)
-  SetPlayerViewAngle :: (Float,Float) -> Player ()
-  -- Player Inventory
-  GetPlayerSlot :: Short -> Player Slot
-  SetPlayerSlot :: Short -> Slot -> Player ()
-  -- Breaking Blocks
-  StartBreaking :: BlockCoord -> Player ()
-  StopBreaking :: BlockCoord -> Player ()
-  -- Sprinting and Sneaking
-  SetMoveMode :: MoveMode -> Player ()
-  GetMoveMode :: Player MoveMode
-  -- Flush Inbox
-  FlushInbox :: Player ()
-
 {-# INLINE getBrand #-}
 getBrand :: HasPlayer r => Eff r String
 getBrand = send PlayerBrand
@@ -97,14 +56,6 @@ pendTeleport xyz yp r = send (PlayerAddTP xyz yp r)
 {-# INLINE clearTeleport #-}
 clearTeleport :: HasPlayer r => VarInt -> Eff r Bool
 clearTeleport = send . PlayerClearTP
-
-{-# INLINE pendKeepAlive #-}
-pendKeepAlive :: HasPlayer r => Eff r ()
-pendKeepAlive = send PlayerAddKeepAlive
-
-{-# INLINE clearKeepAlive #-}
-clearKeepAlive :: HasPlayer r => VarInt -> Eff r Bool
-clearKeepAlive = send . PlayerClearKeepAlive
 
 {-# INLINE initPlayer #-}
 initPlayer :: (HasWorld r, HasNetworking r, HasLogging r) => Eff (Player ': r) a -> Eff r a
@@ -158,6 +109,10 @@ flushInbox = send FlushInbox
 {-# INLINE getInventorySlot #-}
 getInventorySlot :: HasPlayer r => Short -> Eff r Slot
 getInventorySlot = send . GetPlayerSlot
+
+{-# INLINE logp #-}
+logp :: HasPlayer r => String -> Eff r ()
+logp = send . LogPlayerName
 
 clientToCivskellSlot :: Short -> Short
 clientToCivskellSlot s
@@ -217,15 +172,6 @@ runPlayer i (Eff u q) = case u of
     p <- getPlayer i
     setPlayer i p {teleportConfirmationQue = Set.delete tid $ teleportConfirmationQue p}
     runPlayer i (runTCQ q $ Set.member tid $ teleportConfirmationQue p)
-  -- Add a new keep alive id to the que
-  Inject PlayerAddKeepAlive -> do
-    modifyPlayer i $ \p -> p {nextKid = 1 + nextKid p, keepAliveQue = Set.insert (nextKid p) $ keepAliveQue p}
-    runPlayer i (runTCQ q ())
-  -- Check if the keep alive id is in the que. If it is, then clear and return true, else false
-  Inject (PlayerClearKeepAlive k) -> do
-    p <- getPlayer i
-    setPlayer i p {keepAliveQue = Set.delete k $ keepAliveQue p}
-    runPlayer i (runTCQ q $ Set.member k $ keepAliveQue p)
   Inject GetPlayerPosition -> runPlayer i . runTCQ q . playerPosition =<< getPlayer i
   Inject (SetPlayerPosition xyz) -> modifyPlayer i (\p -> p {playerPosition = xyz}) >> runPlayer i (runTCQ q ())
   Inject GetPlayerViewAngle -> runPlayer i . runTCQ q . viewAngle =<< getPlayer i
@@ -236,15 +182,16 @@ runPlayer i (Eff u q) = case u of
     sendPacket (Client.SetSlot 0 (civskellToClientSlot slotNum) slot)
     runPlayer i (runTCQ q ())
   Inject (StartBreaking block) -> do
-    modifyPlayer i $ \p -> p {diggingBlocks = Map.insert block (BlockBreak 0) (diggingBlocks p)} 
+    modifyPlayer i $ \p -> p {diggingBlocks = Map.insert block (InProgress 0) (diggingBlocks p)} 
     runPlayer i (runTCQ q ())
   Inject (StopBreaking block) -> modifyPlayer i (\p -> p {diggingBlocks = Map.delete block (diggingBlocks p)}) >> runPlayer i (runTCQ q ())
   Inject GetMoveMode -> runPlayer i . runTCQ q . moveMode =<< getPlayer i
   Inject (SetMoveMode mode) -> modifyPlayer i (\p -> p {moveMode = mode}) >> runPlayer i (runTCQ q ())
   Inject FlushInbox -> do
     pkts <- inboxForPlayer i
-    forM_ pkts sendPacket 
+    forM_ pkts (\(ForAny p) -> sendClientPacket p)
     runPlayer i (runTCQ q ())
+  Inject (LogPlayerName msg) -> (>> runPlayer i (runTCQ q ())) . flip logt msg . clientUsername =<< getPlayer i
   -- Not our turn
   Weaken otherEffects -> Eff otherEffects (Singleton (\x -> runPlayer i (runTCQ q x)))
 

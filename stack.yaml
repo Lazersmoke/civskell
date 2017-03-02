@@ -15,7 +15,7 @@
 # resolver:
 #  name: custom-snapshot
 #  location: "./custom-snapshot.yaml"
-resolver: lts-7.15
+resolver: lts-8.2
 
 # User packages to be built.
 # Various formats can be used as shown in the example below.
@@ -39,7 +39,7 @@ packages:
 - '.'
 - location: 
     git: git@github.com:Lazersmoke/reee-monads.git
-    commit: 0346c6ba5cb010b8dd2c4037cf9263275009c56f
+    commit: 1fb57be23dfc6c61a7050c352d6800161601a7aa
   extra-dep: true
 # Dependency packages to be pulled from upstream that are not in the resolver
 # (e.g., acme-missiles-0.3)

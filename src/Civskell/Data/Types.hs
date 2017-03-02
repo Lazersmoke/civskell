@@ -6,10 +6,89 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-module Civskell.Data.Types where
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE RankNTypes #-}
+module Civskell.Data.Types
+  -- Constants
+  (airChunk
+  ,allCoords
+  ,defaultPlayerInfo
+  ,protocolVersion
+  -- Helper functions
+  ,blockInChunk
+  ,blockToChunk
+  ,blockToRelative
+  ,formatPacket
+  ,jsonyText
+  -- Type synonyms
+  ,EncryptionCouplet
+  ,HasIO
+  ,Short
+  -- Blocks
+  ,BlockBreak(..)
+  ,Block(..)
+  ,BlockCoord
+  ,BlockOffset
+  ,BlockFace(..)
+  ,BlockState(..)
+  -- Chunks
+  ,ChunkCoord(..)
+  ,ChunkSection(..)
+  -- Packet Enums
+  ,AnimationAction(..)
+  ,ClientStatusAction(..)
+  ,GameStateChange(..)
+  ,InventoryClickMode(..)
+  ,PlayerDigAction(..)
+  ,PlayerEntityAction(..)
+  -- Id's and newtypes
+  ,VarInt(..)
+  ,EntityId(..)
+  --,PacketId(..) -- Actually a class
+  ,WindowId(..)
+  ,KeepAliveId
+  ,PlayerId
+  ,TPConfirmId
+  ,TransactionId
+  -- Aux Data Types
+  ,PlayerInfo(..)
+  ,Slot(..)
+  -- Aux Enums
+  ,Difficulty(..)
+  ,Gamemode(..)
+  ,Hand(..)
+  ,MoveMode(..)
+  ,ServerState(..)
+  ,Side(..)
+  -- Player
+  ,HasPlayer
+  ,Player(..)
+  -- World
+  ,HasWorld
+  ,WorldData(..)
+  ,World(..)
+  -- Logging
+  ,HasLogging
+  ,Logging(..)
+  ,LogLevel(..)
+  -- Network
+  ,HasNetworking
+  ,Networking(..)
+  -- Packet
+  ,Packet(..)
+  ,ClientPacket(..)
+  ,ServerPacket(..)
+  ,ForAny(..)
+
+  ,Serialize(..)
+  ) where
 
 import Control.Eff
 import Crypto.Cipher.AES (AES128)
@@ -31,7 +110,6 @@ protocolVersion = 316
 type Short = Int16
 -- Cipher, Enc, Dec
 type EncryptionCouplet = (AES128, BS.ByteString, BS.ByteString)
-
 -- `HasIO` effect
 type HasIO r = Member IO r
 -- You make an effect that `HasIO` by `send`ing an IO action (`send (putStrLn "meow")`)
@@ -42,13 +120,15 @@ jsonyText s = "{\"text\":\"" ++ s ++ "\"}"
 
 -- Datatypes
 -- Used in PlayerInfo to track the breaking stage of a block the player is mining
-newtype BlockBreak = BlockBreak Word8
+data BlockBreak = InProgress Word8 | DoneBreaking
 
 -- A block coordinate, not an entity position. Ord is derivied for use in maps.
-newtype BlockCoord = BlockCoord (Int,Int,Int) deriving (Eq,Ord)
+data Block (r :: Relativity) = Block (Int,Int,Int) deriving (Eq,Ord)
+type BlockCoord = Block 'Absolute
+type BlockOffset = Block 'Relative
 
 instance Show BlockCoord where
-  show (BlockCoord (x,y,z)) = "(Block)<" ++ show x ++ "," ++ show y ++ "," ++ show z ++ ">"
+  show (Block (x,y,z)) = "(Block)<" ++ show x ++ "," ++ show y ++ "," ++ show z ++ ">"
 
 {- This is a bad instance that took almost an hour to debug. It still isn't fixed, just worked around (it's derived, and we don't rely on its ordering in Map.elems)
 instance Ord BlockCoord where
@@ -88,7 +168,7 @@ instance Show Slot where
       n (Just nbt) = " with tags: " ++ show nbt
 
 -- Maps coords to non-air blocks. BlockState 0 0 doesn't mean anything. Air just doesn't have anything in the map.
-data ChunkSection = ChunkSection (Map BlockCoord BlockState)
+data ChunkSection = ChunkSection (Map BlockOffset BlockState)
 
 -- Derived instance is really long
 instance Show ChunkSection where
@@ -96,6 +176,9 @@ instance Show ChunkSection where
 
 -- Enumerations for the protocol
 data Side = Server | Client
+
+-- Kind for BlockCoord
+data Relativity = Relative | Absolute
 
 -- These are used for to select the correct parser (packet id 0 is reused in all four modes)
 data ServerState = Handshaking | Playing | LoggingIn | Status
@@ -131,22 +214,22 @@ data GameStateChange = InvalidBed | Raining Bool | ChangeGamemode Gamemode | Exi
 data ClientStatusAction = PerformRespawn | RequestStats | OpenInventory deriving Show
 
 blockToChunk :: BlockCoord -> ChunkCoord
-blockToChunk (BlockCoord (x,y,z)) = ChunkCoord (x `div` 16,y `div` 16,z `div` 16)
+blockToChunk (Block (x,y,z)) = ChunkCoord (x `div` 16,y `div` 16,z `div` 16)
 
-blockToRelative :: BlockCoord -> BlockCoord
-blockToRelative (BlockCoord (x,y,z)) = BlockCoord (f x,f y,f z)
+blockToRelative :: BlockCoord -> BlockOffset
+blockToRelative (Block (x,y,z)) = Block (f x,f y,f z)
   where
     -- We don't use negative relative coords in negative chunks
     f n = if mod n 16 < 0 then 16 + mod n 16 else mod n 16
 
 -- This is just for name sharing. We never have a constraint (PacketId p) => p
-class PacketId p where
-  packetName :: p -> String
-  packetId :: p -> VarInt
-  packetSide :: p -> Side
-  packetState :: p -> ServerState
+--class PacketId p where
+  --packetName :: p -> String
+  --packetId :: p -> VarInt
+  --packetSide :: p -> Side
+  --packetState :: p -> ServerState
 
-blockInChunk :: BlockCoord -> ChunkSection -> BlockState
+blockInChunk :: BlockOffset -> ChunkSection -> BlockState
 blockInChunk b (ChunkSection m) = fromMaybe (BlockState 0 0) (Map.lookup b m)
 
 -- Block id, damage
@@ -155,11 +238,11 @@ data BlockState = BlockState Short Word8 deriving Eq
 instance Show BlockState where
   show (BlockState bid dmg) = "Block [" ++ show bid ++ ":" ++ show dmg ++ "]"
 
-allCoords :: [BlockCoord]
-allCoords = [BlockCoord (x,y,z) | y <- [0..15], z <- [0..15], x <- [0..15]]
+allCoords :: [BlockOffset]
+allCoords = [Block (x,y,z) | y <- [0..15], z <- [0..15], x <- [0..15]]
 
-airChunk :: Map BlockCoord BlockState
-airChunk = Map.fromList [(BlockCoord (x,y,z),BlockState 0 0) | x <- [0..15], z <- [0..15], y <- [0..15]]
+airChunk :: Map BlockOffset BlockState
+airChunk = Map.fromList [(Block (x,y,z),BlockState 0 0) | x <- [0..15], z <- [0..15], y <- [0..15]]
 
 formatPacket :: String -> [(String,String)] -> String
 formatPacket n [] = "{" ++ n ++ "}"
@@ -199,3 +282,105 @@ defaultPlayerInfo = PlayerInfo
   ,diggingBlocks = Map.empty
   ,moveMode = Walking
   }
+
+type HasPlayer r = Member Player r
+
+data Player a where
+  -- Simple maybe state for brand
+  PlayerBrand :: Player String
+  SetPlayerBrand :: String -> Player ()
+  -- Simple maybe state for username
+  PlayerName :: Player String
+  SetPlayerName :: String -> Player ()
+  -- Simple maybe state for UUID
+  PlayerUUID :: Player String
+  SetPlayerUUID :: String -> Player ()
+  -- Simple state for selected slot
+  PlayerHolding :: Player Short
+  SetPlayerHolding :: Short -> Player ()
+  -- Simple state for Gamemode
+  PlayerGamemode :: Player Gamemode
+  SetPlayerGamemode :: Gamemode -> Player ()
+  -- Teleport confirm que
+  PlayerAddTP :: (Double,Double,Double) -> (Float,Float) -> Word8 -> Player ()
+  PlayerClearTP :: VarInt -> Player Bool
+  -- Position and Look
+  GetPlayerPosition :: Player (Double,Double,Double)
+  SetPlayerPosition :: (Double,Double,Double) -> Player ()
+  GetPlayerViewAngle :: Player (Float,Float)
+  SetPlayerViewAngle :: (Float,Float) -> Player ()
+  -- Player Inventory
+  GetPlayerSlot :: Short -> Player Slot
+  SetPlayerSlot :: Short -> Slot -> Player ()
+  -- Breaking Blocks
+  StartBreaking :: BlockCoord -> Player ()
+  StopBreaking :: BlockCoord -> Player ()
+  -- Sprinting and Sneaking
+  SetMoveMode :: MoveMode -> Player ()
+  GetMoveMode :: Player MoveMode
+  -- Flush Inbox
+  FlushInbox :: Player ()
+  -- Log with player name as tag
+  LogPlayerName :: String -> Player ()
+
+type HasLogging r = Member Logging r
+
+data Logging a where
+  LogString :: LogLevel -> String -> Logging ()
+
+data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | VerboseLog | TaggedLog String | NormalLog deriving Eq
+
+data WorldData = WorldData {chunks :: Map ChunkCoord ChunkSection, players :: Map PlayerId PlayerInfo, nextPlayerId :: PlayerId, broadcastLog :: [([PlayerId],ForAny ClientPacket)]}
+
+type HasWorld r = Member World r
+
+data World a where
+  GetChunk :: ChunkCoord -> World ChunkSection
+  SetBlock :: BlockState -> BlockCoord -> World ()
+  SetChunk :: ChunkSection -> ChunkCoord -> World ()
+  SetColumn :: [ChunkSection] -> (Int,Int) -> Maybe BS.ByteString -> World ()
+  NewPlayer :: World PlayerId
+  SetPlayer :: PlayerId -> PlayerInfo -> World ()
+  GetPlayer :: PlayerId -> World PlayerInfo
+  AllPlayers :: World [PlayerInfo]
+  ForallPlayers :: (PlayerInfo -> PlayerInfo) -> World ()
+  InboxForPlayer :: PlayerId -> World [ForAny ClientPacket]
+  BroadcastPacket :: ForAny ClientPacket -> World ()
+
+-- Things that can be serialized into a BS for the network
+class Serialize s where
+  serialize :: s -> BS.ByteString
+
+class Packet p where
+  type PacketSide p :: Side
+  type PacketState p :: ServerState
+  packetPretty :: p -> [(String,String)]
+  packetName :: String
+  packetId :: VarInt
+  onPacket :: (HasLogging r,HasPlayer r,HasWorld r,HasNetworking r) => p -> Eff r ()
+  onPacket _ = Pure ()
+
+showPacket :: forall p. Packet p => p -> String
+showPacket pkt = formatPacket (packetName @p) (packetPretty pkt)
+
+data ServerPacket s = forall p. (Packet p,PacketSide p ~ 'Server,PacketState p ~ s) => ServerPacket p
+instance Show (ServerPacket s) where show (ServerPacket p) = showPacket p
+
+data ForAny (p :: k -> *) = forall s. ForAny (p s)
+
+data ClientPacket s = forall p. (Packet p,PacketSide p ~ 'Client,PacketState p ~ s,Serialize p) => ClientPacket p
+instance Show (ClientPacket s) where show (ClientPacket p) = showPacket p
+instance Serialize (ClientPacket s) where serialize (ClientPacket p) = serialize p
+
+type HasNetworking r = Member Networking r
+
+data Networking a where
+  SetCompressionLevel :: Maybe VarInt -> Networking ()
+  AddCompression :: BS.ByteString -> Networking BS.ByteString
+  RemoveCompression :: BS.ByteString -> Networking BS.ByteString
+  SetupEncryption :: EncryptionCouplet -> Networking ()
+  GetFromNetwork :: Int -> Networking BS.ByteString
+  PutIntoNetwork :: BS.ByteString -> Networking ()
+  IsPacketReady :: Networking Bool
+
+

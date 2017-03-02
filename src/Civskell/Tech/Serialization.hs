@@ -1,11 +1,12 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE BinaryLiterals #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 module Civskell.Tech.Serialization where
 
 import Data.Bits
 import Data.Int (Int16,Int32,Int64)
-import Data.List (unfoldr)
+import Data.List (unfoldr,foldl')
 import Data.Map.Lazy (Map)
 import Data.NBT
 import Data.Semigroup ((<>))
@@ -54,8 +55,8 @@ instance Serialize BlockState where
       u = unsafeCoerce :: Short -> VarInt
       v = unsafeCoerce :: Word8 -> VarInt
 
-instance Serialize BlockCoord where
-  serialize (BlockCoord (x,y,z)) = serialize $
+instance Serialize (Block r) where
+  serialize (Block (x,y,z)) = serialize $
     (shiftL (u x .&. 0x3FFFFFF) 38) .|.
     (shiftL (u y .&. 0xFFF) 26) .|.
     (u z .&. 0x3FFFFFF)
@@ -106,9 +107,6 @@ instance Serialize Int64 where
 instance Serialize Double where
   serialize = serialize . (unsafeCoerce :: Double -> Int64)
 
--- Things that can be serialized into a BS for the network
-class Serialize s where
-  serialize :: s -> BS.ByteString
 
 -- Annotate a BS with its length as a VarInt
 withLength :: BS.ByteString -> BS.ByteString
@@ -132,7 +130,7 @@ instance Serialize ChunkSection where
       -- Notify and crash *right away* if this gets fucked up. This only happens if we have a bad Ord instance.
       -- Note that Map.size is O(1) so we aren't wasting too much time here
       -- Merge the chunk's blocks with air because air blocks don't exist in the chunk normally
-      merged :: Map BlockCoord BlockState
+      merged :: Map BlockOffset BlockState
       merged = if Map.size (Map.union bs airChunk) == 4096 then Map.union bs airChunk else error "Bad Chunksection"
 
       -- `longChunks` is because Mojang likes to twist their data into weird shapes
@@ -140,8 +138,8 @@ instance Serialize ChunkSection where
       sArray = LBS.toStrict . longChunks . BB.toLazyByteString $ sBlockStates merged
 
       -- This should be the final result, but mojang is weird about chunk sections :S
-      sBlockStates :: Map BlockCoord BlockState -> BB.BitBuilder
-      sBlockStates m = foldl (\bb bc -> aBlock (Map.findWithDefault (BlockState 0 0) bc m) `BB.append` bb) BB.empty allCoords
+      sBlockStates :: Map BlockOffset BlockState -> BB.BitBuilder
+      sBlockStates m = foldl' (\bb bc -> aBlock (Map.findWithDefault (BlockState 0 0) bc m) `BB.append` bb) BB.empty allCoords
 
       -- Annotate the data with its length in Minecraft Longs (should always be a whole number assuming 16^3 blocks/chunk)
       chunkData :: BS.ByteString
@@ -149,7 +147,7 @@ instance Serialize ChunkSection where
 
       -- Right now we `const 15` the blocks, so all the blocks are fullbright
       -- TODO: Add lighting information somewhere or derive it here
-      createLights = Map.foldl (\bb _ -> BB.fromBits 4 (15 :: Word8) `BB.append` bb) BB.empty
+      createLights = Map.foldl' (\bb _ -> BB.fromBits 4 (15 :: Word8) `BB.append` bb) BB.empty
 
       -- Mojang felt like packing chunks into arrays of longs lol
       longChunks :: LBS.ByteString -> LBS.ByteString

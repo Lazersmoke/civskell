@@ -1,1 +1,2 @@
-stack build --pedantic --file-watch
+stack build --pedantic --file-watch --executable-profiling --library-profiling 
+# --ghc-options="-fprof-auto -rtsopts"

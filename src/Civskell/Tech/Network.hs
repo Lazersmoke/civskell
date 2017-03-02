@@ -4,7 +4,7 @@
 {-# LANGUAGE GADTs #-}
 module Civskell.Tech.Network
   (module Civskell.Data.Networking
-  ,sendPacket,getPacket,authGetReq
+  ,sendClientPacket,sendPacket,getPacket,getPlayPacket,authGetReq
   ) where
 
 import Control.Eff (Eff,send)
@@ -25,30 +25,35 @@ import Civskell.Data.Logging
 import Civskell.Data.Networking
 import Civskell.Data.Types
 import Civskell.Tech.Parse
-import Civskell.Tech.Serialization
-import qualified Civskell.Packet.Clientbound as Client
-import qualified Civskell.Packet.Serverbound as Server
+--import qualified Civskell.Packet.Clientbound as Client
+--import qualified Civskell.Packet.Serverbound as Server
 
 -- Send something serializeable over the network
-sendPacket :: (HasLogging r,HasNetworking r) => Client.Packet -> Eff r ()
-sendPacket s = do
+sendPacket :: (HasLogging r,HasNetworking r,Serialize p,Packet p,PacketSide p ~ 'Client) => p -> Eff r ()
+sendPacket = sendClientPacket . ClientPacket
+
+sendClientPacket :: (HasLogging r,HasNetworking r) => ClientPacket s -> Eff r ()
+sendClientPacket s = do
   -- Log its hex dump
   logLevel ClientboundPacket $ show s
   logLevel HexDump $ indentedHex (serialize s)
   -- Send it
   rPut =<< addCompression (serialize s)
 
+getPlayPacket :: (HasLogging r,HasNetworking r) => Eff r (Maybe (ServerPacket 'Playing))
+getPlayPacket = getPacket parsePlayPacket
+
 -- Get a packet from the network (high level) using a parser context to decide which parser set to use
-getPacket :: (HasLogging r,HasNetworking r) => ServerState -> Eff r (Maybe Server.Packet)
-getPacket st = do
+getPacket :: (HasLogging r,HasNetworking r) => Parser p -> Eff r (Maybe p)
+getPacket pktParse = do
   -- Get the raw data (sans length)
   pkt <- removeCompression =<< getRawPacket
   -- Parse it
-  case parse (parsePacket st) "" pkt of
+  case parse pktParse "" pkt of
     -- If it parsed ok, then
     Right serverPkt -> do
       -- Return it
-      logLevel ServerboundPacket $ show serverPkt
+      --logLevel ServerboundPacket $ show (ServerPacket serverPkt)
       logLevel HexDump $ indentedHex $ pkt
       return $ Just serverPkt
     -- If it didn't parse correctly, print the error and return Nothing

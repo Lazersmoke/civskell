@@ -10,15 +10,12 @@ import Control.Eff
 import Control.Monad (forM)
 import Data.Bits
 import Data.List ((\\))
-import Data.Map.Lazy (Map)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Lazy as Map
 
 import Civskell.Data.Types
-import Civskell.Data.Logging
 import qualified Civskell.Packet.Clientbound as Client
 
-data WorldData = WorldData {chunks :: Map ChunkCoord ChunkSection, players :: Map PlayerId PlayerInfo, nextPlayerId :: PlayerId, broadcastLog :: [([PlayerId],Client.Packet)]}
 
 initWorld :: WorldData
 initWorld = WorldData {chunks = Map.empty,players = Map.empty, nextPlayerId = 0, broadcastLog = []}
@@ -26,23 +23,8 @@ initWorld = WorldData {chunks = Map.empty,players = Map.empty, nextPlayerId = 0,
 testInitWorld :: WorldData
 testInitWorld = initWorld {chunks = Map.fromList [(ChunkCoord (cx,cy,cz),exampleChunk) | cx <- [-3..3], cz <- [-3..3], cy <- [0..7]]}
   where
-    exampleChunk = ChunkSection $ Map.fromList [(BlockCoord (x,y,z),stone) | x <- [0..15], y <- [0..15], z <- [0..15]]
+    exampleChunk = ChunkSection $ Map.fromList [(Block (x,y,z),stone) | x <- [0..15], y <- [0..15], z <- [0..15]]
     stone = BlockState 1 0
-
-type HasWorld r = Member World r
-
-data World a where
-  GetChunk :: ChunkCoord -> World ChunkSection
-  SetBlock :: BlockState -> BlockCoord -> World ()
-  SetChunk :: ChunkSection -> ChunkCoord -> World ()
-  SetColumn :: [ChunkSection] -> (Int,Int) -> Maybe BS.ByteString -> World ()
-  NewPlayer :: World PlayerId
-  SetPlayer :: PlayerId -> PlayerInfo -> World ()
-  GetPlayer :: PlayerId -> World PlayerInfo
-  AllPlayers :: World [PlayerInfo]
-  InboxForPlayer :: PlayerId -> World [Client.Packet]
-  BroadcastPacket :: Client.Packet -> World ()
-  DumpBroadcast :: World ()
 
 {-# INLINE getChunk #-}
 getChunk :: Member World r => ChunkCoord -> Eff r ChunkSection
@@ -65,10 +47,10 @@ setColumn :: Member World r => [ChunkSection] -> (Int,Int) -> Maybe BS.ByteStrin
 setColumn cs cxz mBio = send $ SetColumn cs cxz mBio
 
 {-# INLINE colPacket #-}
-colPacket :: HasWorld r => (Int,Int) -> Maybe BS.ByteString -> Eff r Client.Packet
+colPacket :: HasWorld r => (Int,Int) -> Maybe BS.ByteString -> Eff r Client.ChunkData
 colPacket (cx,cz) mbio = forM [0..15] (\cy -> getChunk (ChunkCoord (cx,cy,cz))) >>= \cs -> return (chunksToColumnPacket cs (cx,cz) mbio)
 
-chunksToColumnPacket :: [ChunkSection] -> (Int,Int) -> Maybe BS.ByteString -> Client.Packet
+chunksToColumnPacket :: [ChunkSection] -> (Int,Int) -> Maybe BS.ByteString -> Client.ChunkData
 chunksToColumnPacket cs (cx,cz) mbio = Client.ChunkData (fromIntegral cx,fromIntegral cz) True (bitMask cs) (filter (not . isAirChunk) cs) mbio []
   where
     -- [Bool] -> VarInt basically
@@ -101,17 +83,17 @@ newPlayer = send NewPlayer
 allPlayers :: Member World r => Eff r [PlayerInfo]
 allPlayers = send AllPlayers
 
+{-# INLINE forallPlayers #-}
+forallPlayers :: Member World r => (PlayerInfo -> PlayerInfo) -> Eff r ()
+forallPlayers = send . ForallPlayers
+
 {-# INLINE inboxForPlayer #-}
-inboxForPlayer :: Member World r => PlayerId -> Eff r [Client.Packet]
+inboxForPlayer :: Member World r => PlayerId -> Eff r [ForAny ClientPacket]
 inboxForPlayer = send . InboxForPlayer
 
-{-# INLINE dumpBroadcast #-}
-dumpBroadcast :: Member World r => Eff r ()
-dumpBroadcast = send DumpBroadcast
-
 {-# INLINE broadcastPacket #-}
-broadcastPacket :: Member World r => Client.Packet -> Eff r ()
-broadcastPacket = send . BroadcastPacket
+broadcastPacket :: (Member World r,Packet p, PacketSide p ~ 'Client,Serialize p) => p -> Eff r ()
+broadcastPacket = send . BroadcastPacket . ForAny . ClientPacket
 
 runWorld :: (HasLogging r, HasIO r) => MVar WorldData -> Eff (World ': r) a -> Eff r a
 runWorld _ (Pure x) = Pure x
@@ -120,7 +102,7 @@ runWorld w' (Eff u q) = case u of
   Inject (SetBlock b' bc) -> do
     send $ modifyMVar_ w' $ \w -> do
       let f = if b' == BlockState 0 0 then Map.delete (blockToRelative bc) else Map.insert (blockToRelative bc) b'
-      return w {chunks = Map.adjust (\(ChunkSection c) -> ChunkSection $ f c) (blockToChunk bc) (chunks w)}
+      return w {chunks = Map.alter (Just . maybe (ChunkSection $ f Map.empty) (\(ChunkSection c) -> ChunkSection $ f c)) (blockToChunk bc) (chunks w)}
     runWorld w' $ broadcastPacket (Client.BlockChange bc b')
     runWorld w' (runTCQ q ())
   Inject (SetChunk c' cc@(ChunkCoord (x,y,z))) -> do
@@ -139,8 +121,8 @@ runWorld w' (Eff u q) = case u of
     send $ modifyMVar_ w' $ \w -> return w {players = Map.insert i p (players w)}
     runWorld w' (runTCQ q ())
   Inject AllPlayers -> send (readMVar w') >>= runWorld w' . runTCQ q . Map.elems . players
-  Inject DumpBroadcast -> do
-    send $ modifyMVar_ w' $ \w -> return w {broadcastLog = []}
+  Inject (ForallPlayers f) -> do
+    send $ modifyMVar_ w' $ \w -> return w {players = fmap f (players w)}
     runWorld w' (runTCQ q ())
   Inject (InboxForPlayer i) -> do
     (runWorld w' . runTCQ q =<<) . send . modifyMVar w' $ \w -> do
