@@ -10,6 +10,7 @@ import Control.Eff
 import Control.Monad (forM)
 import Data.Bits
 import Data.List ((\\))
+import Data.SuchThat
 import qualified Data.ByteString as BS
 import qualified Data.Map.Lazy as Map
 
@@ -93,7 +94,7 @@ inboxForPlayer = send . InboxForPlayer
 
 {-# INLINE broadcastPacket #-}
 broadcastPacket :: (Member World r,Packet p, PacketSide p ~ 'Client,Serialize p) => p -> Eff r ()
-broadcastPacket = send . BroadcastPacket . ForAny . ClientPacket
+broadcastPacket = send . BroadcastPacket . SuchThat . ClientPacket . SuchThatStar
 
 runWorld :: (HasLogging r, HasIO r) => MVar WorldData -> Eff (World ': r) a -> Eff r a
 runWorld _ (Pure x) = Pure x

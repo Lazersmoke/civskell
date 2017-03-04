@@ -2,9 +2,11 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 module Civskell.Tech.Network
   (module Civskell.Data.Networking
-  ,sendClientPacket,sendPacket,getPacket,getPlayPacket,authGetReq
+  ,sendClientPacket,sendPacket,getPacket,getPacketFromParser,authGetReq
   ) where
 
 import Control.Eff (Eff,send)
@@ -16,44 +18,48 @@ import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Text.Parsec
 import Text.Parsec.ByteString (Parser)
+import qualified Data.Attoparsec.ByteString as Atto
 import Unsafe.Coerce (unsafeCoerce)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Text.Parsec.Char as C
+import Data.SuchThat
 
 import Civskell.Data.Logging
 import Civskell.Data.Networking
 import Civskell.Data.Types
-import Civskell.Tech.Parse
+--import Civskell.Tech.Parse
+
 --import qualified Civskell.Packet.Clientbound as Client
 --import qualified Civskell.Packet.Serverbound as Server
 
 -- Send something serializeable over the network
 sendPacket :: (HasLogging r,HasNetworking r,Serialize p,Packet p,PacketSide p ~ 'Client) => p -> Eff r ()
-sendPacket = sendClientPacket . ClientPacket
+sendPacket = sendClientPacket . ClientPacket . SuchThatStar
 
 sendClientPacket :: (HasLogging r,HasNetworking r) => ClientPacket s -> Eff r ()
-sendClientPacket s = do
+sendClientPacket (ClientPacket (SuchThatStar s)) = do
   -- Log its hex dump
-  logLevel ClientboundPacket $ show s
+  logLevel ClientboundPacket $ showPacket s
   logLevel HexDump $ indentedHex (serialize s)
   -- Send it
   rPut =<< addCompression (serialize s)
 
-getPlayPacket :: (HasLogging r,HasNetworking r) => Eff r (Maybe (ServerPacket 'Playing))
-getPlayPacket = getPacket parsePlayPacket
+getPacket :: forall p r. (HasLogging r,HasNetworking r,Packet p) => Eff r (Maybe p)
+getPacket = getPacketFromParser (parsePacket @p)
 
 -- Get a packet from the network (high level) using a parser context to decide which parser set to use
-getPacket :: (HasLogging r,HasNetworking r) => Parser p -> Eff r (Maybe p)
-getPacket pktParse = do
+getPacketFromParser :: (HasLogging r,HasNetworking r) => Atto.Parser p -> Eff r (Maybe p)
+getPacketFromParser p = do
   -- Get the raw data (sans length)
   pkt <- removeCompression =<< getRawPacket
+  -- TODO: Take advantage of incremental parsing maybe
   -- Parse it
-  case parse pktParse "" pkt of
+  case Atto.parseOnly p pkt of
     -- If it parsed ok, then
     Right serverPkt -> do
       -- Return it
-      --logLevel ServerboundPacket $ show (ServerPacket serverPkt)
+      --logLevel ServerboundPacket $ show serverPkt
       logLevel HexDump $ indentedHex $ pkt
       return $ Just serverPkt
     -- If it didn't parse correctly, print the error and return Nothing

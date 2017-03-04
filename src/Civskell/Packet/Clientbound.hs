@@ -28,6 +28,7 @@ instance Packet Disconnect where
   packetName = "Disconnect"
   packetId = 0x00
   packetPretty (Disconnect reason) = [("Reason",reason)]
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize Disconnect where
   serialize (Disconnect reason) = BS.append (serialize $ packetId @Disconnect) $ serialize reason
   -- Server ID, Pub Key, Verify Token
@@ -39,6 +40,7 @@ instance Packet EncryptionRequest where
   packetName = "EncryptionRequest"
   packetId = 0x01
   packetPretty (EncryptionRequest sId pubKey vt) = [("Server Id",sId),("Public Key Hash",(take 7 $ show (hash pubKey :: Digest SHA1)) ++ "..."),("Verify Token","0x" ++ (flip showHex "" =<< BS.unpack vt))]
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize EncryptionRequest where
   serialize (EncryptionRequest sId p vt) = BS.append (serialize $ packetId @EncryptionRequest) $ serialize sId <> withLength p <> withLength vt
   -- UUID (with hyphens), Username
@@ -50,6 +52,7 @@ instance Packet LoginSuccess where
   packetName = "LoginSuccess"
   packetId = 0x02
   packetPretty (LoginSuccess uuid name) = [("UUID",uuid),("Username",name)]
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize LoginSuccess where
   serialize (LoginSuccess uuid name) = BS.append (serialize $ packetId @LoginSuccess) $ serialize uuid <> serialize name
   -- Size threshold for compression
@@ -61,6 +64,7 @@ instance Packet SetCompression where
   packetName = "SetCompression"
   packetId = 0x03
   packetPretty (SetCompression thresh) = [("Compresion Threshold",show thresh)]
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize SetCompression where
   serialize (SetCompression thresh) = BS.append (serialize $ packetId @SetCompression) $ serialize thresh
   -- Status
@@ -74,6 +78,7 @@ instance Packet StatusResponse where
   packetId = 0x00
   -- Beware: statusJSON includes a base64 encoded png, so it is very very long
   packetPretty (StatusResponse _statusJSON) = [("Status JSON","")]
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize StatusResponse where
   serialize (StatusResponse s) = BS.append (serialize $ packetId @StatusResponse) $ serialize s
 
@@ -85,6 +90,7 @@ instance Packet StatusPong where
   packetName = "StatusPong"
   packetId = 0x01
   packetPretty (StatusPong pongTok) = [("Pong Token","0x" ++  showHex pongTok "")]
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize StatusPong where
   serialize (StatusPong l) = BS.append (serialize $ packetId @StatusPong) $ serialize l
   -- Play
@@ -97,6 +103,7 @@ instance Packet SpawnObject where
   packetName = "SpawnObject"
   packetId = 0x00
   packetPretty (SpawnObject _ _ _ _ _ _ _ _ _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize SpawnObject where
   serialize (SpawnObject _ _ _ _ _ _ _ _ _) = BS.append (serialize $ packetId @SpawnObject) $ error "Unimplemented Serialization"
   -- EID, x, y, z, count
@@ -108,6 +115,7 @@ instance Packet SpawnExpOrb where
   packetName = "SpawnExpOrb"
   packetId = 0x01
   packetPretty (SpawnExpOrb _ _ _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize SpawnExpOrb where
   serialize (SpawnExpOrb _ _ _) = BS.append (serialize $ packetId @SpawnExpOrb) $ error "Unimplemented Serialization"
   -- EID, Type (always 1 for thunderbolt), x, y, z
@@ -119,6 +127,7 @@ instance Packet SpawnGlobalEntity where
   packetName = "SpawnGlobalEntity"
   packetId = 0x02
   packetPretty (SpawnGlobalEntity _ _ _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize SpawnGlobalEntity where
   serialize (SpawnGlobalEntity _ _ _) = BS.append (serialize $ packetId @SpawnGlobalEntity) $ error "Unimplemented Serialization"
   -- EID, UUID, Type, x, y, z, yaw, pitch, head pitch, velx, vely, velz, Metadata
@@ -130,6 +139,7 @@ instance Packet SpawnMob where
   packetName = "SpawnMob"
   packetId = 0x03
   packetPretty (SpawnMob _ _ _ _ _ _ _ _ _ _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize SpawnMob where
   serialize (SpawnMob _ _ _ _ _ _ _ _ _ _) = BS.append (serialize $ packetId @SpawnMob) $ error "Unimplemented Serialization"
   -- EID, UUID, Title, Location,
@@ -141,6 +151,7 @@ instance Packet SpawnPainting where
   packetName = "SpawnPainting"
   packetId = 0x04
   packetPretty (SpawnPainting _ _ _ {-NYI-} _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize SpawnPainting where
   serialize (SpawnPainting _ _ _ {-NYI-} _) = BS.append (serialize $ packetId @SpawnPainting) $ error "Unimplemented Serialization"
   -- EID, UUID, x, y, z, yaw, pitch, metadata
@@ -152,6 +163,7 @@ instance Packet SpawnPlayer where
   packetName = "SpawnPlayer"
   packetId = 0x05
   packetPretty (SpawnPlayer _ _ _ _ _ {-Metadata NYI-}) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize SpawnPlayer where
   serialize (SpawnPlayer _ _ _ _ _ {-Metadata NYI-}) = BS.append (serialize $ packetId @SpawnPlayer) $ error "Unimplemented Serialization"
   -- EID, Animation ID (from table)
@@ -163,6 +175,7 @@ instance Packet Animation where
   packetName = "Animation"
   packetId = 0x06
   packetPretty (Animation eid anim) = [("Entity Id",show eid),("Animation",show anim)]
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize Animation where
   serialize (Animation eid anim) = BS.append (serialize $ packetId @Animation) $ serialize eid <> serialize anim
   -- List of all stats
@@ -174,6 +187,7 @@ instance Packet Statistics where
   packetName = "Statistics"
   packetId = 0x07
   packetPretty (Statistics _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize Statistics where
   serialize (Statistics _) = BS.append (serialize $ packetId @Statistics) $ error "Unimplemented Serialization"
   -- EID, Block coord, stage (0-9)
@@ -185,6 +199,7 @@ instance Packet BlockBreakAnimation where
   packetName = "BlockBreakAnimation"
   packetId = 0x08
   packetPretty (BlockBreakAnimation _ _ _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize BlockBreakAnimation where
   serialize (BlockBreakAnimation _ _ _) = BS.append (serialize $ packetId @BlockBreakAnimation) $ error "Unimplemented Serialization"
 
@@ -195,6 +210,7 @@ instance Packet UpdateBlockEntity where
   packetName = "UpdateBlockEntity"
   packetId = 0x09
   packetPretty (UpdateBlockEntity _ _ _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize UpdateBlockEntity where
   serialize (UpdateBlockEntity _ _ _) = BS.append (serialize $ packetId @UpdateBlockEntity) $ error "Unimplemented Serialization"
   -- Block coord, Action Id (enum), Action Param, Block Type ; http://wiki.vg/Block_Actions
@@ -206,6 +222,7 @@ instance Packet BlockAction where
   packetName = "BlockAction"
   packetId = 0x0A
   packetPretty (BlockAction _ _ _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize BlockAction where
   serialize (BlockAction _ _ _) = BS.append (serialize $ packetId @BlockAction) $ error "Unimplemented Serialization"
   -- Block coord, Block ID (from global palette)
@@ -217,6 +234,7 @@ instance Packet BlockChange where
   packetName = "BlockChange"
   packetId = 0x0B
   packetPretty (BlockChange bc bs) = [("Block",show bc),("New State",show bs)]
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize BlockChange where
   serialize (BlockChange block bs) = BS.append (serialize $ packetId @BlockChange) $ serialize block <> serialize bs
   -- UUID, Action (from enum)
@@ -228,6 +246,7 @@ instance Packet BossBar where
   packetName = "BossBar"
   packetId = 0x0C
   packetPretty (BossBar _ {- BossBarAction NYI -}) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize BossBar where
   serialize (BossBar _ {- BossBarAction NYI -}) = BS.append (serialize $ packetId @BossBar) $ error "Unimplemented Serialization"
   -- Difficulty (0-3)
@@ -239,6 +258,7 @@ instance Packet ServerDifficulty where
   packetName = "ServerDifficulty"
   packetId = 0x0D
   packetPretty (ServerDifficulty dif) = [("Difficulty",show dif)]
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize ServerDifficulty where
   serialize (ServerDifficulty dif) = BS.append (serialize $ packetId @ServerDifficulty) $ serialize dif
   -- List of matches for tab completion. Prefixed with length when sent
@@ -250,6 +270,7 @@ instance Packet TabComplete where
   packetName = "TabComplete"
   packetId = 0x0E
   packetPretty (TabComplete _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize TabComplete where
   serialize (TabComplete _) = BS.append (serialize $ packetId @TabComplete) $ error "Unimplemented Serialization"
   -- JSON chat string, place to appear in (0:chatbox,1:sys msg. chatbox,2:hotbar)
@@ -261,6 +282,7 @@ instance Packet ChatMessage where
   packetName = "ChatMessage"
   packetId = 0x0F
   packetPretty (ChatMessage msg loc) = [("Message",show msg),("Location",show loc)]
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize ChatMessage where
   serialize (ChatMessage msg loc) = BS.append (serialize $ packetId @ChatMessage) $ serialize msg <> serialize loc
   -- Chunk x, Chunk z, List of (chunk relative coords, Block Id (global palette))
@@ -272,6 +294,7 @@ instance Packet MultiBlockChange where
   packetName = "MultiBlockChange"
   packetId = 0x10
   packetPretty (MultiBlockChange _ _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize MultiBlockChange where
   serialize (MultiBlockChange _ _) = BS.append (serialize $ packetId @MultiBlockChange) $ error "Unimplemented Serialization"
   -- Window Id, Transaction Id, Accepted
@@ -283,6 +306,7 @@ instance Packet ConfirmTransaction where
   packetName = "ConfirmTransaction"
   packetId = 0x11
   packetPretty (ConfirmTransaction _ _ _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize ConfirmTransaction where
   serialize (ConfirmTransaction wid transId acc) = BS.append (serialize $ packetId @ConfirmTransaction) $ serialize wid <> serialize transId <> serialize acc
 
@@ -293,6 +317,7 @@ instance Packet CloseWindow where
   packetName = "CloseWindow"
   packetId = 0x12
   packetPretty (CloseWindow _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize CloseWindow where
   serialize (CloseWindow _) = BS.append (serialize $ packetId @CloseWindow) $ error "Unimplemented Serialization"
   -- Window Id, Window Type (Enum), JSON chat string of Window Title, Num of Slots, optionally: EID of horse
@@ -304,6 +329,7 @@ instance Packet OpenWindow where
   packetName = "OpenWindow"
   packetId = 0x13
   packetPretty (OpenWindow _ _ _ _ _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize OpenWindow where
   serialize (OpenWindow _ _ _ _ _) = BS.append (serialize $ packetId @OpenWindow) $ error "Unimplemented Serialization"
   -- Window Id, List of <Slot>
@@ -315,6 +341,7 @@ instance Packet WindowItems where
   packetName = "WindowItems"
   packetId = 0x14
   packetPretty (WindowItems wid slots) = [("Window Id",show wid),("Slot Count",show (length slots))]
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize WindowItems where
   serialize (WindowItems winId slots) = BS.append (serialize $ packetId @WindowItems) $ serialize winId <> serialize (genericLength slots :: Int16) <> BS.concat (map serialize slots)
   -- Window Id, Property (enum), Value (enum)
@@ -326,6 +353,7 @@ instance Packet WindowProperty where
   packetName = "WindowProperty"
   packetId = 0x15
   packetPretty (WindowProperty _ _ _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize WindowProperty where
   serialize (WindowProperty _ _ _) = BS.append (serialize $ packetId @WindowProperty) $ error "Unimplemented Serialization"
   -- Window Id, Slot num, <Slot>
@@ -337,6 +365,7 @@ instance Packet SetSlot where
   packetName = "SetSlot"
   packetId = 0x16
   packetPretty (SetSlot wid slotNum slot) = [("Window Id",show wid),("Slot Number",show slotNum),("Slot Data",show slot)]
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize SetSlot where
   serialize (SetSlot wid slotNum slot) = BS.append (serialize $ packetId @SetSlot) $ serialize wid <> serialize slotNum <> serialize slot
   -- Item Id (applies to all instances), Cooldown Ticks
@@ -348,6 +377,7 @@ instance Packet SetCooldown where
   packetName = "SetCooldown"
   packetId = 0x17
   packetPretty (SetCooldown _ _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize SetCooldown where
   serialize (SetCooldown _ _) = BS.append (serialize $ packetId @SetCooldown) $ error "Unimplemented Serialization"
   -- Plugin Channel, Data
@@ -359,6 +389,7 @@ instance Packet PluginMessage where
   packetName = "PluginMessage"
   packetId = 0x18
   packetPretty (PluginMessage chan msg) = [("Plugin Channel",chan),("Message","0x" ++ (flip showHex "" =<< BS.unpack msg))]
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize PluginMessage where
   serialize (PluginMessage str bs) = BS.append (serialize $ packetId @PluginMessage) $ serialize str <> bs
   -- Sound Name (Enum), Sound Category (Enum), weird encoding for: x,y,z, Volume, Pitch
@@ -370,6 +401,7 @@ instance Packet NamedSoundEffect where
   packetName = "NamedSoundEffect"
   packetId = 0x19
   packetPretty (NamedSoundEffect _ _ _ _ _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize NamedSoundEffect where
   serialize (NamedSoundEffect _ _ _ _ _) = BS.append (serialize $ packetId @NamedSoundEffect) $ error "Unimplemented Serialization"
   -- Reason (JSON chat string)
@@ -381,6 +413,7 @@ instance Packet DisconnectPlay where
   packetName = "DisconnectPlay"
   packetId = 0x1A
   packetPretty (DisconnectPlay _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize DisconnectPlay where
   serialize (DisconnectPlay _) = BS.append (serialize $ packetId @DisconnectPlay) $ error "Unimplemented Serialization"
   -- EID, Status (Enum)
@@ -392,6 +425,7 @@ instance Packet EntityStatus where
   packetName = "EntityStatus"
   packetId = 0x1B
   packetPretty (EntityStatus _ _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize EntityStatus where
   serialize (EntityStatus _ _) = BS.append (serialize $ packetId @EntityStatus) $ error "Unimplemented Serialization"
   -- x,y,z, radius, affected block offsets, velocity of pushed player
@@ -403,6 +437,7 @@ instance Packet Explosion where
   packetName = "Explosion"
   packetId = 0x1C
   packetPretty (Explosion _ _ _ _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize Explosion where
   serialize (Explosion _ _ _ _) = BS.append (serialize $ packetId @Explosion) $ error "Unimplemented Serialization"
   -- Chunk X, Chunk Z
@@ -414,6 +449,7 @@ instance Packet UnloadChunk where
   packetName = "UnloadChunk"
   packetId = 0x1D
   packetPretty (UnloadChunk _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize UnloadChunk where
   serialize (UnloadChunk _) = BS.append (serialize $ packetId @UnloadChunk) $ error "Unimplemented Serialization"
   -- Reason (Enum), Value (from Enum)
@@ -425,6 +461,7 @@ instance Packet ChangeGameState where
   packetName = "ChangeGameState"
   packetId = 0x1E
   packetPretty (ChangeGameState _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize ChangeGameState where
   serialize (ChangeGameState InvalidBed) = BS.append (serialize $ packetId @ChangeGameState) $ BS.singleton 0x00 <> serialize (0 :: Float)
   serialize (ChangeGameState (Raining isStarting)) = BS.append (serialize $ packetId @ChangeGameState) $ BS.singleton (if isStarting then 0x01 else 0x02) <> serialize (0 :: Float)
@@ -444,6 +481,7 @@ instance Packet KeepAlive where
   packetName = "KeepAlive"
   packetId = 0x1F
   packetPretty (KeepAlive kid) = [("Keep Alive Id",show kid)]
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize KeepAlive where
   serialize (KeepAlive kid) = BS.append (serialize $ packetId @KeepAlive) $ serialize kid
   -- Chunk X, Chunk Z, Full Chunk?, Bitmask of slices present, [Chunk Section], optional: 256 byte array of biome data, [Block entity NBT tag]
@@ -455,6 +493,7 @@ instance Packet ChunkData where
   packetName = "ChunkData"
   packetId = 0x20
   packetPretty (ChunkData (cx,cz) guCont bitMask cs _mBio _nbt) = [("Column",show (cx,cz)),("Bit Mask",show bitMask)] ++ (if guCont then [("Full Chunk","")] else []) ++ [("Section Count",show (length cs))]
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize ChunkData where
   serialize (ChunkData (cx,cz) guCont bitMask chunkSecs mBiomes blockEnts) = BS.append (serialize $ packetId @ChunkData) $ serialize cx <> serialize cz <> serialize guCont <> serialize bitMask <> withLength (BS.concat $ (map serialize chunkSecs) ++ maybeToList mBiomes) <> withListLength blockEnts
   -- Effect Id (Enum), block coord, extra data (from Enum), disable relative?
@@ -466,6 +505,7 @@ instance Packet Effect where
   packetName = "Effect"
   packetId = 0x21
   packetPretty (Effect _ _ _ _) = []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize Effect where
   serialize (Effect _ _ _ _) = BS.append (serialize $ packetId @Effect) $ error "Unimplemented Serialization"
   -- Particle
@@ -479,6 +519,7 @@ instance Packet JoinGame where
   packetName = "JoinGame"
   packetId = 0x23
   packetPretty (JoinGame eid gm dim dif maxP lvl reduce) = [("Entity Id",show eid),("Gamemode", show gm),("Dimension",show dim),("Difficulty",show dif),("Max Players",show maxP),("Level Type",lvl)] ++ if reduce then [("Reduce Debug Info","")] else []
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize JoinGame where
   -- For whatever reason, we need the eid as an Int32 here, not a VarInt
   serialize (JoinGame eid gamemode dim dif maxp leveltype reduce) = BS.append (serialize $ packetId @JoinGame) $ serialize (unVarInt (unEID eid)) <> serialize gamemode <> serialize dim <> serialize dif <> serialize maxp <> serialize leveltype <> serialize reduce
@@ -491,6 +532,7 @@ instance Packet PlayerAbilities where
   packetName = "PlayerAbilities"
   packetId = 0x2B
   packetPretty (PlayerAbilities flags flySpeed fovMod) = [("Flags",show flags),("Fly Speed",show flySpeed),("FOV Modifier",show fovMod)]
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize PlayerAbilities where
   serialize (PlayerAbilities flag fly fov) = BS.append (serialize $ packetId @PlayerAbilities) $ serialize flag <> serialize fly <> serialize fov
   -- x,y,z, yaw,pitch, relativity flags, TPconfirm Id
@@ -511,6 +553,7 @@ instance Packet PlayerPositionAndLook where
     ]
     where
       r b = if testBit rel b then ("~" ++) else id
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize PlayerPositionAndLook where
   serialize (PlayerPositionAndLook (x,y,z) (yaw,pitch) relFlag tpId) = serialize x <> serialize y <> serialize z <> serialize yaw <> serialize pitch <> serialize relFlag <> serialize tpId
   -- Block pos of player spawn
@@ -522,6 +565,7 @@ instance Packet SpawnPosition where
   packetName = "SpawnPosition"
   packetId = 0x43
   packetPretty (SpawnPosition block) = [("Spawn",show block)]
+  parsePacket = error "Can't parse clientbound packet"
 instance Serialize SpawnPosition where
   serialize (SpawnPosition pos) = serialize pos
 

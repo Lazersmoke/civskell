@@ -9,7 +9,7 @@ import Control.Eff
 import Control.Concurrent
 import Data.Semigroup
 import System.IO
-import Text.Parsec
+import Data.Attoparsec.ByteString
 import qualified Codec.Compression.Zlib as Z
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
@@ -86,10 +86,10 @@ runNetworking mEnc mThresh hdl (Eff u q) = case u of
         let ann = withLength (BS.singleton 0x00 <> bs)
         runNetworking mEnc mThresh hdl (runTCQ q ann)
   Inject (RemoveCompression bs) -> case mThresh of
-    Nothing -> case parse parseUncompPkt "" bs of
+    Nothing -> case parseOnly parseUncompPkt bs of
       Left _ -> runNetworking mEnc mThresh hdl (runTCQ q bs)
       Right pktData -> runNetworking mEnc mThresh hdl (runTCQ q pktData)
-    Just _ -> case parse parseCompPkt "" bs of
+    Just _ -> case parseOnly parseCompPkt bs of
       -- TODO: fix this
       Left _ -> runNetworking mEnc mThresh hdl (runTCQ q bs)
       Right (dataLen,compressedData) -> if dataLen == 0x00

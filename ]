@@ -16,6 +16,7 @@ import Unsafe.Coerce
 import qualified Data.ByteString as BS
 import Data.NBT
 import qualified Data.Serialize as Ser
+import Data.SuchThat
 
 import Civskell.Data.Types
 --import qualified Civskell.Packet.Serverbound as Server
@@ -25,6 +26,40 @@ import Civskell.Data.Types
 
 anyChar :: Parser Char
 anyChar = chr . fromIntegral <$> anyWord8
+
+parseHandshakePacket :: Parser (ServerPacket 'Handshaking) --(Packet p, PacketSide p ~ 'Server, PacketState p ~ 'Handshaking) => Parser p
+parseHandshakePacket = choice [ServerPacket <$> parseHandshake, ServerPacket <$> parseLegacyHandshake] <?> "Handshake Packet"
+
+parseLoginPacket :: Parser (ServerPacket 'LoggingIn)
+parseLoginPacket = choice [ServerPacket <$> parseLoginStart, ServerPacket <$> parseEncryptionResponse] <?> "Login Packet"
+
+parseStatusPacket :: Parser (ServerPacket 'Status)
+parseStatusPacket = choice [ServerPacket <$> parseStatusRequest, ServerPacket <$> parseStatusPing] <?> "Status Packet"
+
+parsePlayPacket :: Parser (ServerPacket 'Playing)
+parsePlayPacket = choice 
+  [ServerPacket <$> parseTPConfirm
+  ,ServerPacket <$> parseChatMessage
+  ,ServerPacket <$> parseClientStatus
+  ,ServerPacket <$> parseClientSettings
+  ,ServerPacket <$> parseConfirmTransaction
+  ,ServerPacket <$> parseClickWindow
+  ,ServerPacket <$> parseCloseWindow
+  ,ServerPacket <$> parsePluginMessage
+  ,ServerPacket <$> parseKeepAlive
+  ,ServerPacket <$> parsePlayerPosition
+  ,ServerPacket <$> parsePlayerPositionAndLook
+  ,ServerPacket <$> parsePlayerLook
+  ,ServerPacket <$> parsePlayer
+  ,ServerPacket <$> parsePlayerDigging
+  ,ServerPacket <$> parseEntityAction
+  ,ServerPacket <$> parseHeldItemChange
+  ,ServerPacket <$> parseCreativeInventoryAction
+  ,ServerPacket <$> parseAnimation
+  ,ServerPacket <$> parsePlayerBlockPlacement
+  ,ServerPacket <$> parseUseItem
+  ,parseUnknownPacket] <?> "Play Packet"
+
 --parseUnknownPacket :: Parser (ServerPacket s)
 --parseUnknownPacket = anyWord8 >>= unexpected . show
 

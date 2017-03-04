@@ -37,6 +37,7 @@ resolver: lts-8.2
 # will not be run. This is useful for tweaking upstream packages.
 packages:
 - '.'
+- '../ghost-buster'
 - location: 
     git: git@github.com:Lazersmoke/reee-monads.git
     commit: 1fb57be23dfc6c61a7050c352d6800161601a7aa

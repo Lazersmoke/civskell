@@ -10,6 +10,7 @@ import Control.Monad (forM_)
 import Data.Word (Word8)
 import qualified Data.Set as Set
 import qualified Data.Map.Lazy as Map
+import Data.SuchThat
 
 import Civskell.Data.Types
 import qualified Civskell.Packet.Clientbound as Client
@@ -189,7 +190,7 @@ runPlayer i (Eff u q) = case u of
   Inject (SetMoveMode mode) -> modifyPlayer i (\p -> p {moveMode = mode}) >> runPlayer i (runTCQ q ())
   Inject FlushInbox -> do
     pkts <- inboxForPlayer i
-    forM_ pkts (\(ForAny p) -> sendClientPacket p)
+    forM_ pkts (\(SuchThat p) -> sendClientPacket p)
     runPlayer i (runTCQ q ())
   Inject (LogPlayerName msg) -> (>> runPlayer i (runTCQ q ())) . flip logt msg . clientUsername =<< getPlayer i
   -- Not our turn

@@ -16,13 +16,13 @@ import System.Exit (exitSuccess)
 import System.IO (hSetBuffering,BufferMode(NoBuffering))
 import qualified Data.ByteString as BS
 import qualified Network as Net
+import Data.SuchThat
 
 import Civskell.Data.Logging
 import Civskell.Data.Player
 import Civskell.Data.Types
 import Civskell.Data.World
 import Civskell.Tech.Encrypt
-import Civskell.Tech.Parse
 import Civskell.Tech.Network
 import qualified Civskell.Packet.Clientbound as Client
 import qualified Civskell.Packet.Serverbound as Server
@@ -83,7 +83,7 @@ connLoop wor lock sock = do
 
 -- Wait for a Handshake, and hand it off when we get it
 connHandler :: (HasLogging r,HasIO r,HasNetworking r,HasWorld r) => Eff r ()
-connHandler = getPacket parseHandshake >>= maybe (loge "WTF no packet? REEEEEEEEEEEEE") handleHandshake
+connHandler = getPacket @Server.Handshake >>= maybe (loge "WTF no packet? REEEEEEEEEEEEE") handleHandshake
 
 handleHandshake :: (HasLogging r,HasIO r,HasNetworking r,HasWorld r) => Server.Handshake -> Eff r ()
 -- Normal handshake recieved
@@ -147,7 +147,7 @@ encryptionPhase nameFromLoginStart = do
   -- Send an encryption request to the client
   sendPacket (Client.EncryptionRequest sId encPubKey vt)
   -- Wait for them to send an Encryption Response
-  getPacket parseEncryptionResponse >>= \case
+  getPacket @Server.EncryptionResponse >>= \case
     Just (Server.EncryptionResponse ssFromClient vtFromClient) -> do
       -- Make sure that the encryption stuff all lines up properly
       case checkVTandSS priv vtFromClient ssFromClient vt of
@@ -215,171 +215,23 @@ packetLoop :: (HasPlayer r,HasLogging r,HasNetworking r,HasWorld r) => Eff r ()
 packetLoop = do
   -- If there is a packet ready, get the packet and act on it
   r <- isPacketReady
-  when r $ getPacket parsePlayPacket >>= maybe (loge "Failed to parse incoming packet") (\(ServerPacket p) -> onPacket p)
+  when r $ getPacketFromParser Server.parsePlayPacket >>= maybe (loge "Failed to parse incoming packet") (\(SuchThatStar p) -> onPacket p)
   -- Either way, flush the inbox and recurse after we are done
   flushInbox
   packetLoop
 
 {-gotPacket :: (HasNetworking r,HasPlayer r,HasLogging r,HasWorld r) => ServerPacket 'Playing -> Eff r ()
--- BS.tail removes the length prefixing
-gotPacket (Server.PluginMessage "MC|Brand" cliBrand) = setBrand $ show (BS.tail cliBrand)
--- Teleport the client when they send this packet because reasons
--- 0x00 means all absolute (It's a relativity flag bitfield)
-gotPacket (Server.ClientSettings _loc _viewDist _chatMode _chatColors _skin _hand) = pendTeleport (1.0,130.0,1.0) (0.0,0.0) 0x00
--- Check the tid presented against all the tid's we have stored
-gotPacket (Server.TPConfirm tid) = clearTeleport tid >>= \case
-    -- If it's valid, say so
-    True -> logp $ "Client confirms teleport with id: " ++ show tid
-    -- If it's not, complain
-    False -> loge $ "Client provided bad teleport id: " ++ show tid
--- Don't do anything about the spammy animation packets
-gotPacket (Server.Animation _anim) = return ()
--- Update the slot they are holding in the player data
-gotPacket (Server.HeldItemChange slotNum) = setHolding slotNum
-gotPacket (Server.ClientStatus status) = case status of
-  PerformRespawn -> logp "Client wants to perform respawn"
-  RequestStats -> logp "Client requests stats"
-  OpenInventory -> logp "Client is opening their inventory"
--- Clients handle all the dirty details such that this is just a "set slot" packet
-gotPacket (Server.CreativeInventoryAction slotNum slotDat) = do
-  logp $ "Player creatively set slot " ++ show slotNum ++ " to {" ++ show slotDat ++ "}"
-  -- TODO: This will echo back a SetSlot packet, add another way to access the effect inventory
-  -- Maybe that is ok? idk requires further testing to be sure
-  setInventorySlot (clientToCivskellSlot slotNum) slotDat
-gotPacket (Server.KeepAlive kid) = logp $ "Player sent keep alive pong with id: " ++ show kid
-gotPacket (Server.PlayerPosition (x,y,z) _grounded) = setPlayerPos (x,y,z)
-gotPacket (Server.PlayerPositionAndLook (x,y,z) (yaw,pitch) _grounded) = do
-  setPlayerPos (x,y,z)
-  setPlayerViewAngle (yaw,pitch)
-gotPacket (Server.PlayerLook (y,p) _grounded) = setPlayerViewAngle (y,p)
-gotPacket (Server.Player _grounded) = pure ()
-gotPacket (Server.CloseWindow wid) = logp $ "Player is closing a window with id: " ++ show wid
-gotPacket (Server.ChatMessage msg) = case msg of
-  "/gamemode 1" -> setGamemode Creative
-  "/gamemode 0" -> setGamemode Survival
-  "chunks" -> do
-      forM_ [0..48] $ \x -> sendPacket =<< colPacket ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
-  _ -> do
-    broadcastPacket (Client.ChatMessage (jsonyText msg) 0)
-    name <- getUsername
-    logt name msg
-gotPacket p@(Server.PlayerDigging action) = case action of
-  StartDig block _side -> do
-    logp $ "Started digging block: " ++ show block
-    -- Instant Dig
-    removeBlock block
-  SwapHands -> do
-    -- Get the current items
-    heldSlot <- getHolding
-    heldItem <- getInventorySlot heldSlot
-    -- 45 is the off hand slot
-    offItem <- getInventorySlot 45
-    -- Swap them
-    setInventorySlot heldSlot offItem
-    setInventorySlot 45 heldItem
-  _ -> loge $ "Unhandled Player Dig Action: " ++ show p
-gotPacket (Server.PlayerBlockPlacement block side hand _cursorCoord) = do
-  -- Find out what item they are trying to place
-  heldSlot <- if hand == MainHand then getHolding else pure 45
-  heldItem <- getInventorySlot heldSlot
-  case heldItem of
-    -- If they right click on a block with an empty hand, this will happen
-    EmptySlot -> logp "Trying to place air"
-    Slot bid count dmg nbt -> do
-      -- Remove item from inventory
-      let newSlot = if count == 1 then EmptySlot else (Slot bid (count - 1) dmg nbt)
-      setInventorySlot heldSlot newSlot
-      -- Updates client as well
-      -- TODO: map item damage to block damage somehow
-      setBlock (BlockState bid 0) (blockOnSide block side)
-gotPacket (Server.ClickWindow wid slotNum transId mode clientProvidedSlot) = if wid /= 0 then loge "Non-player inventories not supported" else case mode of
-  -- TODO: optimize and combine cases; right-click usually just means to move one item, but we consider it an entirely separate case here
-  NormalClick rClick -> do
-    -- Get the current state of affairs, and purely decide what to do with them
-    doInventoryClick <$> getInventorySlot (clientToCivskellSlot slotNum) <*> getInventorySlot (-1) <*> pure rClick <*> pure clientProvidedSlot >>= \case
-      -- If everything is in order
-      Just (newSlot,newHand) -> do
-        -- Set the slots to their new values
-        setInventorySlot (-1) newHand
-        setInventorySlot (clientToCivskellSlot slotNum) newSlot
-        -- Confirm the transaction was successful
-        sendPacket (Client.ConfirmTransaction wid transId True)
-      -- If something went wrong
-      Nothing -> do
-        -- Log to console
-        loge "Failed to confirm client transaction"
-        -- And tell the client it should say sorry
-        sendPacket (Client.ConfirmTransaction wid transId False)
-     -- Right click is exactly the same as left when shiftclicking
-  -- TODO: implement the rest of the clicking bs that minecraft does
-  ShiftClick _rClick -> pure ()
-  NumberKey _num -> pure ()
-  MiddleClick -> pure ()
-  ItemDropOut _isStack -> pure ()
-  -- "Painting" mode
-  PaintingMode _mode -> loge "Painting mode not supported"
-  -- Double click
-  DoubleClick -> loge "Double click not supported"
 -- If the packet isn't matched above, log an error. We were able to parse it, just haven't implemented anything to handle it
 gotPacket a = loge $ "Unsupported packet: " ++ show a
 -}
 
--- Get the block coord adjacent to a given coord on a given side
-blockOnSide :: BlockCoord -> BlockFace -> BlockCoord
-blockOnSide (Block (x,y,z)) Bottom = Block (x,y-1,z)
-blockOnSide (Block (x,y,z)) Top = Block (x,y+1,z)
-blockOnSide (Block (x,y,z)) North = Block (x,y,z-1)
-blockOnSide (Block (x,y,z)) South = Block (x,y,z+1)
-blockOnSide (Block (x,y,z)) West = Block (x-1,y,z)
-blockOnSide (Block (x,y,z)) East = Block (x+1,y,z)
-
 -- First, check if the slot matches the client provided one
-doInventoryClick :: Slot -> Slot -> Bool -> Slot -> Maybe (Slot,Slot)
-doInventoryClick actualSlot currHeld rClick shouldBeSlot = if actualSlot /= shouldBeSlot then Nothing else case actualSlot of
-  EmptySlot -> case currHeld of
-    -- Both empty -> No-op
-    EmptySlot -> Just (actualSlot,currHeld)
-    -- Putting something in an empty slot
-    Slot currbid currcount currdmg currnbt -> Just (placed,newHeld)
-      where
-        -- If we right click, only place one item, left click places all of them
-        delta = if rClick then 1 else 64
-        -- If we don't have enough items to fill the delta, place them all and end up with an EmptySlot, otherwise remove the delta
-        newHeld = if currcount <= delta then EmptySlot else Slot currbid (currcount - delta) currdmg currnbt
-        -- The slot now has either the full delta, or our best attempt at filling the delta
-        placed = Slot currbid (min delta currcount) currdmg currnbt
-  Slot actbid actcount actdmg actnbt -> case currHeld of
-    -- Picking something up into an empty hand
-    EmptySlot -> Just (left,picked)
-      where
-        -- If we right click, take half, otherwise take as much as we can
-        delta = if rClick then actcount `div` 2 else min actcount 64
-        -- If we took it all, leave nothing, otherwise take what we took
-        left = if actcount == delta then EmptySlot else Slot actbid (actcount - delta) actdmg actnbt
-        -- We are now holding everything we picked up
-        picked = Slot actbid delta actdmg actnbt
-    -- Two item stacks interacting
-    Slot currbid currcount currdmg currnbt -> case currbid == actbid && currdmg == actdmg && currnbt == actnbt of
-      -- Like stacks; combine
-      True -> Just (inSlot,stillHeld)
-        where
-          -- How many items we can possibly place in the slot
-          spaceRemaining = 64 - actcount
-          -- If we right click, try to put one in, but put zero in if its already full, otherwise put as many as we can in
-          -- NOTE: delta <= currcount and spaceRemaining
-          delta = if rClick then min 1 spaceRemaining else max currcount spaceRemaining
-          -- If we put down everything, empty our hand, otherwise remove what we put down
-          stillHeld = if currcount == delta then EmptySlot else Slot currbid (currcount - delta) currdmg currnbt
-          -- Put the stuff we put into the slot, into the slot
-          inSlot = Slot actbid (actcount + delta) actdmg actnbt
-      -- Unlike stacks; swap
-      False -> Just (currHeld,actualSlot)
- 
+
 -- Do the login process
 initiateLogin :: (HasIO r,HasLogging r,HasNetworking r,HasWorld r) => Eff r ()
 initiateLogin = do
   -- Get a login start packet from the client
-  getPacket parseLoginStart >>= \case
+  getPacket @Server.LoginStart >>= \case
     -- LoginStart packets contain their username as a String
     Just (Server.LoginStart name) -> do
       -- Log that they are logging in
@@ -394,7 +246,7 @@ initiateLogin = do
 statusMode :: (HasLogging r,HasNetworking r,HasWorld r) => Eff r ()
 statusMode = do
   -- Wait for them to ask our status
-  getPacket parseStatusRequest >>= \case
+  getPacket @Server.StatusRequest >>= \case
     -- Client gave us an unparseable packet, so disconnect with an error
     Nothing -> loge "Client gave nonsense packet, disconnecting"
     -- Make sure they are actually asking for our status
@@ -406,8 +258,7 @@ statusMode = do
       -- Send resp to clients
       sendPacket (Client.StatusResponse resp)
       -- Wait for them to start a ping
-      mping <- getPacket parseStatusPing
-      case mping of
+      getPacket @Server.StatusPing >>= \case
         -- Make sure they are actually pinging us, then send a pong right away
         Just (Server.StatusPing l) -> sendPacket (Client.StatusPong l)
         Nothing -> loge "Client gave nonsense packet instead of ping, disconnecting"

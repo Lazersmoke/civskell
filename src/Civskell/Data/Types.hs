@@ -9,6 +9,7 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -25,7 +26,8 @@ module Civskell.Data.Types
   ,blockInChunk
   ,blockToChunk
   ,blockToRelative
-  ,formatPacket
+  ,blockOnSide
+  ,showPacket
   ,jsonyText
   -- Type synonyms
   ,EncryptionCouplet
@@ -84,14 +86,14 @@ module Civskell.Data.Types
   -- Packet
   ,Packet(..)
   ,ClientPacket(..)
-  ,ServerPacket(..)
-  ,ForAny(..)
+  ,ServerPacket
 
   ,Serialize(..)
   ) where
 
 import Control.Eff
 import Crypto.Cipher.AES (AES128)
+import Data.SuchThat
 import Data.Bits (Bits)
 import Data.Int (Int16,Int32)
 import Data.List (intercalate)
@@ -101,6 +103,7 @@ import Data.NBT
 import Data.Word (Word8)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Lazy as Map
+import Data.Attoparsec.ByteString (Parser)
 import qualified Data.Set as Set
 
 protocolVersion :: Integer
@@ -232,6 +235,15 @@ blockToRelative (Block (x,y,z)) = Block (f x,f y,f z)
 blockInChunk :: BlockOffset -> ChunkSection -> BlockState
 blockInChunk b (ChunkSection m) = fromMaybe (BlockState 0 0) (Map.lookup b m)
 
+-- Get the block coord adjacent to a given coord on a given side
+blockOnSide :: BlockCoord -> BlockFace -> BlockCoord
+blockOnSide (Block (x,y,z)) Bottom = Block (x,y-1,z)
+blockOnSide (Block (x,y,z)) Top = Block (x,y+1,z)
+blockOnSide (Block (x,y,z)) North = Block (x,y,z-1)
+blockOnSide (Block (x,y,z)) South = Block (x,y,z+1)
+blockOnSide (Block (x,y,z)) West = Block (x-1,y,z)
+blockOnSide (Block (x,y,z)) East = Block (x+1,y,z)
+
 -- Block id, damage
 data BlockState = BlockState Short Word8 deriving Eq
 
@@ -359,18 +371,27 @@ class Packet p where
   packetId :: VarInt
   onPacket :: (HasLogging r,HasPlayer r,HasWorld r,HasNetworking r) => p -> Eff r ()
   onPacket _ = Pure ()
+  parsePacket :: Parser p
+
+class (Packet p,PacketSide p ~ 'Server,s ~ PacketState p) => SP s p where {}
+instance (Packet p,PacketSide p ~ 'Server,s ~ PacketState p) => SP s p where {}
+
+class (Packet p,PacketSide p ~ 'Client,s ~ PacketState p) => CP s p where {}
+instance (Packet p,PacketSide p ~ 'Client,s ~ PacketState p) => CP s p where {}
 
 showPacket :: forall p. Packet p => p -> String
 showPacket pkt = formatPacket (packetName @p) (packetPretty pkt)
 
-data ServerPacket s = forall p. (Packet p,PacketSide p ~ 'Server,PacketState p ~ s) => ServerPacket p
-instance Show (ServerPacket s) where show (ServerPacket p) = showPacket p
+type ServerPacket s = SuchThatStar '[Packet,SP s]
 
-data ForAny (p :: k -> *) = forall s. ForAny (p s)
+--data ServerPacket s = forall p. (Packet p,PacketSide p ~ 'Server,PacketState p ~ s) => ServerPacket p
+instance Show (ServerPacket s) where show (SuchThatStar p) = showPacket p
 
-data ClientPacket s = forall p. (Packet p,PacketSide p ~ 'Client,PacketState p ~ s,Serialize p) => ClientPacket p
-instance Show (ClientPacket s) where show (ClientPacket p) = showPacket p
-instance Serialize (ClientPacket s) where serialize (ClientPacket p) = serialize p
+--data ForAny (p :: k -> *) = forall s. ForAny (p s)
+
+newtype ClientPacket s = ClientPacket (SuchThatStar '[Packet,CP s,Serialize])
+--instance Show (ClientPacket s) where show (ClientPacket p) = showPacket p
+--instance Serialize (ClientPacket s) where serialize (ClientPacket p) = serialize p
 
 type HasNetworking r = Member Networking r
 
