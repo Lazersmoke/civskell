@@ -6,6 +6,7 @@
 module Civskell.Data.World where
 
 import Control.Concurrent.MVar (readMVar,modifyMVar,modifyMVar_,MVar)
+import Data.Functor.Identity
 import Control.Eff
 import Control.Monad (forM)
 import Data.Bits
@@ -19,7 +20,7 @@ import qualified Civskell.Packet.Clientbound as Client
 
 
 initWorld :: WorldData
-initWorld = WorldData {chunks = Map.empty,players = Map.empty, nextPlayerId = 0, broadcastLog = []}
+initWorld = WorldData {chunks = Map.empty,entities = Map.empty,players = Map.empty,nextEID = 0,nextUUID = UUID (0,1),broadcastLog = []}
 
 testInitWorld :: WorldData
 testInitWorld = initWorld {chunks = Map.fromList [(ChunkCoord (cx,cy,cz),exampleChunk) | cx <- [-3..3], cz <- [-3..3], cy <- [0..7]]}
@@ -76,6 +77,14 @@ getPlayer = send . GetPlayer
 modifyPlayer :: Member World r => PlayerId -> (PlayerInfo -> PlayerInfo) -> Eff r ()
 modifyPlayer i f = setPlayer i =<< f <$> getPlayer i
 
+{-# INLINE freshEID #-}
+freshEID :: Member World r => Eff r EntityId
+freshEID = send FreshEID
+
+{-# INLINE freshUUID #-}
+freshUUID :: Member World r => Eff r UUID
+freshUUID = send FreshUUID
+
 {-# INLINE newPlayer #-}
 newPlayer :: Member World r => Eff r PlayerId
 newPlayer = send NewPlayer
@@ -94,7 +103,21 @@ inboxForPlayer = send . InboxForPlayer
 
 {-# INLINE broadcastPacket #-}
 broadcastPacket :: (Member World r,Packet p, PacketSide p ~ 'Client,Serialize p) => p -> Eff r ()
-broadcastPacket = send . BroadcastPacket . SuchThat . ClientPacket . SuchThatStar
+broadcastPacket = send . BroadcastPacket . ambiguate . ClientPacket . ambiguate . Identity
+
+{-# INLINE getEntity #-}
+getEntity :: (Member World r) => EntityId -> Eff r (Some Entity)
+getEntity = send . GetEntity
+
+{-# INLINE summonMob #-}
+summonMob :: (Member World r, Mob m) => m -> Eff r ()
+summonMob = send . SummonMob . ambiguate . Identity
+
+{-# INLINE summonObject #-}
+summonObject :: (Member World r, Object m) => m -> Eff r ()
+summonObject = send . SummonObject . ambiguate . Identity
+
+--data SpawnMob = SpawnMob EntityId String SomeMob (Double,Double,Double) Word8 Word8 Word8 Short Short Short -- Metadata NYI
 
 runWorld :: (HasLogging r, HasIO r) => MVar WorldData -> Eff (World ': r) a -> Eff r a
 runWorld _ (Pure x) = Pure x
@@ -114,13 +137,34 @@ runWorld w' (Eff u q) = case u of
     send $ modifyMVar_ w' $ \w -> return w {chunks = fst $ foldl (\(m,i) c -> (Map.insert (ChunkCoord (cx,i,cz)) c m,i + 1)) (chunks w,0) col'}
     runWorld w' $ broadcastPacket $ chunksToColumnPacket col' (cx,cz) mBio
     runWorld w' (runTCQ q ())
+  Inject FreshEID -> (>>= runWorld w' . runTCQ q) . send . modifyMVar w' $ \w -> return (w {nextEID = succ $ nextEID w},nextEID w)
+  Inject FreshUUID -> (>>= runWorld w' . runTCQ q) . send . modifyMVar w' $ \w -> return (w {nextUUID = incUUID $ nextUUID w},nextUUID w)
+    where
+      incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
   -- Create a new player with the default info, and return the new player's id. Also increment it for next time
-  Inject NewPlayer -> (runWorld w' . runTCQ q =<<) . send . modifyMVar w' $ \w -> return (w {players = Map.insert (nextPlayerId w) defaultPlayerInfo (players w),nextPlayerId = succ (nextPlayerId w)},nextPlayerId w)
+  Inject NewPlayer -> (runWorld w' . runTCQ q =<<) . send . modifyMVar w' $ \w -> return (w {players = Map.insert (nextEID w) defaultPlayerInfo (players w),nextEID = succ (nextEID w)},nextEID w)
   -- Warning: throws error if player not found
   Inject (GetPlayer i) -> send (readMVar w') >>= runWorld w' . runTCQ q . flip (Map.!) i . players
   Inject (SetPlayer i p) -> do
     send $ modifyMVar_ w' $ \w -> return w {players = Map.insert i p (players w)}
     runWorld w' (runTCQ q ())
+  Inject (GetEntity e) -> send (readMVar w') >>= runWorld w' . runTCQ q . flip (Map.!) e . entities
+  -- Pattern match on SuchThat to reinfer the constrain `Mob` into the contraint `Entity` for storage in the entities map
+  Inject (SummonMob (SuchThat m)) -> do
+    (eid,uuid) <- send . modifyMVar w' $ \w -> do
+      return (w {entities = Map.insert (nextEID w) (SuchThat m) (entities w),nextEID = succ (nextEID w),nextUUID = incUUID (nextUUID w)},(nextEID w,nextUUID w))
+    runWorld w' $ broadcastPacket $ Client.SpawnMob eid uuid (SuchThat m) 0
+    runWorld w' (runTCQ q ())
+    where
+      incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
+  Inject (SummonObject (SuchThat m)) -> do
+    (eid,uuid) <- send . modifyMVar w' $ \w -> do
+      return (w {entities = Map.insert (nextEID w) (SuchThat m) (entities w),nextEID = succ (nextEID w),nextUUID = incUUID (nextUUID w)},(nextEID w,nextUUID w))
+    runWorld w' $ broadcastPacket $ Client.SpawnObject eid uuid (SuchThat m)
+    runWorld w' $ broadcastPacket $ Client.UpdateMetadata eid (map Just $ entityMeta (runIdentity m))
+    runWorld w' (runTCQ q ())
+    where
+      incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
   Inject AllPlayers -> send (readMVar w') >>= runWorld w' . runTCQ q . Map.elems . players
   Inject (ForallPlayers f) -> do
     send $ modifyMVar_ w' $ \w -> return w {players = fmap f (players w)}
@@ -130,7 +174,7 @@ runWorld w' (Eff u q) = case u of
       let oldLog = broadcastLog w
       let sentMsgs = map snd $ filter (\(ids,_) -> not $ elem i ids) oldLog
       let newLog = filter (\(ids,_) -> not . null $ (Map.keys $ players w) \\ ids) . map (\(ids,pkt) -> (i:ids,pkt)) $ oldLog
-      return (w {broadcastLog = newLog},sentMsgs)
+      return (w {broadcastLog = newLog},reverse sentMsgs)
   Inject (BroadcastPacket pkt) -> do
     send $ modifyMVar_ w' $ \w -> return w {broadcastLog = ([],pkt) : broadcastLog w}
     runWorld w' (runTCQ q ())

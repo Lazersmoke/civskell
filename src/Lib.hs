@@ -8,6 +8,7 @@
 module Lib where
 
 import Control.Concurrent (forkIO,threadDelay)
+import Data.Functor.Identity
 import Control.Concurrent.MVar (MVar,newMVar)
 import Control.Eff (Eff,runM,send)
 import Control.Monad (forM_,when)
@@ -200,8 +201,8 @@ startPlaying = do
   -- World Spawn/Compass Direction, not where they will spawn initially
   sendPacket (Client.SpawnPosition (Block (0,64,0)))
   -- Player Abilities
-  -- TODO: Enum the shit out of this
-  sendPacket (Client.PlayerAbilities 0x00 0.0 1.0)
+  -- Sent in setGamemode Survival
+  -- sendPacket (Client.PlayerAbilities (AbilityFlags False False False False) 0.0 1.0)
   -- Send initial world. Need a 7x7 grid or the client gets angry with us
   forM_ [0..48] $ \x -> sendPacket =<< colPacket ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
   -- Send an initial blank inventory
@@ -215,7 +216,7 @@ packetLoop :: (HasPlayer r,HasLogging r,HasNetworking r,HasWorld r) => Eff r ()
 packetLoop = do
   -- If there is a packet ready, get the packet and act on it
   r <- isPacketReady
-  when r $ getPacketFromParser Server.parsePlayPacket >>= maybe (loge "Failed to parse incoming packet") (\(SuchThatStar p) -> onPacket p)
+  when r $ getGenericPacket Server.parsePlayPacket >>= maybe (loge "Failed to parse incoming packet") (ambiguously (onPacket . runIdentity))
   -- Either way, flush the inbox and recurse after we are done
   flushInbox
   packetLoop

@@ -6,10 +6,11 @@
 {-# LANGUAGE TypeApplications #-}
 module Civskell.Tech.Network
   (module Civskell.Data.Networking
-  ,sendClientPacket,sendPacket,getPacket,getPacketFromParser,authGetReq
+  ,sendClientPacket,sendPacket,getPacket,getGenericPacket,authGetReq
   ) where
 
 import Control.Eff (Eff,send)
+import Data.Functor.Identity
 import Data.Bits
 import Data.Semigroup ((<>))
 import Data.Word (Word8)
@@ -35,21 +36,21 @@ import Civskell.Data.Types
 
 -- Send something serializeable over the network
 sendPacket :: (HasLogging r,HasNetworking r,Serialize p,Packet p,PacketSide p ~ 'Client) => p -> Eff r ()
-sendPacket = sendClientPacket . ClientPacket . SuchThatStar
+sendPacket = sendClientPacket . ClientPacket . ambiguate . Identity
 
 sendClientPacket :: (HasLogging r,HasNetworking r) => ClientPacket s -> Eff r ()
-sendClientPacket (ClientPacket (SuchThatStar s)) = do
+sendClientPacket (ClientPacket (SuchThat (Identity (s :: a)))) = do
   -- Log its hex dump
   logLevel ClientboundPacket $ showPacket s
   logLevel HexDump $ indentedHex (serialize s)
   -- Send it
-  rPut =<< addCompression (serialize s)
+  rPut =<< addCompression (BS.append (serialize $ packetId @a) $ serialize s)
 
 getPacket :: forall p r. (HasLogging r,HasNetworking r,Packet p) => Eff r (Maybe p)
 getPacket = getPacketFromParser (parsePacket @p)
 
 -- Get a packet from the network (high level) using a parser context to decide which parser set to use
-getPacketFromParser :: (HasLogging r,HasNetworking r) => Atto.Parser p -> Eff r (Maybe p)
+getPacketFromParser :: (HasLogging r,HasNetworking r,Packet p) => Atto.Parser p -> Eff r (Maybe p)
 getPacketFromParser p = do
   -- Get the raw data (sans length)
   pkt <- removeCompression =<< getRawPacket
@@ -59,7 +60,28 @@ getPacketFromParser p = do
     -- If it parsed ok, then
     Right serverPkt -> do
       -- Return it
-      --logLevel ServerboundPacket $ show serverPkt
+      logLevel ServerboundPacket $ showPacket serverPkt
+      logLevel HexDump $ indentedHex $ pkt
+      return $ Just serverPkt
+    -- If it didn't parse correctly, print the error and return Nothing
+    Left e -> do
+      logLevel ErrorLog "Failed to parse incoming packet"
+      logLevel ErrorLog (show e)
+      -- Hex dump is an error
+      logLevel ErrorLog $ indentedHex $ pkt
+      return Nothing
+
+getGenericPacket :: (HasLogging r,HasNetworking r) => Atto.Parser (ServerPacket s) -> Eff r (Maybe (ServerPacket s))
+getGenericPacket p = do
+  -- Get the raw data (sans length)
+  pkt <- removeCompression =<< getRawPacket
+  -- TODO: Take advantage of incremental parsing maybe
+  -- Parse it
+  case Atto.parseOnly p pkt of
+    -- If it parsed ok, then
+    Right serverPkt -> do
+      -- Return it
+      logLevel ServerboundPacket $ ambiguously (showPacket . runIdentity) serverPkt
       logLevel HexDump $ indentedHex $ pkt
       return $ Just serverPkt
     -- If it didn't parse correctly, print the error and return Nothing

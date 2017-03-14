@@ -157,6 +157,9 @@ runPlayer i (Eff u q) = case u of
   Inject (SetPlayerGamemode g) -> do
     modifyPlayer i $ \p -> p {gameMode = g}
     sendPacket (Client.ChangeGameState (ChangeGamemode g))
+    case g of
+      Survival -> sendPacket (Client.PlayerAbilities (AbilityFlags False False False False) 0 1)
+      Creative -> sendPacket (Client.PlayerAbilities (AbilityFlags True False True True) 0 1)
     runPlayer i (runTCQ q ())
   -- Get the player's selected slot
   Inject PlayerHolding -> runPlayer i . runTCQ q . holdingSlot =<< getPlayer i 

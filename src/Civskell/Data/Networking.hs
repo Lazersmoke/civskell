@@ -17,7 +17,6 @@ import qualified Data.ByteString.Lazy as LBS
 import Civskell.Data.Types
 import Civskell.Tech.Encrypt
 import Civskell.Tech.Parse
-import Civskell.Tech.Serialization
 
 {-# INLINE rGet #-}
 rGet :: HasNetworking n => Int -> Eff n BS.ByteString
@@ -95,5 +94,11 @@ runNetworking mEnc mThresh hdl (Eff u q) = case u of
       Right (dataLen,compressedData) -> if dataLen == 0x00
         then runNetworking mEnc mThresh hdl (runTCQ q compressedData)
         else runNetworking mEnc mThresh hdl (runTCQ q (LBS.toStrict . Z.decompress . LBS.fromStrict $ compressedData))
-  Inject IsPacketReady -> runNetworking mEnc mThresh hdl . runTCQ q =<< send (hReady hdl >>= \r -> case r of {True -> return True; False -> threadDelay 5000 >> return False})
+  Inject IsPacketReady -> runNetworking mEnc mThresh hdl . runTCQ q =<< send isReady
+    where
+      isReady = do
+        r <- not <$> hIsEOF hdl
+        case r of
+          True -> return True
+          False -> threadDelay 5000 >> return False
 
