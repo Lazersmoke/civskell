@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
@@ -6,7 +7,7 @@
 {-# LANGUAGE TypeApplications #-}
 module Civskell.Tech.Network
   (module Civskell.Data.Networking
-  ,sendClientPacket,sendPacket,getPacket,getGenericPacket,authGetReq
+  ,sendClientPacket,getGenericPacket,authGetReq --,getPacketFromParser --,sendPacket,getPacket
   ) where
 
 import Control.Eff (Eff,send)
@@ -14,16 +15,15 @@ import Data.Functor.Identity
 import Data.Bits
 import Data.Semigroup ((<>))
 import Data.Word (Word8)
+import Data.Aeson (fromJSON,json,Result(..))
 import Hexdump (prettyHex)
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
-import Text.Parsec
-import Text.Parsec.ByteString (Parser)
-import qualified Data.Attoparsec.ByteString as Atto
+import Data.Attoparsec.ByteString
 import Unsafe.Coerce (unsafeCoerce)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
-import qualified Text.Parsec.Char as C
+--import qualified Text.Parsec.Char as C
 import Data.SuchThat
 
 import Civskell.Data.Logging
@@ -35,8 +35,8 @@ import Civskell.Data.Types
 --import qualified Civskell.Packet.Serverbound as Server
 
 -- Send something serializeable over the network
-sendPacket :: (HasLogging r,HasNetworking r,Serialize p,Packet p,PacketSide p ~ 'Client) => p -> Eff r ()
-sendPacket = sendClientPacket . ClientPacket . ambiguate . Identity
+--sendPacket :: (HasLogging r,HasNetworking r,Serialize p,Packet p,PacketSide p ~ 'Client) => p -> Eff r ()
+--sendPacket = sendClientPacket . ClientPacket . ambiguate . Identity
 
 sendClientPacket :: (HasLogging r,HasNetworking r) => ClientPacket s -> Eff r ()
 sendClientPacket (ClientPacket (SuchThat (Identity (s :: a)))) = do
@@ -46,17 +46,17 @@ sendClientPacket (ClientPacket (SuchThat (Identity (s :: a)))) = do
   -- Send it
   rPut =<< addCompression (BS.append (serialize $ packetId @a) $ serialize s)
 
-getPacket :: forall p r. (HasLogging r,HasNetworking r,Packet p) => Eff r (Maybe p)
-getPacket = getPacketFromParser (parsePacket @p)
-
+--getPacket :: forall p r. (HasLogging r,HasNetworking r,Packet p) => Eff r (Maybe p)
+--getPacket = getPacketFromParser (parsePacket @p)
+{-
 -- Get a packet from the network (high level) using a parser context to decide which parser set to use
-getPacketFromParser :: (HasLogging r,HasNetworking r,Packet p) => Atto.Parser p -> Eff r (Maybe p)
+getPacketFromParser :: (HasLogging r,HasNetworking r,Packet p) => Parser p -> Eff r (Maybe p)
 getPacketFromParser p = do
   -- Get the raw data (sans length)
   pkt <- removeCompression =<< getRawPacket
   -- TODO: Take advantage of incremental parsing maybe
   -- Parse it
-  case Atto.parseOnly p pkt of
+  case parseOnly p pkt of
     -- If it parsed ok, then
     Right serverPkt -> do
       -- Return it
@@ -70,18 +70,18 @@ getPacketFromParser p = do
       -- Hex dump is an error
       logLevel ErrorLog $ indentedHex $ pkt
       return Nothing
-
-getGenericPacket :: (HasLogging r,HasNetworking r) => Atto.Parser (ServerPacket s) -> Eff r (Maybe (ServerPacket s))
+-}
+getGenericPacket :: (HasLogging r,HasNetworking r) => Parser (ForAny ServerPacket) -> Eff r (Maybe (ForAny ServerPacket))
 getGenericPacket p = do
   -- Get the raw data (sans length)
   pkt <- removeCompression =<< getRawPacket
   -- TODO: Take advantage of incremental parsing maybe
   -- Parse it
-  case Atto.parseOnly p pkt of
+  case parseOnly p pkt of
     -- If it parsed ok, then
     Right serverPkt -> do
       -- Return it
-      logLevel ServerboundPacket $ ambiguously (showPacket . runIdentity) serverPkt
+      logLevel ServerboundPacket $ ambiguously (\(ServerPacket x) -> ambiguously (showPacket . runIdentity) x) serverPkt
       logLevel HexDump $ indentedHex $ pkt
       return $ Just serverPkt
     -- If it didn't parse correctly, print the error and return Nothing
@@ -130,7 +130,7 @@ indentedHex :: BS.ByteString -> String
 indentedHex = shittyIndent . prettyHex
 
 -- Get the auth info from the mojang server
-authGetReq :: (HasLogging r,HasIO r) => String -> String -> Eff r (Maybe (String,String))
+authGetReq :: (HasLogging r,HasIO r) => String -> String -> Eff r (Maybe AuthPacket)
 authGetReq name hash = do
   -- Use SSL
   manager <- send $ newManager tlsManagerSettings
@@ -139,25 +139,19 @@ authGetReq name hash = do
   -- Actually make the request and store it
   resp <- send $ httpLbs req manager
   -- Parse the response into something useful
-  case parse parseAuthJSON "" (LBS.toStrict . responseBody $ resp) of
+  case parseOnly parseAuthJSON (LBS.toStrict . responseBody $ resp) of
     Left e -> do
       logLevel ErrorLog "Failed to parse Auth JSON"
       logLevel ErrorLog $ show e
       return Nothing
-    Right (uuid,plaName) -> return $ Just (uuid,plaName)
+    Right (Error e) -> do
+      logLevel ErrorLog "Parsed bad JSON"
+      logLevel ErrorLog $ show e
+      return Nothing
+    Right (Success a) -> return (Just a)
 
+-- TODO: Use Aeson here
 -- Parse an auth string, just getting the uuid and username
-parseAuthJSON :: Parser (String,String)
-parseAuthJSON = do
-  _ <- C.string "{\"id\":\""
-  uuid <- many C.hexDigit
-  _ <- C.string "\",\"name\":\""
-  plaName <- many (C.noneOf "\"")
-  _ <- many anyChar
-  eof
-  return (reformat uuid,plaName)
-  where
-    -- Add a hyphen at an index
-    ins i s = let (a,b) = splitAt i s in a ++ "-" ++ b
-    -- Reformat the uuid to what the client expects
-    reformat = ins 8 . ins 12 . ins 16 . ins 20
+parseAuthJSON :: Parser (Data.Aeson.Result AuthPacket)
+parseAuthJSON = fromJSON <$> json
+

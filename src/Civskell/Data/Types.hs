@@ -49,12 +49,16 @@ module Civskell.Data.Types
   ,ChunkSection(..)
   -- Packet Enums
   ,AnimationAction(..)
+  ,PlayerListAction(..)
+  ,PlayerListActionType(..)
   ,EntityInteraction(..)
   ,ClientStatusAction(..)
   ,GameStateChange(..)
   ,InventoryClickMode(..)
   ,PlayerDigAction(..)
   ,PlayerEntityAction(..)
+  ,AuthPacket(..)
+  ,AuthProperty(..)
   -- Id's and newtypes
   ,VarInt(..)
   ,EntityId(..)
@@ -95,7 +99,7 @@ module Civskell.Data.Types
   -- Packet
   ,Packet(..)
   ,ClientPacket(..)
-  ,ServerPacket
+  ,ServerPacket(..)
   -- Entity
   ,Entity(..)
   ,EntityMetaType(..)
@@ -109,8 +113,14 @@ module Civskell.Data.Types
   ) where
 
 import Control.Eff
+import Control.Concurrent.STM.TQueue
 import Crypto.Cipher.AES (AES128)
 import Data.SuchThat
+import qualified Data.Text as Text
+import Numeric (readHex)
+import Data.Aeson hiding (Object)
+import Data.Aeson.Types hiding (Parser,Object)
+import qualified Data.Aeson
 import Data.Bits (Bits)
 import Data.Int (Int16,Int32,Int64)
 import Data.List (intercalate)
@@ -128,6 +138,7 @@ import qualified Data.Map.Lazy as Map
 import Data.Attoparsec.ByteString (Parser)
 import Unsafe.Coerce (unsafeCoerce)
 import Data.Bits
+import Numeric (showHex)
 import Data.List (unfoldr,foldl')
 import qualified Data.Set as Set
 
@@ -144,7 +155,12 @@ type HasIO r = Member IO r
 newtype UUID = UUID (Word64,Word64)
 
 instance Show UUID where
-  show (UUID (a,b)) = show a ++ "|" ++ show b
+  show (UUID (ua,ub)) = reformat $ showHex ua (showHex ub "")
+    where
+      -- Add a hyphen at an index
+      ins i s = let (a,b) = splitAt i s in a ++ "-" ++ b
+      -- Reformat the uuid to what the client expects
+      reformat = ins 8 . ins 12 . ins 16 . ins 20
 
 instance Serialize UUID where
   serialize (UUID (a,b)) = serialize a <> serialize b
@@ -226,12 +242,15 @@ slotAmount (Slot _ c _ _) = c
 -- Remove as many items as possible, up to count, return amount removed
 removeCount :: Word8 -> Slot -> (Word8,Slot)
 removeCount _ EmptySlot = (0,EmptySlot)
-removeCount c (Slot bid count dmg nbt) = if c <= count then (c,Slot bid (count - c) dmg nbt) else (count,EmptySlot)
+removeCount c (Slot bid count dmg nbt) = if c < count then (c,Slot bid (count - c) dmg nbt) else (count,EmptySlot)
 
 -- Count is how many to put into first stack from second
 splitStack :: Word8 -> Slot -> (Slot,Slot)
 splitStack _ EmptySlot = (EmptySlot,EmptySlot)
-splitStack c s@(Slot bid _ dmg nbt) = (Slot bid (fst $ removeCount c s) dmg nbt,snd $ removeCount c s)
+splitStack c s@(Slot bid _ dmg nbt) = (firstStack,secondStack)
+  where
+    firstStack = if amtFirstStack == 0 then EmptySlot else Slot bid amtFirstStack dmg nbt
+    (amtFirstStack,secondStack) = removeCount c s
 
 instance Show Slot where
   show EmptySlot = "{}"
@@ -299,6 +318,22 @@ instance Serialize ChunkSection where
       aBlock :: BlockState -> BB.BitBuilder
       aBlock (BlockState bid dmg) = BB.fromBits 9 bid `BB.append` BB.fromBits 4 dmg
 
+data AuthPacket = AuthPacket UUID String [AuthProperty]
+
+instance FromJSON AuthPacket where
+  parseJSON (Data.Aeson.Object o) = AuthPacket <$> o .: "id" <*> o .: "name" <*> (o .: "properties")
+  parseJSON x = typeMismatch "AuthPacket" x
+
+instance FromJSON UUID where
+  parseJSON (String s) = return $ (\i -> UUID (fromInteger $ i .&. 0xFFFFFFFFFFFFFFFF,fromInteger $ shiftR i 8)) . fst . head . readHex . Text.unpack $ s
+  parseJSON x = typeMismatch "UUID" x
+
+data AuthProperty = AuthProperty String String (Maybe String)
+
+instance FromJSON AuthProperty where
+  parseJSON (Data.Aeson.Object o) = AuthProperty <$> o .: "name" <*> o .: "value" <*> o .:? "signature"
+  parseJSON x = typeMismatch "AuthProperty" x
+
 -- Enumerations for the protocol
 data Side = Server | Client
 
@@ -339,6 +374,27 @@ instance Serialize AnimationAction where
   serialize (Critical True) = BS.singleton 0x05
 
 data EntityInteraction = Attack | Interact Hand | InteractAt (Float,Float,Float) Hand deriving Show
+
+data PlayerListActionType = AddPlayer | UpdateGamemode | UpdateLatency | UpdateName | RemovePlayer
+
+data PlayerListAction (a :: PlayerListActionType) where
+  PlayerListAdd :: String -> [AuthProperty] -> Gamemode -> VarInt -> (Maybe String) -> PlayerListAction 'AddPlayer
+  PlayerListGamemode :: Gamemode -> PlayerListAction 'UpdateGamemode
+  PlayerListLatency :: VarInt -> PlayerListAction 'UpdateLatency
+  PlayerListName :: (Maybe String) -> PlayerListAction 'UpdateName
+  PlayerListRemove :: PlayerListAction 'RemovePlayer
+
+instance Serialize (UUID,PlayerListAction a) where
+  serialize (u,p) = serialize u <> serialize p
+
+instance Serialize (PlayerListAction a) where
+  serialize (PlayerListAdd name props gm ping mDispName) = serialize name <> serialize ((fromIntegral $ length props) :: VarInt) <> BS.concat (map serProp props) <> serialize gm <> serialize ping <> serOpt mDispName
+    where
+      serProp (AuthProperty n value mSigned) = serialize n <> serialize value <> serOpt mSigned
+  serialize (PlayerListGamemode gm) = serialize gm
+  serialize (PlayerListLatency ping) = serialize ping
+  serialize (PlayerListName mDisp) = serOpt mDisp
+  serialize PlayerListRemove = BS.empty
 
 -- Used in Server.PlayerDigging
 data PlayerDigAction = StartDig BlockCoord BlockFace | StopDig BlockCoord BlockFace | EndDig BlockCoord BlockFace | DropItem Bool | ShootArrowOrFinishEating | SwapHands
@@ -424,7 +480,8 @@ data PlayerInfo = PlayerInfo
   ,nextKid :: VarInt
   ,clientBrand :: String
   ,clientUsername :: String
-  ,clientUUID :: String
+  ,clientUUID :: UUID
+  --,clientUUID :: String
   ,holdingSlot :: Short
   ,playerPosition :: (Double,Double,Double)
   ,viewAngle :: (Float,Float)
@@ -432,7 +489,10 @@ data PlayerInfo = PlayerInfo
   ,playerInventory :: Map Short Slot
   ,diggingBlocks :: Map BlockCoord BlockBreak
   ,moveMode :: MoveMode
+  ,packetQueue :: TQueue (ForAny ClientPacket)
   }
+
+-- Client needs to recieve packet ASAP after we send them
 
 defaultPlayerInfo :: PlayerInfo
 defaultPlayerInfo = PlayerInfo
@@ -442,7 +502,7 @@ defaultPlayerInfo = PlayerInfo
   ,nextKid = 0
   ,clientBrand = ""
   ,clientUsername = ""
-  ,clientUUID = ""
+  ,clientUUID = UUID (0,0)
   ,holdingSlot = 0
   ,playerPosition = (0,0,0)
   ,viewAngle = (0,0)
@@ -450,6 +510,7 @@ defaultPlayerInfo = PlayerInfo
   ,playerInventory = Map.empty
   ,diggingBlocks = Map.empty
   ,moveMode = Walking
+  ,packetQueue = undefined
   }
 
 type HasPlayer r = Member Player r
@@ -462,8 +523,8 @@ data Player a where
   PlayerName :: Player String
   SetPlayerName :: String -> Player ()
   -- Simple maybe state for UUID
-  PlayerUUID :: Player String
-  SetPlayerUUID :: String -> Player ()
+  PlayerUUID :: Player UUID
+  SetPlayerUUID :: UUID -> Player ()
   -- Simple state for selected slot
   PlayerHolding :: Player Short
   SetPlayerHolding :: Short -> Player ()
@@ -487,8 +548,11 @@ data Player a where
   -- Sprinting and Sneaking
   SetMoveMode :: MoveMode -> Player ()
   GetMoveMode :: Player MoveMode
-  -- Flush Inbox
-  FlushInbox :: Player ()
+  -- Networking
+  --GetPacket :: Packet p => Parser p -> Player (Maybe p)
+  SendPacket :: ClientPacket s -> Player ()
+  -- Get the outbound packets
+  GetInbox :: Player [ForAny ClientPacket]
   -- Log with player name as tag
   LogPlayerName :: String -> Player ()
 
@@ -499,7 +563,7 @@ data Logging a where
 
 data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | VerboseLog | TaggedLog String | NormalLog deriving Eq
 
-data WorldData = WorldData {chunks :: Map ChunkCoord ChunkSection, entities :: Map EntityId (Some Entity), players :: Map PlayerId PlayerInfo, nextEID :: EntityId, nextUUID :: UUID, broadcastLog :: [([PlayerId],ForAny ClientPacket)]}
+data WorldData = WorldData {chunks :: Map ChunkCoord ChunkSection, entities :: Map EntityId (Some Entity), players :: Map PlayerId PlayerInfo, nextEID :: EntityId, nextUUID :: UUID}
 
 type HasWorld r = Member World r
 
@@ -514,16 +578,20 @@ data World a where
   SetPlayer :: PlayerId -> PlayerInfo -> World ()
   GetPlayer :: PlayerId -> World PlayerInfo
   GetEntity :: EntityId -> World (Some Entity)
+  DeleteEntity :: EntityId -> World ()
   SummonMob :: (Some Mob) -> World ()
   SummonObject :: (Some Object) -> World ()
   AllPlayers :: World [PlayerInfo]
-  ForallPlayers :: (PlayerInfo -> PlayerInfo) -> World ()
-  InboxForPlayer :: PlayerId -> World [ForAny ClientPacket]
+  --ForallPlayers :: (PlayerInfo -> PlayerInfo) -> World ()
   BroadcastPacket :: ForAny ClientPacket -> World ()
 
 -- Things that can be serialized into a BS for the network
 class Serialize s where
   serialize :: s -> BS.ByteString
+
+serOpt :: Serialize s => Maybe s -> BS.ByteString
+serOpt (Just a) = serialize True <> serialize a
+serOpt Nothing = serialize False
 
 -- Instances for haskell types
 --
@@ -574,7 +642,7 @@ class Packet p where
   packetPretty :: p -> [(String,String)]
   packetName :: String
   packetId :: VarInt
-  onPacket :: (HasLogging r,HasPlayer r,HasWorld r,HasNetworking r) => p -> Eff r ()
+  onPacket :: (HasIO r,HasLogging r,HasPlayer r,HasWorld r,HasNetworking r) => p -> Eff r ()
   onPacket p = send (LogString ErrorLog $ "Unsupported packet: " ++ showPacket p)
   parsePacket :: Parser p
 
@@ -587,7 +655,7 @@ instance (Packet p,PacketSide p ~ 'Client,s ~ PacketState p) => CP s p where {}
 showPacket :: forall p. Packet p => p -> String
 showPacket pkt = formatPacket (packetName @p) (packetPretty pkt)
 
-type ServerPacket s = SuchThatStar '[Packet,SP s]
+newtype ServerPacket s = ServerPacket (SuchThatStar '[Packet,SP s])
 
 --data ServerPacket s = forall p. (Packet p,PacketSide p ~ 'Server,PacketState p ~ s) => ServerPacket p
 --instance Show (ServerPacket s) where show (SuchThatStar p) = showPacket p
@@ -657,10 +725,10 @@ instance EntityMetaType BlockFace where entityMetaFlag = 0xA
 instance Serialize (EntityMeta BlockFace) where serialize (EntityMeta f) = serialize @VarInt $ fromIntegral (fromEnum f)
 
 instance EntityMetaType (Maybe BlockCoord) where entityMetaFlag = 0xB
-instance Serialize (EntityMeta (Maybe BlockCoord)) where serialize (EntityMeta m) = case m of {Nothing -> serialize False;Just bc -> serialize True <> serialize bc}
+instance Serialize (EntityMeta (Maybe BlockCoord)) where serialize (EntityMeta m) = serOpt m
 
 instance EntityMetaType (Maybe UUID) where entityMetaFlag = 0xB
-instance Serialize (EntityMeta (Maybe UUID)) where serialize (EntityMeta m) = case m of {Nothing -> serialize False;Just uuid -> serialize True <> serialize uuid}
+instance Serialize (EntityMeta (Maybe UUID)) where serialize (EntityMeta m) = serOpt m
 
 instance EntityMetaType (Maybe BlockState) where entityMetaFlag = 0xC
 instance Serialize (EntityMeta (Maybe BlockState)) where serialize (EntityMeta m) = serialize @VarInt $ case m of {Nothing -> 0;Just (BlockState bid dmg) -> unsafeCoerce $ shiftL bid 4 .|. unsafeCoerce dmg}
@@ -677,5 +745,3 @@ data Networking a where
   GetFromNetwork :: Int -> Networking BS.ByteString
   PutIntoNetwork :: BS.ByteString -> Networking ()
   IsPacketReady :: Networking Bool
-
-

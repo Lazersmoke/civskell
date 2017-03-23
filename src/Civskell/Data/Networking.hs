@@ -1,4 +1,5 @@
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
@@ -46,31 +47,34 @@ removeCompression = send . RemoveCompression
 isPacketReady :: HasNetworking n => Eff n Bool
 isPacketReady = send IsPacketReady
 
-runNetworking :: HasIO r => Maybe EncryptionCouplet -> Maybe VarInt -> Handle -> Eff (Networking ': r) a -> Eff r a
+runNetworking :: HasIO r => MVar EncryptionCouplet -> MVar VarInt -> Handle -> Eff (Networking ': r) a -> Eff r a
 runNetworking _ _ _ (Pure x) = Pure x
 runNetworking mEnc mThresh hdl (Eff u q) = case u of
   Weaken restOfU -> Eff restOfU (Singleton (runNetworking mEnc mThresh hdl . runTCQ q))
-  Inject (GetFromNetwork len) -> do
-    case mEnc of
-      Nothing -> do
-        dat <- send (BS.hGet hdl len)
-        runNetworking mEnc mThresh hdl (runTCQ q dat)
-      Just (c,e,d) -> do
-        bs <- send (BS.hGet hdl len)
-        let (bs',d') = cfb8Decrypt c d bs
-        runNetworking (Just (c,e,d')) mThresh hdl (runTCQ q bs')
-  Inject (PutIntoNetwork bs) -> do
-    case mEnc of
-      Nothing -> do
-        send (BS.hPut hdl bs)
-        runNetworking mEnc mThresh hdl (runTCQ q ())
-      Just (c,e,d) -> do
-        let (bs',e') = cfb8Encrypt c e bs
-        send (BS.hPut hdl bs')
-        runNetworking (Just (c,e',d)) mThresh hdl (runTCQ q ())
-  Inject (SetCompressionLevel thresh) -> runNetworking mEnc thresh hdl (runTCQ q ())
-  Inject (SetupEncryption couplet) -> runNetworking (Just couplet) mThresh hdl (runTCQ q ())
-  Inject (AddCompression bs) -> case mThresh of
+  Inject (GetFromNetwork len) -> send (tryTakeMVar mEnc) >>= \case
+    Nothing -> do
+      dat <- send $ BS.hGet hdl len
+      runNetworking mEnc mThresh hdl (runTCQ q dat)
+    Just (c,e,d) -> do
+      bs <- send $ BS.hGet hdl len
+      let (bs',d') = cfb8Decrypt c d bs
+      send $ putMVar mEnc (c,e,d')
+      runNetworking mEnc mThresh hdl (runTCQ q bs')
+  Inject (PutIntoNetwork bs) -> send (tryTakeMVar mEnc) >>= \case
+    Nothing -> do
+      send (BS.hPut hdl bs)
+      runNetworking mEnc mThresh hdl (runTCQ q ())
+    Just (c,e,d) -> do
+      let (bs',e') = cfb8Encrypt c e bs
+      send $ BS.hPut hdl bs'
+      send $ putMVar mEnc (c,e',d)
+      runNetworking mEnc mThresh hdl (runTCQ q ())
+  Inject (SetCompressionLevel thresh) -> case thresh of
+    Nothing -> send (takeMVar mThresh) >> runNetworking mEnc mThresh hdl (runTCQ q ())
+    -- TODO: Investigate if this can cause deadlocks on repeated calls
+    Just t -> send (putMVar mThresh t) >> runNetworking mEnc mThresh hdl (runTCQ q ())
+  Inject (SetupEncryption couplet) -> send (putMVar mEnc couplet) >> runNetworking mEnc mThresh hdl (runTCQ q ())
+  Inject (AddCompression bs) -> send (tryReadMVar mThresh) >>= \case
     -- Do not compress; annotate with length only
     Nothing -> runNetworking mEnc mThresh hdl (runTCQ q (withLength bs))
     Just t -> if BS.length bs >= fromIntegral t
@@ -84,12 +88,12 @@ runNetworking mEnc mThresh hdl (Eff u q) = case u of
       else do
         let ann = withLength (BS.singleton 0x00 <> bs)
         runNetworking mEnc mThresh hdl (runTCQ q ann)
-  Inject (RemoveCompression bs) -> case mThresh of
+  Inject (RemoveCompression bs) -> send (tryReadMVar mThresh) >>= \case
     Nothing -> case parseOnly parseUncompPkt bs of
       Left _ -> runNetworking mEnc mThresh hdl (runTCQ q bs)
       Right pktData -> runNetworking mEnc mThresh hdl (runTCQ q pktData)
     Just _ -> case parseOnly parseCompPkt bs of
-      -- TODO: fix this
+      -- TODO: fix this completely ignoring a parse error
       Left _ -> runNetworking mEnc mThresh hdl (runTCQ q bs)
       Right (dataLen,compressedData) -> if dataLen == 0x00
         then runNetworking mEnc mThresh hdl (runTCQ q compressedData)
@@ -101,4 +105,3 @@ runNetworking mEnc mThresh hdl (Eff u q) = case u of
         case r of
           True -> return True
           False -> threadDelay 5000 >> return False
-

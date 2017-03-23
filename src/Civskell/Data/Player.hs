@@ -1,4 +1,7 @@
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
@@ -6,15 +9,17 @@
 module Civskell.Data.Player where
 
 import Control.Eff
-import Control.Monad (forM_)
+import Control.Concurrent.STM
+--import Control.Monad (forM_)
 import Data.Word (Word8)
+import Data.Functor.Identity
 import qualified Data.Set as Set
 import qualified Data.Map.Lazy as Map
 import Data.SuchThat
 
 import Civskell.Data.Types
 import qualified Civskell.Packet.Clientbound as Client
-import Civskell.Tech.Network
+--import Civskell.Tech.Network
 import Civskell.Data.World
 import Civskell.Data.Logging
 
@@ -35,11 +40,11 @@ setUsername :: HasPlayer r => String -> Eff r ()
 setUsername = send . SetPlayerName
 
 {-# INLINE getUUID #-}
-getUUID :: HasPlayer r => Eff r String
+getUUID :: HasPlayer r => Eff r UUID
 getUUID = send PlayerUUID
 
 {-# INLINE setUUID #-}
-setUUID :: HasPlayer r => String -> Eff r ()
+setUUID :: HasPlayer r => UUID -> Eff r ()
 setUUID = send . SetPlayerUUID
 
 {-# INLINE getHolding #-}
@@ -59,8 +64,8 @@ clearTeleport :: HasPlayer r => VarInt -> Eff r Bool
 clearTeleport = send . PlayerClearTP
 
 {-# INLINE initPlayer #-}
-initPlayer :: (HasWorld r, HasNetworking r, HasLogging r) => Eff (Player ': r) a -> Eff r a
-initPlayer = (newPlayer >>=) . flip runPlayer
+initPlayer :: (HasIO r, HasWorld r, HasLogging r) => TQueue (ForAny ClientPacket) -> Eff (Player ': r) a -> Eff r a
+initPlayer pq e = newPlayer >>= \i -> modifyPlayer i (\x -> x {packetQueue = pq}) >> runPlayer i e
 
 {-# INLINE getGamemode #-}
 getGamemode :: HasPlayer r => Eff r Gamemode
@@ -98,9 +103,15 @@ getMoveMode = send GetMoveMode
 setMoveMode :: HasPlayer r => MoveMode -> Eff r ()
 setMoveMode = send . SetMoveMode
 
-{-# INLINE flushInbox #-}
-flushInbox :: HasPlayer r => Eff r ()
-flushInbox = send FlushInbox
+--getPacket :: forall p r. (HasLogging r,HasPlayer r,Packet p) => Eff r (Maybe p)
+--getPacket = send $ GetPacket (parsePacket @p)
+
+sendPacket :: (HasPlayer r,HasLogging r,Serialize p,Packet p,PacketSide p ~ 'Client) => p -> Eff r ()
+sendPacket = send . SendPacket . ClientPacket . ambiguate . Identity
+
+--{-# INLINE flushInbox #-}
+--flushInbox :: HasPlayer r => Eff r ()
+--flushInbox = send FlushInbox
 
 -- Hotbar: 0-8
 -- Inventory: 9-35
@@ -135,8 +146,11 @@ civskellToClientSlot s
   | s == 45 = s
   | otherwise = error "Bad Slot Number"
 
+--sendPacket :: (HasPlayer r,HasIO r,Serialize p,Packet p,PacketSide p ~ 'Client) => p -> Eff r ()
+--sendPacket q = writeTQueue q . ambiguate . ClientPacket . ambiguate . Identity =<< getPacketQueue
+
 -- NOTE: always be atomic wrt [get,set,modify]Player
-runPlayer :: (HasNetworking r, HasWorld r, HasLogging r) => PlayerId -> Eff (Player ': r) a -> Eff r a
+runPlayer :: (HasIO r, HasWorld r, HasLogging r) => PlayerId -> Eff (Player ': r) a -> Eff r a
 runPlayer _ (Pure x) = return x
 runPlayer i (Eff u q) = case u of
   -- Get the player's client brand
@@ -156,10 +170,10 @@ runPlayer i (Eff u q) = case u of
   -- Set the player's selected slot
   Inject (SetPlayerGamemode g) -> do
     modifyPlayer i $ \p -> p {gameMode = g}
-    sendPacket (Client.ChangeGameState (ChangeGamemode g))
+    runPlayer i $ sendPacket (Client.ChangeGameState (ChangeGamemode g))
     case g of
-      Survival -> sendPacket (Client.PlayerAbilities (AbilityFlags False False False False) 0 1)
-      Creative -> sendPacket (Client.PlayerAbilities (AbilityFlags True False True True) 0 1)
+      Survival -> runPlayer i $ sendPacket (Client.PlayerAbilities (AbilityFlags False False False False) 0 1)
+      Creative -> runPlayer i $ sendPacket (Client.PlayerAbilities (AbilityFlags True False True True) 0 1)
     runPlayer i (runTCQ q ())
   -- Get the player's selected slot
   Inject PlayerHolding -> runPlayer i . runTCQ q . holdingSlot =<< getPlayer i 
@@ -169,7 +183,7 @@ runPlayer i (Eff u q) = case u of
   Inject (PlayerAddTP xyz yp relFlag) -> do
     p <- getPlayer i
     setPlayer i p {nextTid = 1 + nextTid p,teleportConfirmationQue = Set.insert (nextTid p) $ teleportConfirmationQue p}
-    sendPacket (Client.PlayerPositionAndLook xyz yp relFlag (nextTid p))
+    runPlayer i $ sendPacket (Client.PlayerPositionAndLook xyz yp relFlag (nextTid p))
     runPlayer i (runTCQ q ())
   -- Check if the tid is in the que. If it is, then clear and return true, else false
   Inject (PlayerClearTP tid) -> do
@@ -183,7 +197,7 @@ runPlayer i (Eff u q) = case u of
   Inject (GetPlayerSlot slotNum) -> runPlayer i . runTCQ q . Map.findWithDefault EmptySlot slotNum . playerInventory =<< getPlayer i
   Inject (SetPlayerSlot slotNum slot) -> do
     modifyPlayer i $ \p -> p {playerInventory = Map.insert slotNum slot (playerInventory p)}
-    sendPacket (Client.SetSlot 0 (civskellToClientSlot slotNum) slot)
+    runPlayer i $ sendPacket (Client.SetSlot 0 (civskellToClientSlot slotNum) slot)
     runPlayer i (runTCQ q ())
   Inject (StartBreaking block) -> do
     modifyPlayer i $ \p -> p {diggingBlocks = Map.insert block (InProgress 0) (diggingBlocks p)} 
@@ -191,11 +205,19 @@ runPlayer i (Eff u q) = case u of
   Inject (StopBreaking block) -> modifyPlayer i (\p -> p {diggingBlocks = Map.delete block (diggingBlocks p)}) >> runPlayer i (runTCQ q ())
   Inject GetMoveMode -> runPlayer i . runTCQ q . moveMode =<< getPlayer i
   Inject (SetMoveMode mode) -> modifyPlayer i (\p -> p {moveMode = mode}) >> runPlayer i (runTCQ q ())
-  Inject FlushInbox -> do
-    pkts <- inboxForPlayer i
-    forM_ pkts (\(SuchThat p) -> sendClientPacket p)
-    runPlayer i (runTCQ q ())
+  --Inject FlushInbox -> do
+    --pkts <- send . atomically . getAllTQ . packetQueue =<< getPlayer i
+    --forM_ pkts (\(SuchThat p) -> sendClientPacket p)
+    --runPlayer i (runTCQ q ())
   Inject (LogPlayerName msg) -> (>> runPlayer i (runTCQ q ())) . flip logt msg . clientUsername =<< getPlayer i
+  Inject (SendPacket p) -> do
+    send . atomically . flip writeTQueue (ambiguate p) . packetQueue =<< getPlayer i
+    runPlayer i (runTCQ q ())
+  Inject GetInbox -> runPlayer i . runTCQ q =<< send . atomically . getAllTQ . packetQueue =<< getPlayer i
   -- Not our turn
   Weaken otherEffects -> Eff otherEffects (Singleton (\x -> runPlayer i (runTCQ q x)))
 
+getAllTQ :: TQueue a -> STM [a]
+getAllTQ q = tryReadTQueue q >>= \case
+  Nothing -> return []
+  Just a -> (a:) <$> getAllTQ q

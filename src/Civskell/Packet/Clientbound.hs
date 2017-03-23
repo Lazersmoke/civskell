@@ -1,4 +1,5 @@
 {-# LANGUAGE BinaryLiterals #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -555,6 +556,21 @@ instance Packet PlayerAbilities where
 instance Serialize PlayerAbilities where
   serialize (PlayerAbilities flag fly fov) = serialize flag <> serialize fly <> serialize fov
   -- x,y,z, yaw,pitch, relativity flags, TPconfirm Id
+
+data PlayerListItem a = PlayerListItem [(UUID,PlayerListAction a)]
+instance Packet (PlayerListItem a) where
+  type PacketSide (PlayerListItem a) = 'Client
+  type PacketState (PlayerListItem a) = 'Playing
+  packetName = "PlayerListItem"
+  packetId = 0x2D
+  packetPretty (PlayerListItem actions) = (\(u,_) -> [("UUID",show u),("Action",show "")]) =<< actions
+  parsePacket = error "Can't parse clientbound packet"
+
+instance Serialize (PlayerListItem 'AddPlayer) where serialize (PlayerListItem acts) = serialize (0 :: VarInt) <> withListLength acts
+instance Serialize (PlayerListItem 'UpdateGamemode) where serialize (PlayerListItem acts) = serialize (1 :: VarInt) <> withListLength acts
+instance Serialize (PlayerListItem 'UpdateLatency) where serialize (PlayerListItem acts) = serialize (2 :: VarInt) <> withListLength acts
+instance Serialize (PlayerListItem 'UpdateName) where serialize (PlayerListItem acts) = serialize (3 :: VarInt) <> withListLength acts
+instance Serialize (PlayerListItem 'RemovePlayer) where serialize (PlayerListItem acts) = serialize (4 :: VarInt) <> withListLength acts
 
 data PlayerPositionAndLook = PlayerPositionAndLook (Double,Double,Double) (Float,Float) Word8 TPConfirmId
 instance Packet PlayerPositionAndLook where

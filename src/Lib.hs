@@ -9,13 +9,13 @@ module Lib where
 
 import Control.Concurrent (forkIO,threadDelay)
 import Data.Functor.Identity
-import Control.Concurrent.MVar (MVar,newMVar)
+import Control.Concurrent.MVar
+import Control.Concurrent.Chan
+import Control.Concurrent.STM
 import Control.Eff (Eff,runM,send)
-import Control.Monad (forM_,when)
-import Data.List (intercalate)
+import Control.Monad (when)
 import System.Exit (exitSuccess)
 import System.IO (hSetBuffering,BufferMode(NoBuffering))
-import qualified Data.ByteString as BS
 import qualified Network as Net
 import Data.SuchThat
 
@@ -23,7 +23,6 @@ import Civskell.Data.Logging
 import Civskell.Data.Player
 import Civskell.Data.Types
 import Civskell.Data.World
-import Civskell.Tech.Encrypt
 import Civskell.Tech.Network
 import qualified Civskell.Packet.Clientbound as Client
 import qualified Civskell.Packet.Serverbound as Server
@@ -34,11 +33,14 @@ startListening :: IO ()
 startListening = do
   -- Make an MVar for the global state. Use test version for the flat stone plains
   wor <- newMVar testInitWorld
-  -- Make an MVar for locking the logger
-  lock <- newMVar ()
+  -- Make a Chan for logging
+  logger <- newChan :: IO (Chan String)
   -- Fork a new thread to wait for incoming connections, and pass the world reference to it
-  _ <- forkIO (connLoop wor lock =<< Net.listenOn (Net.PortNumber 25565))
-  _ <- forkIO (runM $ runLogger lock $ runWorld wor $ keepAliveThread 0)
+  _ <- forkIO (connLoop wor logger =<< Net.listenOn (Net.PortNumber 25565))
+  -- Fork a thread to periodically send keep alives to everyone
+  _ <- forkIO (runM $ runLogger logger $ runWorld wor $ keepAliveThread 0)
+  -- Fork a thread to continuously log every log message
+  _ <- forkIO (getChanContents logger >>= mapM_ putStrLn)
   -- Listen for the console to say to quit
   terminal
 
@@ -69,156 +71,47 @@ terminal = do
   if l == "quit" then exitSuccess else terminal
 
 -- Spawns a new thread to deal with each new client
-connLoop :: MVar WorldData -> MVar () -> Net.Socket -> IO ()
-connLoop wor lock sock = do
+connLoop :: MVar WorldData -> Chan String -> Net.Socket -> IO ()
+connLoop wor logger sock = do
   -- Accept is what waits for a new connection
   (handle, cliHost, cliPort) <- Net.accept sock
   -- Log that we got a connection
   putStrLn $ "Got Client connection: " ++ show cliHost ++ ":" ++ show cliPort
   -- Don't line buffer the network
   hSetBuffering handle NoBuffering
-  -- We don't need the thread id
-  _ <- forkIO (runM $ runLogger lock $ runNetworking Nothing Nothing handle $ runWorld wor $ connHandler)
+  -- Make new networking MVars for this client
+  mEnc <- newEmptyMVar :: IO (MVar EncryptionCouplet)
+  mThresh <- newEmptyMVar :: IO (MVar VarInt)
+  -- Packet TQueue
+  pq <- newTQueueIO
+  -- Getting thread
+  _ <- forkIO (runM $ runLogger logger $ runNetworking mEnc mThresh handle $ runWorld wor $ initPlayer pq $ packetLoop)
+  -- Sending thread
+  _ <- forkIO (runM $ runLogger logger $ runNetworking mEnc mThresh handle $ flushPackets pq)
   -- Wait for another connection
-  connLoop wor lock sock
+  connLoop wor logger sock
 
 -- Wait for a Handshake, and hand it off when we get it
-connHandler :: (HasLogging r,HasIO r,HasNetworking r,HasWorld r) => Eff r ()
-connHandler = getPacket @Server.Handshake >>= maybe (loge "WTF no packet? REEEEEEEEEEEEE") handleHandshake
+--connHandler :: (HasLogging r,HasIO r,HasWorld r) => Eff r ()
+--connHandler = getPacket @Server.Handshake >>= maybe (loge "WTF no packet? REEEEEEEEEEEEE") handleHandshake
 
-handleHandshake :: (HasLogging r,HasIO r,HasNetworking r,HasWorld r) => Server.Handshake -> Eff r ()
--- Normal handshake recieved
-handleHandshake (Server.Handshake protocol _addr _port newstate) = if fromIntegral protocol == protocolVersion
-  -- They are using the correct protocol version, so continue as they request
-  then case newstate of
-    -- 1 for status
-    1 -> statusMode
-    -- 2 for login
-    2 -> initiateLogin
-    -- Otherwise, drop the connection by returning
-    -- TODO: Enumerate handshake options
-    _ -> return ()
-  -- They are using the incorrect protocol version. Disconnect packet will probably work even if they have a different version.
-  else sendPacket (Client.Disconnect (jsonyText $ "Unsupported protocol version. Please use " ++ show protocolVersion))
--- Legacy response
-handleLegacyHandshake :: HasNetworking r => Server.LegacyHandshake -> Eff r ()
-handleLegacyHandshake Server.LegacyHandshake = rPut $ BS.pack [0xFF,0x00,0x1b,0x00,0xa7
-  ,0x00,0x31 -- 1
-  ,0x00,0x00 -- Seperator
-  ,0x00,0x33 -- 3
-  ,0x00,0x31 -- 1
-  ,0x00,0x36 -- 6
-  ,0x00,0x00 -- Seperator
-  ,0x00,0x31 -- 1
-  ,0x00,0x2e -- .
-  ,0x00,0x31 -- 1
-  ,0x00,0x31 -- 1
-  ,0x00,0x2e -- .
-  ,0x00,0x32 -- 2
-  ,0x00,0x00 -- Seperator
-  ,0x00,0x43 -- C
-  ,0x00,0x69 -- i
-  ,0x00,0x76 -- v
-  ,0x00,0x73 -- s
-  ,0x00,0x6b -- k
-  ,0x00,0x65 -- e
-  ,0x00,0x6c -- l
-  ,0x00,0x6c -- l
-  ,0x00,0x00 -- Seperator
-  ,0x00,0x00 -- 0
-  ,0x00,0x00 -- Seperator
-  ,0x00,0x00 -- 0
-  ]
 -- If its not a handshake packet, Log to console that we have a bad packet
 -- Drop the connection by returning, since the client can't receive normal disconnect packets yet
 --handleHandshake (ServerPacket (p::a)) = loge $ "Unexpected non-handshake packet with Id: " ++ show (packetId @a)
 
-encryptionPhase :: (HasIO r,HasLogging r,HasNetworking r,HasWorld r) => String -> Eff r ()
-encryptionPhase nameFromLoginStart = do
-  -- Get a new keypair to use with this client during the key exchange
-  -- TODO: globalize this keypair so we can remove the HasIO constraint
-  (pub,priv) <- getAKeypair
-  -- Verify Token is fixed because why not
-  -- TODO: make this a random token
-  let vt = BS.pack [0xDE,0xAD,0xBE,0xEF]
-  -- Server Id is blank because (((history)))
-  let sId = ""
-  -- Encode our public key into ASN.1's serialized format
-  let encPubKey = encodePubKey pub
-  -- Send an encryption request to the client
-  sendPacket (Client.EncryptionRequest sId encPubKey vt)
-  -- Wait for them to send an Encryption Response
-  getPacket @Server.EncryptionResponse >>= \case
-    Just (Server.EncryptionResponse ssFromClient vtFromClient) -> do
-      -- Make sure that the encryption stuff all lines up properly
-      case checkVTandSS priv vtFromClient ssFromClient vt of
-        -- If it doesn't, disconnect
-        Left s -> sendPacket (Client.Disconnect (jsonyText s)) >> loge s
-        -- If it does, keep going
-        Right ss -> do
-          -- Start encrypting our packets, now that we have the shared secret
-          setupEncryption (makeEncrypter ss, ss, ss)
-          -- Make the serverId hash for auth
-          let loginHash = genLoginHash sId ss encPubKey
-          authPhase nameFromLoginStart loginHash
-    Nothing -> do
-      loge "Bad EncryptionResponse packet"
-      sendPacket (Client.Disconnect (jsonyText "Bad EncryptionResponse packet"))
+-- TODO: remove HasIO constraint in favor of special STM effects or something
+flushPackets :: (HasLogging r,HasNetworking r,HasIO r) => TQueue (ForAny ClientPacket) -> Eff r ()
+flushPackets q = send (atomically $ readTQueue q) >>= ambiguously sendClientPacket >> flushPackets q
 
-authPhase :: (HasIO r,HasLogging r,HasNetworking r,HasWorld r) => String -> String -> Eff r ()
-authPhase name hash = do
-  -- Do the Auth stuff with Mojang
-  -- TODO: This uses arbitrary IO, we should make it into an effect
-  authGetReq name hash >>= \case
-    -- If the auth is borked, its probably Mojangs fault tbh
-    Nothing -> do
-      loge "Parse error on auth"
-      -- Disclaim guilt
-      sendPacket (Client.Disconnect $ jsonyText "Auth failed (not Lazersmoke's fault, probably!)")
-    Just (uuid,nameFromAuth) -> initPlayer $ do
-      setUsername nameFromAuth
-      setUUID uuid
-      -- Tell the client to compress starting now. Agressive for testing
-      -- EDIT: setting this to 3 gave us a bad frame exception :S
-      -- TODO: merge this packet into `setCompression`. setCompression is already a Networking effect, so this is ok
-      sendPacket (Client.SetCompression 16)
-      setCompression $ Just 16
-      -- Send a login success. We are now in play mode
-      sendPacket (Client.LoginSuccess uuid nameFromAuth)
-      startPlaying
-
--- Start Play Mode, where we have just sent "Login Success"
-startPlaying :: (HasPlayer r,HasWorld r,HasLogging r,HasNetworking r) => Eff r ()
-startPlaying = do
-  -- First 0 is player's EID, second is the dimension (overworld), 100 is max players
-  -- TODO: newtype for EID, enum for dimension
-  sendPacket (Client.JoinGame 0 Survival 0 Peaceful 100 "default" False)
-  setGamemode Survival
-  -- Tell them we aren't vanilla so no one gets mad at mojang for our fuck ups
-  sendPacket (Client.PluginMessage "MC|Brand" (serialize "Civskell"))
-  -- Difficulty to peaceful (TODO: eventually a config file for these things)
-  sendPacket (Client.ServerDifficulty Peaceful)
-  -- World Spawn/Compass Direction, not where they will spawn initially
-  sendPacket (Client.SpawnPosition (Block (0,64,0)))
-  -- Player Abilities
-  -- Sent in setGamemode Survival
-  -- sendPacket (Client.PlayerAbilities (AbilityFlags False False False False) 0.0 1.0)
-  -- Send initial world. Need a 7x7 grid or the client gets angry with us
-  forM_ [0..48] $ \x -> sendPacket =<< colPacket ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
-  -- Send an initial blank inventory
-  sendPacket (Client.WindowItems 0 (replicate 45 EmptySlot))
-  -- Give them some stone (for testing)
-  setInventorySlot 4 (Slot 1 32 0 Nothing)
-  -- Start the main packet response loop
-  packetLoop
-
-packetLoop :: (HasPlayer r,HasLogging r,HasNetworking r,HasWorld r) => Eff r ()
+packetLoop :: (HasIO r,HasPlayer r,HasLogging r,HasNetworking r,HasWorld r) => Eff r ()
 packetLoop = do
+  -- TODO: Fork new thread on every packet
   -- If there is a packet ready, get the packet and act on it
   r <- isPacketReady
-  when r $ getGenericPacket Server.parsePlayPacket >>= maybe (loge "Failed to parse incoming packet") (ambiguously (onPacket . runIdentity))
+  when r $ getGenericPacket (Server.parseStatusPacket <|> Server.parseLoginPacket <|> Server.parseHandshakePacket <|> Server.parsePlayPacket) >>= maybe (loge "Failed to parse incoming packet") (ambiguously (onPacket . runIdentity))
   -- Either way, flush the inbox and recurse after we are done
-  flushInbox
+  --flushInbox
+  -- Flushing is now done in a seperate thread
   packetLoop
 
 {-gotPacket :: (HasNetworking r,HasPlayer r,HasLogging r,HasWorld r) => ServerPacket 'Playing -> Eff r ()
@@ -227,42 +120,6 @@ gotPacket a = loge $ "Unsupported packet: " ++ show a
 -}
 
 -- First, check if the slot matches the client provided one
-
--- Do the login process
-initiateLogin :: (HasIO r,HasLogging r,HasNetworking r,HasWorld r) => Eff r ()
-initiateLogin = do
-  -- Get a login start packet from the client
-  getPacket @Server.LoginStart >>= \case
-    -- LoginStart packets contain their username as a String
-    Just (Server.LoginStart name) -> do
-      -- Log that they are logging in
-      logt name "Logging In"
-      encryptionPhase name
-    Nothing -> do
-      loge "Bad LoginStart packet"
-      -- We can send friendly disconnect messages since we are in the "Login" phase
-      sendPacket (Client.Disconnect (jsonyText "Bad LoginStart packet"))
-
--- Server list refresh ping/status cycle
-statusMode :: (HasLogging r,HasNetworking r,HasWorld r) => Eff r ()
-statusMode = do
-  -- Wait for them to ask our status
-  getPacket @Server.StatusRequest >>= \case
-    -- Client gave us an unparseable packet, so disconnect with an error
-    Nothing -> loge "Client gave nonsense packet, disconnecting"
-    -- Make sure they are actually asking for our status
-    Just Server.StatusRequest -> do
-      -- Get the list of connected players so we can show info about them in the server menu
-      playersOnline <- allPlayers
-      let userSample = intercalate "," . map (\p -> "{\"name\":\"" ++ clientUsername p ++ "\",\"id\":\"" ++ clientUUID p ++ "\"}") $ playersOnline
-      let resp = "{\"version\":{\"name\":\"Civskell (1.11.2)\",\"protocol\":" ++ show protocolVersion ++ "},\"players\":{\"max\": 100,\"online\": " ++ show (length playersOnline) ++ ",\"sample\":[" ++ userSample ++ "]},\"description\":{\"text\":\"An Experimental Minecraft server written in Haskell | github.com/Lazersmoke/civskell\"},\"favicon\":\"" ++ image ++ "\"}"
-      -- Send resp to clients
-      sendPacket (Client.StatusResponse resp)
-      -- Wait for them to start a ping
-      getPacket @Server.StatusPing >>= \case
-        -- Make sure they are actually pinging us, then send a pong right away
-        Just (Server.StatusPing l) -> sendPacket (Client.StatusPong l)
-        Nothing -> loge "Client gave nonsense packet instead of ping, disconnecting"
 
 -- TODO: make this not cancer
 image :: String

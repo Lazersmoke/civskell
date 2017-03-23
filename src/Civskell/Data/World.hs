@@ -6,11 +6,12 @@
 module Civskell.Data.World where
 
 import Control.Concurrent.MVar (readMVar,modifyMVar,modifyMVar_,MVar)
+import Control.Concurrent.STM.TQueue
+import Control.Concurrent.STM
 import Data.Functor.Identity
 import Control.Eff
 import Control.Monad (forM)
 import Data.Bits
-import Data.List ((\\))
 import Data.SuchThat
 import qualified Data.ByteString as BS
 import qualified Data.Map.Lazy as Map
@@ -20,7 +21,7 @@ import qualified Civskell.Packet.Clientbound as Client
 
 
 initWorld :: WorldData
-initWorld = WorldData {chunks = Map.empty,entities = Map.empty,players = Map.empty,nextEID = 0,nextUUID = UUID (0,1),broadcastLog = []}
+initWorld = WorldData {chunks = Map.empty,entities = Map.empty,players = Map.empty,nextEID = 0,nextUUID = UUID (0,1)}
 
 testInitWorld :: WorldData
 testInitWorld = initWorld {chunks = Map.fromList [(ChunkCoord (cx,cy,cz),exampleChunk) | cx <- [-3..3], cz <- [-3..3], cy <- [0..7]]}
@@ -93,13 +94,13 @@ newPlayer = send NewPlayer
 allPlayers :: Member World r => Eff r [PlayerInfo]
 allPlayers = send AllPlayers
 
-{-# INLINE forallPlayers #-}
-forallPlayers :: Member World r => (PlayerInfo -> PlayerInfo) -> Eff r ()
-forallPlayers = send . ForallPlayers
+--{-# INLINE forallPlayers #-}
+--forallPlayers :: Member World r => (PlayerInfo -> PlayerInfo) -> Eff r ()
+--forallPlayers = send . ForallPlayers
 
-{-# INLINE inboxForPlayer #-}
-inboxForPlayer :: Member World r => PlayerId -> Eff r [ForAny ClientPacket]
-inboxForPlayer = send . InboxForPlayer
+--{-# INLINE inboxForPlayer #-}
+--inboxForPlayer :: Member World r => PlayerId -> Eff r [ForAny ClientPacket]
+--inboxForPlayer = send . InboxForPlayer
 
 {-# INLINE broadcastPacket #-}
 broadcastPacket :: (Member World r,Packet p, PacketSide p ~ 'Client,Serialize p) => p -> Eff r ()
@@ -108,6 +109,10 @@ broadcastPacket = send . BroadcastPacket . ambiguate . ClientPacket . ambiguate 
 {-# INLINE getEntity #-}
 getEntity :: (Member World r) => EntityId -> Eff r (Some Entity)
 getEntity = send . GetEntity
+
+{-# INLINE deleteEntity #-}
+deleteEntity :: (Member World r) => EntityId -> Eff r ()
+deleteEntity = send . DeleteEntity
 
 {-# INLINE summonMob #-}
 summonMob :: (Member World r, Mob m) => m -> Eff r ()
@@ -149,6 +154,7 @@ runWorld w' (Eff u q) = case u of
     send $ modifyMVar_ w' $ \w -> return w {players = Map.insert i p (players w)}
     runWorld w' (runTCQ q ())
   Inject (GetEntity e) -> send (readMVar w') >>= runWorld w' . runTCQ q . flip (Map.!) e . entities
+  Inject (DeleteEntity e) -> send (modifyMVar_ w' $ \w -> return w {entities = Map.delete e . entities $ w}) >> runWorld w' (runTCQ q ())
   -- Pattern match on SuchThat to reinfer the constrain `Mob` into the contraint `Entity` for storage in the entities map
   Inject (SummonMob (SuchThat m)) -> do
     (eid,uuid) <- send . modifyMVar w' $ \w -> do
@@ -166,16 +172,10 @@ runWorld w' (Eff u q) = case u of
     where
       incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
   Inject AllPlayers -> send (readMVar w') >>= runWorld w' . runTCQ q . Map.elems . players
-  Inject (ForallPlayers f) -> do
-    send $ modifyMVar_ w' $ \w -> return w {players = fmap f (players w)}
-    runWorld w' (runTCQ q ())
-  Inject (InboxForPlayer i) -> do
-    (runWorld w' . runTCQ q =<<) . send . modifyMVar w' $ \w -> do
-      let oldLog = broadcastLog w
-      let sentMsgs = map snd $ filter (\(ids,_) -> not $ elem i ids) oldLog
-      let newLog = filter (\(ids,_) -> not . null $ (Map.keys $ players w) \\ ids) . map (\(ids,pkt) -> (i:ids,pkt)) $ oldLog
-      return (w {broadcastLog = newLog},reverse sentMsgs)
+  --Inject (ForallPlayers f) -> do
+    --send $ modifyMVar_ w' $ \w -> return w {players = fmap f (players w)}
+    --runWorld w' (runTCQ q ())
   Inject (BroadcastPacket pkt) -> do
-    send $ modifyMVar_ w' $ \w -> return w {broadcastLog = ([],pkt) : broadcastLog w}
+    send . atomically . mapM_ (flip writeTQueue pkt . packetQueue) . players =<< send (readMVar w')
     runWorld w' (runTCQ q ())
   Weaken u' -> Eff u' (Singleton (runWorld w' . runTCQ q))

@@ -1,14 +1,15 @@
 {-# LANGUAGE FlexibleContexts #-}
 module Civskell.Tech.Encrypt 
-  (getAKeypair
-  ,encodePubKey
+  (globalKeypair
+  ,encodedPublicKey
   ,checkVTandSS
   ,genLoginHash
   ,cfb8Encrypt,cfb8Decrypt
   ,makeEncrypter
   ) where
 
-import Control.Eff (Eff,send)
+import Control.Eff (Eff,send,runM)
+import System.IO.Unsafe (unsafePerformIO)
 import Crypto.Cipher.AES (AES128)
 import Crypto.Cipher.Types (ecbEncrypt,cipherInit)
 import Crypto.Error (throwCryptoError)
@@ -27,6 +28,12 @@ import Civskell.Data.Types
 -- We need to specify the type here because RSA.generate works in any MonadRandom
 getAKeypair :: HasIO r => Eff r (RSA.PublicKey,RSA.PrivateKey)
 getAKeypair = send (RSA.generate 128 65537 :: IO (RSA.PublicKey,RSA.PrivateKey))
+
+globalKeypair :: (RSA.PublicKey,RSA.PrivateKey)
+globalKeypair = unsafePerformIO $ runM getAKeypair
+
+encodedPublicKey :: BS.ByteString
+encodedPublicKey = encodePubKey . fst $ globalKeypair
 
 -- Observe the cancer, but don't touch it or you'll contract it.
 encodePubKey :: RSA.PublicKey -> BS.ByteString
