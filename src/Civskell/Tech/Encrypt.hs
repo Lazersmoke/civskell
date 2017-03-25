@@ -26,7 +26,7 @@ import Civskell.Data.Types
 
 -- 128 is 128 bytes, so 1024 bit key
 -- We need to specify the type here because RSA.generate works in any MonadRandom
-getAKeypair :: HasIO r => Eff r (RSA.PublicKey,RSA.PrivateKey)
+getAKeypair :: PerformsIO r => Eff r (RSA.PublicKey,RSA.PrivateKey)
 getAKeypair = send (RSA.generate 128 65537 :: IO (RSA.PublicKey,RSA.PrivateKey))
 
 globalKeypair :: (RSA.PublicKey,RSA.PrivateKey)

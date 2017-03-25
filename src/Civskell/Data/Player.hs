@@ -12,102 +12,112 @@ import Control.Eff
 import Control.Concurrent.STM
 --import Control.Monad (forM_)
 import Data.Word (Word8)
-import Data.Functor.Identity
 import qualified Data.Set as Set
 import qualified Data.Map.Lazy as Map
 import Data.SuchThat
 
 import Civskell.Data.Types
 import qualified Civskell.Packet.Clientbound as Client
---import Civskell.Tech.Network
-import Civskell.Data.World
+import Civskell.Tech.Network
 import Civskell.Data.Logging
+import Civskell.Data.World
 
-{-# INLINE getBrand #-}
-getBrand :: HasPlayer r => Eff r String
-getBrand = send PlayerBrand
+getPlayer :: HasPlayer r => Eff r PlayerData
+getPlayer = usingPlayer readTVar
 
-{-# INLINE setBrand #-}
-setBrand :: HasPlayer r => String -> Eff r ()
-setBrand = send . SetPlayerBrand
+usingPlayer :: HasPlayer r => (TVar PlayerData -> STM a) -> Eff r a
+usingPlayer = send . UsingPlayerData
 
-{-# INLINE getUsername #-}
-getUsername :: HasPlayer r => Eff r String
-getUsername = send PlayerName
+overPlayer :: HasPlayer r => (PlayerData -> PlayerData) -> Eff r ()
+overPlayer f = usingPlayer (flip modifyTVar f)
 
-{-# INLINE setUsername #-}
 setUsername :: HasPlayer r => String -> Eff r ()
-setUsername = send . SetPlayerName
+setUsername u = overPlayer $ \p -> p {clientUsername = u}
 
-{-# INLINE getUUID #-}
-getUUID :: HasPlayer r => Eff r UUID
-getUUID = send PlayerUUID
+setBrand :: HasPlayer r => String -> Eff r ()
+setBrand u = overPlayer $ \p -> p {clientBrand = u}
 
-{-# INLINE setUUID #-}
 setUUID :: HasPlayer r => UUID -> Eff r ()
-setUUID = send . SetPlayerUUID
+setUUID u = overPlayer $ \p -> p {clientUUID = u}
 
-{-# INLINE getHolding #-}
-getHolding :: HasPlayer r => Eff r Short
-getHolding = send PlayerHolding
-
-{-# INLINE setHolding #-}
 setHolding :: HasPlayer r => Short -> Eff r ()
-setHolding = send . SetPlayerHolding
+setHolding u = overPlayer $ \p -> p {holdingSlot = u}
 
+setMoveMode :: HasPlayer r => MoveMode -> Eff r ()
+setMoveMode u = overPlayer $ \p -> p {moveMode = u}
+
+setPlayerPos :: HasPlayer r => (Double,Double,Double) -> Eff r ()
+setPlayerPos u = overPlayer $ \p -> p {playerPosition = u}
+
+setPlayerViewAngle :: HasPlayer r => (Float,Float) -> Eff r ()
+setPlayerViewAngle u = overPlayer $ \p -> p {viewAngle = u}
+
+setPlayerState :: HasPlayer r => ServerState -> Eff r ()
+setPlayerState u = overPlayer $ \p -> p {playerState = u}
+
+-- Add a new tid to the que
 {-# INLINE pendTeleport #-}
-pendTeleport :: HasPlayer r => (Double,Double,Double) -> (Float,Float) -> Word8 -> Eff r ()
-pendTeleport xyz yp r = send (PlayerAddTP xyz yp r)
+pendTeleport :: (HasNetworking r,Logs r,HasPlayer r) => (Double,Double,Double) -> (Float,Float) -> Word8 -> Eff r ()
+pendTeleport xyz yp relFlag = do
+  p <- usingPlayer $ \t -> do
+    p <- readTVar t
+    writeTVar t p {nextTid = 1 + nextTid p,teleportConfirmationQue = Set.insert (nextTid p) $ teleportConfirmationQue p}
+    return p
+  sendPacket (Client.PlayerPositionAndLook xyz yp relFlag (nextTid p))
 
+-- Check if the tid is in the que. If it is, then clear and return true, else false
 {-# INLINE clearTeleport #-}
 clearTeleport :: HasPlayer r => VarInt -> Eff r Bool
-clearTeleport = send . PlayerClearTP
+clearTeleport tid = usingPlayer $ \t -> do
+  p <- readTVar t 
+  writeTVar t p {teleportConfirmationQue = Set.delete tid $ teleportConfirmationQue p}
+  return (Set.member tid $ teleportConfirmationQue p)
 
+-- We need the TQueue here to be the same one that is running in the sending thread
 {-# INLINE initPlayer #-}
-initPlayer :: (HasIO r, HasWorld r, HasLogging r) => TQueue (ForAny ClientPacket) -> Eff (Player ': r) a -> Eff r a
-initPlayer pq e = newPlayer >>= \i -> modifyPlayer i (\x -> x {packetQueue = pq}) >> runPlayer i e
+initPlayer :: (HasNetworking r, PerformsIO r, HasWorld r, Logs r) => TQueue (ForAny ClientPacket) -> Eff (Player ': r) a -> Eff r a
+initPlayer pq e = do
+  t <- send (newTVarIO playerData)
+  runPlayer t e
+  where
+    playerData = PlayerData
+      {teleportConfirmationQue = Set.empty
+      ,nextTid = 0
+      ,keepAliveQue = Set.empty
+      ,nextKid = 0
+      ,holdingSlot = 0
+      ,playerPosition = (0,0,0)
+      ,viewAngle = (0,0)
+      ,gameMode = Survival
+      ,playerInventory = Map.empty
+      ,diggingBlocks = Map.empty
+      ,moveMode = Walking
+      ,playerState = Handshaking
+      ,clientUsername = undefined
+      ,clientBrand = undefined
+      ,clientUUID = undefined
+      ,playerId = undefined
+      ,packetQueue = pq
+      }
 
-{-# INLINE getGamemode #-}
-getGamemode :: HasPlayer r => Eff r Gamemode
-getGamemode = send PlayerGamemode
-
+-- Set the player's gamemode
 {-# INLINE setGamemode #-}
-setGamemode :: HasPlayer r => Gamemode -> Eff r ()
-setGamemode = send . SetPlayerGamemode
-
-{-# INLINE setPlayerPos #-}
-setPlayerPos :: HasPlayer r => (Double,Double,Double) -> Eff r ()
-setPlayerPos = send . SetPlayerPosition
-
-{-# INLINE getPlayerPos #-}
-getPlayerPos :: HasPlayer r => Eff r (Double,Double,Double)
-getPlayerPos = send GetPlayerPosition
-
-{-# INLINE setPlayerViewAngle #-}
-setPlayerViewAngle :: HasPlayer r => (Float,Float) -> Eff r ()
-setPlayerViewAngle = send . SetPlayerViewAngle
-
-{-# INLINE getPlayerViewAngle #-}
-getPlayerViewAngle :: HasPlayer r => Eff r (Float,Float)
-getPlayerViewAngle = send GetPlayerViewAngle
+setGamemode :: (HasNetworking r,Logs r,HasPlayer r) => Gamemode -> Eff r ()
+setGamemode g = do
+  overPlayer $ \p -> p {gameMode = g}
+  sendPacket (Client.ChangeGameState (ChangeGamemode g))
+  case g of
+    Survival -> sendPacket (Client.PlayerAbilities (AbilityFlags False False False False) 0 1)
+    Creative -> sendPacket (Client.PlayerAbilities (AbilityFlags True False True True) 0 1)
 
 {-# INLINE setInventorySlot #-}
-setInventorySlot :: HasPlayer r => Short -> Slot -> Eff r ()
-setInventorySlot a b = send $ SetPlayerSlot a b
-
-{-# INLINE getMoveMode #-}
-getMoveMode :: HasPlayer r => Eff r MoveMode
-getMoveMode = send GetMoveMode
-
-{-# INLINE setMoveMode #-}
-setMoveMode :: HasPlayer r => MoveMode -> Eff r ()
-setMoveMode = send . SetMoveMode
-
---getPacket :: forall p r. (HasLogging r,HasPlayer r,Packet p) => Eff r (Maybe p)
+setInventorySlot :: (HasNetworking r,Logs r, HasPlayer r) => Short -> Slot -> Eff r ()
+setInventorySlot slotNum slot = do
+  overPlayer $ \p -> p {playerInventory = Map.insert slotNum slot (playerInventory p)}
+  sendPacket (Client.SetSlot 0 (civskellToClientSlot slotNum) slot)
+ 
+--getPacket :: forall p r. (Logs r,HasPlayer r,Packet p) => Eff r (Maybe p)
 --getPacket = send $ GetPacket (parsePacket @p)
-
-sendPacket :: (HasPlayer r,HasLogging r,Serialize p,Packet p,PacketSide p ~ 'Client) => p -> Eff r ()
-sendPacket = send . SendPacket . ClientPacket . ambiguate . Identity
 
 --{-# INLINE flushInbox #-}
 --flushInbox :: HasPlayer r => Eff r ()
@@ -120,11 +130,15 @@ sendPacket = send . SendPacket . ClientPacket . ambiguate . Identity
 -- off hand: 45
 {-# INLINE getInventorySlot #-}
 getInventorySlot :: HasPlayer r => Short -> Eff r Slot
-getInventorySlot = send . GetPlayerSlot
+getInventorySlot slotNum = Map.findWithDefault EmptySlot slotNum . playerInventory <$> getPlayer
+
+{-# INLINE registerPlayer #-}
+registerPlayer :: HasPlayer r => Eff r PlayerId
+registerPlayer = send RegisterPlayer
 
 {-# INLINE logp #-}
-logp :: HasPlayer r => String -> Eff r ()
-logp = send . LogPlayerName
+logp :: (Logs r,HasPlayer r) => String -> Eff r ()
+logp msg = flip logt msg =<< clientUsername <$> getPlayer
 
 clientToCivskellSlot :: Short -> Short
 clientToCivskellSlot s
@@ -146,76 +160,13 @@ civskellToClientSlot s
   | s == 45 = s
   | otherwise = error "Bad Slot Number"
 
---sendPacket :: (HasPlayer r,HasIO r,Serialize p,Packet p,PacketSide p ~ 'Client) => p -> Eff r ()
---sendPacket q = writeTQueue q . ambiguate . ClientPacket . ambiguate . Identity =<< getPacketQueue
-
--- NOTE: always be atomic wrt [get,set,modify]Player
-runPlayer :: (HasIO r, HasWorld r, HasLogging r) => PlayerId -> Eff (Player ': r) a -> Eff r a
+runPlayer :: (PerformsIO r, HasNetworking r, HasWorld r, Logs r) => TVar PlayerData -> Eff (Player ': r) a -> Eff r a
 runPlayer _ (Pure x) = return x
-runPlayer i (Eff u q) = case u of
-  -- Get the player's client brand
-  Inject PlayerBrand -> runPlayer i . runTCQ q . clientBrand =<< getPlayer i
-  -- Set the player's client brand
-  Inject (SetPlayerBrand b) -> modifyPlayer i (\p -> p {clientBrand = b}) >> runPlayer i (runTCQ q ())
-  -- Get the player's name
-  Inject PlayerName -> runPlayer i . runTCQ q . clientUsername =<< getPlayer i
-  -- Set the player's name
-  Inject (SetPlayerName b) -> modifyPlayer i (\p -> p {clientUsername = b}) >> runPlayer i (runTCQ q ())
-  -- Get the player's UUID
-  Inject PlayerUUID -> runPlayer i . runTCQ q . clientUUID =<< getPlayer i
-  -- Set the player's name
-  Inject (SetPlayerUUID b) -> modifyPlayer i (\p -> p {clientUUID = b}) >> runPlayer i (runTCQ q ())
-  -- Get the player's selected slot
-  Inject PlayerGamemode -> runPlayer i . runTCQ q . gameMode =<< getPlayer i
-  -- Set the player's selected slot
-  Inject (SetPlayerGamemode g) -> do
-    modifyPlayer i $ \p -> p {gameMode = g}
-    runPlayer i $ sendPacket (Client.ChangeGameState (ChangeGamemode g))
-    case g of
-      Survival -> runPlayer i $ sendPacket (Client.PlayerAbilities (AbilityFlags False False False False) 0 1)
-      Creative -> runPlayer i $ sendPacket (Client.PlayerAbilities (AbilityFlags True False True True) 0 1)
-    runPlayer i (runTCQ q ())
-  -- Get the player's selected slot
-  Inject PlayerHolding -> runPlayer i . runTCQ q . holdingSlot =<< getPlayer i 
-  -- Set the player's selected slot
-  Inject (SetPlayerHolding s) -> modifyPlayer i (\p -> p {holdingSlot = s}) >> runPlayer i (runTCQ q ())
-  -- Add a new tid to the que
-  Inject (PlayerAddTP xyz yp relFlag) -> do
-    p <- getPlayer i
-    setPlayer i p {nextTid = 1 + nextTid p,teleportConfirmationQue = Set.insert (nextTid p) $ teleportConfirmationQue p}
-    runPlayer i $ sendPacket (Client.PlayerPositionAndLook xyz yp relFlag (nextTid p))
-    runPlayer i (runTCQ q ())
-  -- Check if the tid is in the que. If it is, then clear and return true, else false
-  Inject (PlayerClearTP tid) -> do
-    p <- getPlayer i
-    setPlayer i p {teleportConfirmationQue = Set.delete tid $ teleportConfirmationQue p}
-    runPlayer i (runTCQ q $ Set.member tid $ teleportConfirmationQue p)
-  Inject GetPlayerPosition -> runPlayer i . runTCQ q . playerPosition =<< getPlayer i
-  Inject (SetPlayerPosition xyz) -> modifyPlayer i (\p -> p {playerPosition = xyz}) >> runPlayer i (runTCQ q ())
-  Inject GetPlayerViewAngle -> runPlayer i . runTCQ q . viewAngle =<< getPlayer i
-  Inject (SetPlayerViewAngle yp) -> modifyPlayer i (\p -> p {viewAngle = yp}) >> runPlayer i (runTCQ q ())
-  Inject (GetPlayerSlot slotNum) -> runPlayer i . runTCQ q . Map.findWithDefault EmptySlot slotNum . playerInventory =<< getPlayer i
-  Inject (SetPlayerSlot slotNum slot) -> do
-    modifyPlayer i $ \p -> p {playerInventory = Map.insert slotNum slot (playerInventory p)}
-    runPlayer i $ sendPacket (Client.SetSlot 0 (civskellToClientSlot slotNum) slot)
-    runPlayer i (runTCQ q ())
-  Inject (StartBreaking block) -> do
-    modifyPlayer i $ \p -> p {diggingBlocks = Map.insert block (InProgress 0) (diggingBlocks p)} 
-    runPlayer i (runTCQ q ())
-  Inject (StopBreaking block) -> modifyPlayer i (\p -> p {diggingBlocks = Map.delete block (diggingBlocks p)}) >> runPlayer i (runTCQ q ())
-  Inject GetMoveMode -> runPlayer i . runTCQ q . moveMode =<< getPlayer i
-  Inject (SetMoveMode mode) -> modifyPlayer i (\p -> p {moveMode = mode}) >> runPlayer i (runTCQ q ())
-  --Inject FlushInbox -> do
-    --pkts <- send . atomically . getAllTQ . packetQueue =<< getPlayer i
-    --forM_ pkts (\(SuchThat p) -> sendClientPacket p)
-    --runPlayer i (runTCQ q ())
-  Inject (LogPlayerName msg) -> (>> runPlayer i (runTCQ q ())) . flip logt msg . clientUsername =<< getPlayer i
-  Inject (SendPacket p) -> do
-    send . atomically . flip writeTQueue (ambiguate p) . packetQueue =<< getPlayer i
-    runPlayer i (runTCQ q ())
-  Inject GetInbox -> runPlayer i . runTCQ q =<< send . atomically . getAllTQ . packetQueue =<< getPlayer i
+runPlayer t (Eff u q) = case u of
+  Inject (UsingPlayerData f) -> runPlayer t . runTCQ q =<< send (atomically $ f t)
+  Inject RegisterPlayer -> runPlayer t . runTCQ q =<< newPlayer t
   -- Not our turn
-  Weaken otherEffects -> Eff otherEffects (Singleton (\x -> runPlayer i (runTCQ q x)))
+  Weaken otherEffects -> Eff otherEffects (Singleton (\x -> runPlayer t (runTCQ q x)))
 
 getAllTQ :: TQueue a -> STM [a]
 getAllTQ q = tryReadTQueue q >>= \case

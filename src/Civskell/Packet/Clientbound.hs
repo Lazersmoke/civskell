@@ -19,7 +19,7 @@ import Data.Word
 import Numeric (showHex)
 import qualified Data.ByteString as BS
 
-import Civskell.Data.Types hiding (Player)
+import Civskell.Data.Types
 
   -- Login
   -- Reason
@@ -66,7 +66,7 @@ instance Packet SetCompression where
   type PacketState SetCompression = 'LoggingIn
   packetName = "SetCompression"
   packetId = 0x03
-  packetPretty (SetCompression thresh) = [("Compresion Threshold",show thresh)]
+  packetPretty (SetCompression thresh) = [("Compression Threshold",show thresh)]
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize SetCompression where
   serialize (SetCompression thresh) = serialize thresh

@@ -21,7 +21,6 @@ module Civskell.Data.Types
   -- Constants
   (airChunk
   ,allCoords
-  ,defaultPlayerInfo
   ,protocolVersion
   -- Helper functions
   ,blockInChunk
@@ -34,7 +33,7 @@ module Civskell.Data.Types
   ,withListLength
   -- Type synonyms
   ,EncryptionCouplet
-  ,HasIO
+  ,PerformsIO
   ,Short
   ,UUID(..)
   -- Blocks
@@ -69,7 +68,7 @@ module Civskell.Data.Types
   ,TPConfirmId
   ,TransactionId
   -- Aux Data Types
-  ,PlayerInfo(..)
+  ,PlayerData(..)
   ,Slot(..)
   ,slotAmount
   ,removeCount
@@ -90,7 +89,7 @@ module Civskell.Data.Types
   ,WorldData(..)
   ,World(..)
   -- Logging
-  ,HasLogging
+  ,Logs
   ,Logging(..)
   ,LogLevel(..)
   -- Network
@@ -113,7 +112,7 @@ module Civskell.Data.Types
   ) where
 
 import Control.Eff
-import Control.Concurrent.STM.TQueue
+import Control.Concurrent.STM
 import Crypto.Cipher.AES (AES128)
 import Data.SuchThat
 import qualified Data.Text as Text
@@ -147,11 +146,11 @@ protocolVersion = 316
 
 -- Type Synonyms
 type Short = Int16
--- Cipher, Enc, Dec
+-- Cipher, [Enc|Dec]
 type EncryptionCouplet = (AES128, BS.ByteString, BS.ByteString)
--- `HasIO` effect
-type HasIO r = Member IO r
--- You make an effect that `HasIO` by `send`ing an IO action (`send (putStrLn "meow")`)
+-- `PerformsIO` effect
+type PerformsIO r = Member IO r
+-- You make an effect that `PerformsIO` by `send`ing an IO action (`send (putStrLn "meow")`)
 newtype UUID = UUID (Word64,Word64)
 
 instance Show UUID where
@@ -473,15 +472,15 @@ formatPacket :: String -> [(String,String)] -> String
 formatPacket n [] = "{" ++ n ++ "}"
 formatPacket n xs = flip (++) "]" . (++) ("{" ++ n ++ "} [") . intercalate " | " . map (\(name,val) -> if val == "" then name else name ++ ": " ++ val) $ xs
 
-data PlayerInfo = PlayerInfo
+--data PlayerInfo = PlayerInfo
+  --{playerData :: TVar PlayerData
+  --}
+
+data PlayerData = PlayerData
   {teleportConfirmationQue :: Set.Set VarInt
   ,nextTid :: VarInt
   ,keepAliveQue :: Set.Set VarInt
   ,nextKid :: VarInt
-  ,clientBrand :: String
-  ,clientUsername :: String
-  ,clientUUID :: UUID
-  --,clientUUID :: String
   ,holdingSlot :: Short
   ,playerPosition :: (Double,Double,Double)
   ,viewAngle :: (Float,Float)
@@ -489,81 +488,31 @@ data PlayerInfo = PlayerInfo
   ,playerInventory :: Map Short Slot
   ,diggingBlocks :: Map BlockCoord BlockBreak
   ,moveMode :: MoveMode
+  ,playerState :: ServerState
+  ,clientUsername :: String
+  ,clientBrand :: String
+  ,clientUUID :: UUID
+  ,playerId :: PlayerId
   ,packetQueue :: TQueue (ForAny ClientPacket)
   }
 
+
 -- Client needs to recieve packet ASAP after we send them
-
-defaultPlayerInfo :: PlayerInfo
-defaultPlayerInfo = PlayerInfo
-  {teleportConfirmationQue = Set.empty
-  ,nextTid = 0
-  ,keepAliveQue = Set.empty
-  ,nextKid = 0
-  ,clientBrand = ""
-  ,clientUsername = ""
-  ,clientUUID = UUID (0,0)
-  ,holdingSlot = 0
-  ,playerPosition = (0,0,0)
-  ,viewAngle = (0,0)
-  ,gameMode = Survival
-  ,playerInventory = Map.empty
-  ,diggingBlocks = Map.empty
-  ,moveMode = Walking
-  ,packetQueue = undefined
-  }
-
 type HasPlayer r = Member Player r
 
 data Player a where
-  -- Simple maybe state for brand
-  PlayerBrand :: Player String
-  SetPlayerBrand :: String -> Player ()
-  -- Simple maybe state for username
-  PlayerName :: Player String
-  SetPlayerName :: String -> Player ()
-  -- Simple maybe state for UUID
-  PlayerUUID :: Player UUID
-  SetPlayerUUID :: UUID -> Player ()
-  -- Simple state for selected slot
-  PlayerHolding :: Player Short
-  SetPlayerHolding :: Short -> Player ()
-  -- Simple state for Gamemode
-  PlayerGamemode :: Player Gamemode
-  SetPlayerGamemode :: Gamemode -> Player ()
-  -- Teleport confirm que
-  PlayerAddTP :: (Double,Double,Double) -> (Float,Float) -> Word8 -> Player ()
-  PlayerClearTP :: VarInt -> Player Bool
-  -- Position and Look
-  GetPlayerPosition :: Player (Double,Double,Double)
-  SetPlayerPosition :: (Double,Double,Double) -> Player ()
-  GetPlayerViewAngle :: Player (Float,Float)
-  SetPlayerViewAngle :: (Float,Float) -> Player ()
-  -- Player Inventory
-  GetPlayerSlot :: Short -> Player Slot
-  SetPlayerSlot :: Short -> Slot -> Player ()
-  -- Breaking Blocks
-  StartBreaking :: BlockCoord -> Player ()
-  StopBreaking :: BlockCoord -> Player ()
-  -- Sprinting and Sneaking
-  SetMoveMode :: MoveMode -> Player ()
-  GetMoveMode :: Player MoveMode
-  -- Networking
-  --GetPacket :: Packet p => Parser p -> Player (Maybe p)
-  SendPacket :: ClientPacket s -> Player ()
-  -- Get the outbound packets
-  GetInbox :: Player [ForAny ClientPacket]
-  -- Log with player name as tag
-  LogPlayerName :: String -> Player ()
+  UsingPlayerData :: (TVar PlayerData -> STM a) -> Player a
+  RegisterPlayer :: Player PlayerId
 
-type HasLogging r = Member Logging r
+type Logs r = Member Logging r
 
 data Logging a where
   LogString :: LogLevel -> String -> Logging ()
 
 data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | VerboseLog | TaggedLog String | NormalLog deriving Eq
 
-data WorldData = WorldData {chunks :: Map ChunkCoord ChunkSection, entities :: Map EntityId (Some Entity), players :: Map PlayerId PlayerInfo, nextEID :: EntityId, nextUUID :: UUID}
+-- TODO: Map PlayerId (TVar PlayerInfo)?
+data WorldData = WorldData {chunks :: Map ChunkCoord ChunkSection, entities :: Map EntityId (Some Entity), players :: Map PlayerId (TVar PlayerData), nextEID :: EntityId, nextUUID :: UUID}
 
 type HasWorld r = Member World r
 
@@ -574,14 +523,14 @@ data World a where
   SetColumn :: [ChunkSection] -> (Int,Int) -> Maybe BS.ByteString -> World ()
   FreshEID :: World EntityId
   FreshUUID :: World UUID
-  NewPlayer :: World PlayerId
-  SetPlayer :: PlayerId -> PlayerInfo -> World ()
-  GetPlayer :: PlayerId -> World PlayerInfo
+  SetPlayer :: PlayerId -> PlayerData -> World ()
+  GetPlayer :: PlayerId -> World PlayerData
+  NewPlayer :: TVar PlayerData -> World PlayerId
   GetEntity :: EntityId -> World (Some Entity)
   DeleteEntity :: EntityId -> World ()
   SummonMob :: (Some Mob) -> World ()
   SummonObject :: (Some Object) -> World ()
-  AllPlayers :: World [PlayerInfo]
+  AllPlayers :: World [PlayerData]
   --ForallPlayers :: (PlayerInfo -> PlayerInfo) -> World ()
   BroadcastPacket :: ForAny ClientPacket -> World ()
 
@@ -642,7 +591,8 @@ class Packet p where
   packetPretty :: p -> [(String,String)]
   packetName :: String
   packetId :: VarInt
-  onPacket :: (HasIO r,HasLogging r,HasPlayer r,HasWorld r,HasNetworking r) => p -> Eff r ()
+  -- Spawn a PLT on receipt of each packet
+  onPacket :: (HasNetworking r,PerformsIO r,Logs r,HasPlayer r,HasWorld r) => p -> Eff r ()
   onPacket p = send (LogString ErrorLog $ "Unsupported packet: " ++ showPacket p)
   parsePacket :: Parser p
 
@@ -740,8 +690,13 @@ type HasNetworking r = Member Networking r
 data Networking a where
   SetCompressionLevel :: Maybe VarInt -> Networking ()
   AddCompression :: BS.ByteString -> Networking BS.ByteString
-  RemoveCompression :: BS.ByteString -> Networking BS.ByteString
   SetupEncryption :: EncryptionCouplet -> Networking ()
-  GetFromNetwork :: Int -> Networking BS.ByteString
   PutIntoNetwork :: BS.ByteString -> Networking ()
+  --SetupDecryption :: DecryptionCouplet -> Networking ()
+  GetFromNetwork :: Int -> Networking BS.ByteString
+  RemoveCompression :: BS.ByteString -> Networking BS.ByteString
   IsPacketReady :: Networking Bool
+-- PLTs can send packets, but not recieve them
+-- When PLTs perform networking actions, they need to be performed in order w.r.t. eachother, but not the PLT
+--
+-- PLT dispatcher thread (HasNetworking) can recieve packets, but not send them

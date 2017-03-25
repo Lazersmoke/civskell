@@ -7,7 +7,7 @@
 {-# LANGUAGE TypeApplications #-}
 module Civskell.Tech.Network
   (module Civskell.Data.Networking
-  ,sendClientPacket,getGenericPacket,authGetReq --,getPacketFromParser --,sendPacket,getPacket
+  ,sendPacket,sendClientPacket,getGenericPacket,authGetReq --,getPacketFromParser --,sendPacket,getPacket
   ) where
 
 import Control.Eff (Eff,send)
@@ -35,22 +35,24 @@ import Civskell.Data.Types
 --import qualified Civskell.Packet.Serverbound as Server
 
 -- Send something serializeable over the network
---sendPacket :: (HasLogging r,HasNetworking r,Serialize p,Packet p,PacketSide p ~ 'Client) => p -> Eff r ()
---sendPacket = sendClientPacket . ClientPacket . ambiguate . Identity
+sendPacket :: (Logs r,HasNetworking r,Serialize p,Packet p,PacketSide p ~ 'Client) => p -> Eff r ()
+sendPacket = sendClientPacket . ClientPacket . ambiguate . Identity
 
-sendClientPacket :: (HasLogging r,HasNetworking r) => ClientPacket s -> Eff r ()
+sendClientPacket :: (Logs r,HasNetworking r) => ClientPacket s -> Eff r ()
 sendClientPacket (ClientPacket (SuchThat (Identity (s :: a)))) = do
   -- Log its hex dump
   logLevel ClientboundPacket $ showPacket s
-  logLevel HexDump $ indentedHex (serialize s)
+  --logLevel HexDump $ indentedHex (serialize s)
   -- Send it
-  rPut =<< addCompression (BS.append (serialize $ packetId @a) $ serialize s)
+  x <- addCompression (BS.append (serialize $ packetId @a) $ serialize s)
+  logLevel HexDump $ indentedHex x
+  rPut x
 
---getPacket :: forall p r. (HasLogging r,HasNetworking r,Packet p) => Eff r (Maybe p)
+--getPacket :: forall p r. (Logs r,HasNetworking r,Packet p) => Eff r (Maybe p)
 --getPacket = getPacketFromParser (parsePacket @p)
 {-
 -- Get a packet from the network (high level) using a parser context to decide which parser set to use
-getPacketFromParser :: (HasLogging r,HasNetworking r,Packet p) => Parser p -> Eff r (Maybe p)
+getPacketFromParser :: (Logs r,HasNetworking r,Packet p) => Parser p -> Eff r (Maybe p)
 getPacketFromParser p = do
   -- Get the raw data (sans length)
   pkt <- removeCompression =<< getRawPacket
@@ -71,12 +73,13 @@ getPacketFromParser p = do
       logLevel ErrorLog $ indentedHex $ pkt
       return Nothing
 -}
-getGenericPacket :: (HasLogging r,HasNetworking r) => Parser (ForAny ServerPacket) -> Eff r (Maybe (ForAny ServerPacket))
-getGenericPacket p = do
+getGenericPacket :: (Logs r,HasNetworking r) => Eff r (Parser (ForAny ServerPacket)) -> Eff r (Maybe (ForAny ServerPacket))
+getGenericPacket ep = do
   -- Get the raw data (sans length)
   pkt <- removeCompression =<< getRawPacket
   -- TODO: Take advantage of incremental parsing maybe
   -- Parse it
+  p <- ep
   case parseOnly p pkt of
     -- If it parsed ok, then
     Right serverPkt -> do
@@ -130,7 +133,7 @@ indentedHex :: BS.ByteString -> String
 indentedHex = shittyIndent . prettyHex
 
 -- Get the auth info from the mojang server
-authGetReq :: (HasLogging r,HasIO r) => String -> String -> Eff r (Maybe AuthPacket)
+authGetReq :: (Logs r,PerformsIO r) => String -> String -> Eff r (Either String AuthPacket)
 authGetReq name hash = do
   -- Use SSL
   manager <- send $ newManager tlsManagerSettings
@@ -143,12 +146,12 @@ authGetReq name hash = do
     Left e -> do
       logLevel ErrorLog "Failed to parse Auth JSON"
       logLevel ErrorLog $ show e
-      return Nothing
+      return $ Left $ show (req,resp)
     Right (Error e) -> do
       logLevel ErrorLog "Parsed bad JSON"
       logLevel ErrorLog $ show e
-      return Nothing
-    Right (Success a) -> return (Just a)
+      return $ Left $ show (req,resp)
+    Right (Success a) -> return (Right a)
 
 -- TODO: Use Aeson here
 -- Parse an auth string, just getting the uuid and username

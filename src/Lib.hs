@@ -10,7 +10,6 @@ module Lib where
 import Control.Concurrent (forkIO,threadDelay)
 import Data.Functor.Identity
 import Control.Concurrent.MVar
-import Control.Concurrent.Chan
 import Control.Concurrent.STM
 import Control.Eff (Eff,runM,send)
 import Control.Monad (when)
@@ -33,25 +32,28 @@ startListening :: IO ()
 startListening = do
   -- Make an MVar for the global state. Use test version for the flat stone plains
   wor <- newMVar testInitWorld
-  -- Make a Chan for logging
-  logger <- newChan :: IO (Chan String)
+  -- Make a TQueue for logging
+  logger <- newTQueueIO :: IO (TQueue String)
   -- Fork a new thread to wait for incoming connections, and pass the world reference to it
   _ <- forkIO (connLoop wor logger =<< Net.listenOn (Net.PortNumber 25565))
   -- Fork a thread to periodically send keep alives to everyone
   _ <- forkIO (runM $ runLogger logger $ runWorld wor $ keepAliveThread 0)
   -- Fork a thread to continuously log every log message
-  _ <- forkIO (getChanContents logger >>= mapM_ putStrLn)
+  _ <- forkIO (loggingThread logger)
   -- Listen for the console to say to quit
   terminal
 
-keepAliveThread :: (HasLogging r, HasWorld r,HasIO r) => KeepAliveId -> Eff r ()
+keepAliveThread :: (Logs r, HasWorld r,PerformsIO r) => KeepAliveId -> Eff r ()
 keepAliveThread i = do
   send (threadDelay 2000000)
   broadcastPacket (Client.KeepAlive i)
   logLevel VerboseLog "Broadcasting Keepalives"
   keepAliveThread (i + 1)
 
---tickThread :: (HasWorld r,HasLogging r, HasIO r) => Eff r ()
+loggingThread :: TQueue String -> IO ()
+loggingThread l = atomically (readTQueue l) >>= putStrLn >> loggingThread l
+
+--tickThread :: (HasWorld r,Logs r, PerformsIO r) => Eff r ()
 --tickThread = arbitraryWorld $ \w -> do
   --forallPlayers tickPlayer
   --send (threadDelay 50000)
@@ -71,7 +73,7 @@ terminal = do
   if l == "quit" then exitSuccess else terminal
 
 -- Spawns a new thread to deal with each new client
-connLoop :: MVar WorldData -> Chan String -> Net.Socket -> IO ()
+connLoop :: MVar WorldData -> TQueue String -> Net.Socket -> IO ()
 connLoop wor logger sock = do
   -- Accept is what waits for a new connection
   (handle, cliHost, cliPort) <- Net.accept sock
@@ -79,9 +81,9 @@ connLoop wor logger sock = do
   putStrLn $ "Got Client connection: " ++ show cliHost ++ ":" ++ show cliPort
   -- Don't line buffer the network
   hSetBuffering handle NoBuffering
-  -- Make new networking MVars for this client
-  mEnc <- newEmptyMVar :: IO (MVar EncryptionCouplet)
-  mThresh <- newEmptyMVar :: IO (MVar VarInt)
+  -- Make new networking TVars for this client
+  mEnc <- newTVarIO Nothing
+  mThresh <- newTVarIO Nothing
   -- Packet TQueue
   pq <- newTQueueIO
   -- Getting thread
@@ -92,29 +94,39 @@ connLoop wor logger sock = do
   connLoop wor logger sock
 
 -- Wait for a Handshake, and hand it off when we get it
---connHandler :: (HasLogging r,HasIO r,HasWorld r) => Eff r ()
+--connHandler :: (Logs r,PerformsIO r,HasWorld r) => Eff r ()
 --connHandler = getPacket @Server.Handshake >>= maybe (loge "WTF no packet? REEEEEEEEEEEEE") handleHandshake
 
 -- If its not a handshake packet, Log to console that we have a bad packet
 -- Drop the connection by returning, since the client can't receive normal disconnect packets yet
 --handleHandshake (ServerPacket (p::a)) = loge $ "Unexpected non-handshake packet with Id: " ++ show (packetId @a)
 
--- TODO: remove HasIO constraint in favor of special STM effects or something
-flushPackets :: (HasLogging r,HasNetworking r,HasIO r) => TQueue (ForAny ClientPacket) -> Eff r ()
+-- TODO: remove PerformsIO constraint in favor of special STM effects or something
+flushPackets :: (Logs r,HasNetworking r,PerformsIO r) => TQueue (ForAny ClientPacket) -> Eff r ()
 flushPackets q = send (atomically $ readTQueue q) >>= ambiguously sendClientPacket >> flushPackets q
 
-packetLoop :: (HasIO r,HasPlayer r,HasLogging r,HasNetworking r,HasWorld r) => Eff r ()
+packetLoop :: (PerformsIO r,HasPlayer r,Logs r,HasNetworking r,HasWorld r) => Eff r ()
 packetLoop = do
   -- TODO: Fork new thread on every packet
   -- If there is a packet ready, get the packet and act on it
   r <- isPacketReady
-  when r $ getGenericPacket (Server.parseStatusPacket <|> Server.parseLoginPacket <|> Server.parseHandshakePacket <|> Server.parsePlayPacket) >>= maybe (loge "Failed to parse incoming packet") (ambiguously (onPacket . runIdentity))
+  when r $ do
+    pkt <- getGenericPacket getParser 
+    case pkt of
+      Nothing -> loge "Failed to parse incoming packet"
+      Just q -> ambiguously (\(ServerPacket p) -> ambiguously (onPacket . runIdentity) p) q
   -- Either way, flush the inbox and recurse after we are done
   --flushInbox
   -- Flushing is now done in a seperate thread
   packetLoop
+  where
+    getParser = flip fmap (playerState <$> getPlayer) $ \case
+      Handshaking -> ambiguate <$> Server.parseHandshakePacket
+      LoggingIn -> ambiguate <$> Server.parseLoginPacket
+      Status -> ambiguate <$> Server.parseStatusPacket
+      Playing -> ambiguate <$> Server.parsePlayPacket
 
-{-gotPacket :: (HasNetworking r,HasPlayer r,HasLogging r,HasWorld r) => ServerPacket 'Playing -> Eff r ()
+{-gotPacket :: (HasNetworking r,HasPlayer r,Logs r,HasWorld r) => ServerPacket 'Playing -> Eff r ()
 -- If the packet isn't matched above, log an error. We were able to parse it, just haven't implemented anything to handle it
 gotPacket a = loge $ "Unsupported packet: " ++ show a
 -}

@@ -1,4 +1,5 @@
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -67,16 +68,16 @@ removeBlock :: Member World r => BlockCoord -> Eff r ()
 removeBlock = setBlock (BlockState 0 0)
 
 {-# INLINE setPlayer #-}
-setPlayer :: Member World r => PlayerId -> PlayerInfo -> Eff r ()
+setPlayer :: Member World r => PlayerId -> PlayerData -> Eff r ()
 setPlayer i p = send $ SetPlayer i p
 
-{-# INLINE getPlayer #-}
-getPlayer :: Member World r => PlayerId -> Eff r PlayerInfo
-getPlayer = send . GetPlayer
+{-# INLINE lookupPlayer #-}
+lookupPlayer :: Member World r => PlayerId -> Eff r PlayerData
+lookupPlayer = send . GetPlayer
 
 {-# INLINE modifyPlayer #-}
-modifyPlayer :: Member World r => PlayerId -> (PlayerInfo -> PlayerInfo) -> Eff r ()
-modifyPlayer i f = setPlayer i =<< f <$> getPlayer i
+modifyPlayer :: Member World r => PlayerId -> (PlayerData -> PlayerData) -> Eff r ()
+modifyPlayer i f = setPlayer i =<< f <$> lookupPlayer i
 
 {-# INLINE freshEID #-}
 freshEID :: Member World r => Eff r EntityId
@@ -87,11 +88,11 @@ freshUUID :: Member World r => Eff r UUID
 freshUUID = send FreshUUID
 
 {-# INLINE newPlayer #-}
-newPlayer :: Member World r => Eff r PlayerId
-newPlayer = send NewPlayer
+newPlayer :: Member World r => TVar PlayerData -> Eff r PlayerId
+newPlayer = send . NewPlayer
 
 {-# INLINE allPlayers #-}
-allPlayers :: Member World r => Eff r [PlayerInfo]
+allPlayers :: Member World r => Eff r [PlayerData]
 allPlayers = send AllPlayers
 
 --{-# INLINE forallPlayers #-}
@@ -124,7 +125,7 @@ summonObject = send . SummonObject . ambiguate . Identity
 
 --data SpawnMob = SpawnMob EntityId String SomeMob (Double,Double,Double) Word8 Word8 Word8 Short Short Short -- Metadata NYI
 
-runWorld :: (HasLogging r, HasIO r) => MVar WorldData -> Eff (World ': r) a -> Eff r a
+runWorld :: (Logs r, PerformsIO r) => MVar WorldData -> Eff (World ': r) a -> Eff r a
 runWorld _ (Pure x) = Pure x
 runWorld w' (Eff u q) = case u of
   Inject (GetChunk chunk) -> runWorld w' . runTCQ q . Map.findWithDefault (ChunkSection Map.empty) chunk . chunks =<< send (readMVar w')
@@ -146,13 +147,16 @@ runWorld w' (Eff u q) = case u of
   Inject FreshUUID -> (>>= runWorld w' . runTCQ q) . send . modifyMVar w' $ \w -> return (w {nextUUID = incUUID $ nextUUID w},nextUUID w)
     where
       incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
-  -- Create a new player with the default info, and return the new player's id. Also increment it for next time
-  Inject NewPlayer -> (runWorld w' . runTCQ q =<<) . send . modifyMVar w' $ \w -> return (w {players = Map.insert (nextEID w) defaultPlayerInfo (players w),nextEID = succ (nextEID w)},nextEID w)
   -- Warning: throws error if player not found
-  Inject (GetPlayer i) -> send (readMVar w') >>= runWorld w' . runTCQ q . flip (Map.!) i . players
+  Inject (GetPlayer i) -> runWorld w' . runTCQ q =<< send . readTVarIO . flip (Map.!) i . players =<< send (readMVar w')
+  -- Warning: throws error if player not found
   Inject (SetPlayer i p) -> do
-    send $ modifyMVar_ w' $ \w -> return w {players = Map.insert i p (players w)}
+    send . atomically . flip writeTVar p . flip (Map.!) i . players =<< send (readMVar w')
     runWorld w' (runTCQ q ())
+  Inject (NewPlayer t) -> do
+    pid <- runWorld w' freshEID
+    send $ modifyMVar_ w' $ \w -> return w {players = Map.insert pid t $ players w}
+    runWorld w' (runTCQ q pid)
   Inject (GetEntity e) -> send (readMVar w') >>= runWorld w' . runTCQ q . flip (Map.!) e . entities
   Inject (DeleteEntity e) -> send (modifyMVar_ w' $ \w -> return w {entities = Map.delete e . entities $ w}) >> runWorld w' (runTCQ q ())
   -- Pattern match on SuchThat to reinfer the constrain `Mob` into the contraint `Entity` for storage in the entities map
@@ -171,11 +175,11 @@ runWorld w' (Eff u q) = case u of
     runWorld w' (runTCQ q ())
     where
       incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
-  Inject AllPlayers -> send (readMVar w') >>= runWorld w' . runTCQ q . Map.elems . players
+  Inject AllPlayers -> runWorld w' . runTCQ q =<< send . atomically . traverse readTVar . Map.elems . players =<< send (readMVar w')
   --Inject (ForallPlayers f) -> do
     --send $ modifyMVar_ w' $ \w -> return w {players = fmap f (players w)}
     --runWorld w' (runTCQ q ())
   Inject (BroadcastPacket pkt) -> do
-    send . atomically . mapM_ (flip writeTQueue pkt . packetQueue) . players =<< send (readMVar w')
+    send . atomically . mapM_ (\p -> readTVar p >>= \pd -> case playerState pd of {Playing -> flip writeTQueue pkt . packetQueue $ pd; _ -> pure ()}) . players =<< send (readMVar w')
     runWorld w' (runTCQ q ())
   Weaken u' -> Eff u' (Singleton (runWorld w' . runTCQ q))

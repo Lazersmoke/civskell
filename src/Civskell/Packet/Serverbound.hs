@@ -20,51 +20,50 @@ import Data.SuchThat
 
 import Civskell.Data.Types hiding (Player)
 import Civskell.Tech.Parse
-import Civskell.Tech.Network (authGetReq)
+import Civskell.Tech.Network
 import Civskell.Tech.Encrypt
 import Civskell.Entity.Mob
 import Civskell.Data.Player
 import Civskell.Data.Logging
 import Civskell.Data.World
-import Civskell.Data.Networking
 import qualified Civskell.Packet.Clientbound as Client
 
   -- Protocol Version, Server Address, Server Port, Next State
 
 parseHandshakePacket :: Parser (ServerPacket 'Handshaking) --(Packet p, PacketSide p ~ 'Server, PacketState p ~ 'Handshaking) => Parser p
-parseHandshakePacket = choice [ambiguate . Identity <$> parsePacket @Handshake, ambiguate . Identity <$> parsePacket @LegacyHandshake] <?> "Handshake Packet"
+parseHandshakePacket = choice [ServerPacket . ambiguate . Identity <$> parsePacket @Handshake, ServerPacket . ambiguate . Identity <$> parsePacket @LegacyHandshake] <?> "Handshake Packet"
 
 parseLoginPacket :: Parser (ServerPacket 'LoggingIn)
-parseLoginPacket = choice [ambiguate . Identity <$> parsePacket @LoginStart, ambiguate . Identity <$> parsePacket @EncryptionResponse] <?> "Login Packet"
+parseLoginPacket = choice [ServerPacket . ambiguate . Identity <$> parsePacket @LoginStart, ServerPacket . ambiguate . Identity <$> parsePacket @EncryptionResponse] <?> "Login Packet"
 
 parseStatusPacket :: Parser (ServerPacket 'Status)
-parseStatusPacket = choice [ambiguate . Identity <$> parsePacket @StatusRequest, ambiguate . Identity <$> parsePacket @StatusPing] <?> "Status Packet"
+parseStatusPacket = choice [ServerPacket . ambiguate . Identity <$> parsePacket @StatusRequest, ServerPacket . ambiguate . Identity <$> parsePacket @StatusPing] <?> "Status Packet"
 
 -- TODO: SuchThat '[SP 'Playing] Parser
 parsePlayPacket :: Parser (ServerPacket 'Playing)
 parsePlayPacket = choice
-  [ambiguate . Identity <$> parsePacket @TPConfirm
-  ,ambiguate . Identity <$> parsePacket @ChatMessage
-  ,ambiguate . Identity <$> parsePacket @ClientStatus
-  ,ambiguate . Identity <$> parsePacket @ClientSettings
-  ,ambiguate . Identity <$> parsePacket @ConfirmTransaction
-  ,ambiguate . Identity <$> parsePacket @ClickWindow
-  ,ambiguate . Identity <$> parsePacket @CloseWindow
-  ,ambiguate . Identity <$> parsePacket @PluginMessage
-  ,ambiguate . Identity <$> parsePacket @UseEntity
-  ,ambiguate . Identity <$> parsePacket @KeepAlive
-  ,ambiguate . Identity <$> parsePacket @PlayerPosition
-  ,ambiguate . Identity <$> parsePacket @PlayerPositionAndLook
-  ,ambiguate . Identity <$> parsePacket @PlayerLook
-  ,ambiguate . Identity <$> parsePacket @Player
-  ,ambiguate . Identity <$> parsePacket @PlayerAbilities
-  ,ambiguate . Identity <$> parsePacket @PlayerDigging
-  ,ambiguate . Identity <$> parsePacket @EntityAction
-  ,ambiguate . Identity <$> parsePacket @HeldItemChange
-  ,ambiguate . Identity <$> parsePacket @CreativeInventoryAction
-  ,ambiguate . Identity <$> parsePacket @Animation
-  ,ambiguate . Identity <$> parsePacket @PlayerBlockPlacement
-  ,ambiguate . Identity <$> parsePacket @UseItem
+  [ServerPacket . ambiguate . Identity <$> parsePacket @TPConfirm
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @ChatMessage
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @ClientStatus
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @ClientSettings
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @ConfirmTransaction
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @ClickWindow
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @CloseWindow
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @PluginMessage
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @UseEntity
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @KeepAlive
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @PlayerPosition
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @PlayerPositionAndLook
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @PlayerLook
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @Player
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @PlayerAbilities
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @PlayerDigging
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @EntityAction
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @HeldItemChange
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @CreativeInventoryAction
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @Animation
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @PlayerBlockPlacement
+  ,ServerPacket . ambiguate . Identity <$> parsePacket @UseItem
   ] <?> "Play Packet"
 
 -- TODO: Re-specify parsers for different server states
@@ -81,10 +80,13 @@ instance Packet Handshake where
     ,("Requesting change to",case newstate of {1 -> "Status"; 2 -> "Login"; _ -> "Invalid"})
     ]
   -- Normal handshake recieved
-  onPacket (Handshake protocol _addr _port _newstate) = if fromIntegral protocol == protocolVersion
+  onPacket (Handshake protocol _addr _port newstate) = if fromIntegral protocol == protocolVersion
     -- They are using the correct protocol version, so continue as they request
     -- TODO: Enum for newstate
-    then return () -- TODO: setPlayerState {2 -> Login; 1 -> Status}
+    then case newstate of
+      1 -> setPlayerState Status
+      2 -> setPlayerState LoggingIn
+      _ -> logp "Invalid newstate"
     -- They are using the incorrect protocol version. Disconnect packet will probably work even if they have a different version.
     else sendPacket (Client.Disconnect (jsonyText $ "Unsupported protocol version. Please use " ++ show protocolVersion))
   parsePacket = do
@@ -176,7 +178,7 @@ instance Packet ChatMessage  where
     "dump entities" -> summonMob (Creeper defaultInsentient 0 False False)
     _ -> do
       broadcastPacket (Client.ChatMessage (jsonyText msg) 0)
-      name <- getUsername
+      name <- clientUsername <$> getPlayer
       logt name msg
 
   parsePacket = do
@@ -523,7 +525,7 @@ instance Packet PlayerDigging where
       removeBlock block
     SwapHands -> do
       -- Get the current items
-      heldSlot <- getHolding
+      heldSlot <- holdingSlot <$> getPlayer
       heldItem <- getInventorySlot heldSlot
       -- 45 is the off hand slot
       offItem <- getInventorySlot 45
@@ -532,12 +534,12 @@ instance Packet PlayerDigging where
       setInventorySlot 45 heldItem
     -- No dropping from offhand
     DropItem isStack -> do
-      heldSlot <- getHolding
+      heldSlot <- holdingSlot <$> getPlayer
       heldItem <- getInventorySlot heldSlot
       -- Drop the entire stack, or at most one item
       let (dropped,newHeld) = splitStack (if isStack then 64 else 1) heldItem
       setInventorySlot heldSlot newHeld
-      plaLoc <- getPlayerPos
+      plaLoc <- playerPosition <$> getPlayer
       summonObject (Item (BaseEntity (EntityLocation plaLoc (0,0)) (EntityVelocity (0,0,0)) 0x00 300 "" False False False) dropped)
     _ -> loge $ "Unhandled Player Dig Action: " ++ showPacket p
 
@@ -680,7 +682,7 @@ instance Packet PlayerBlockPlacement where
   packetPretty (PlayerBlockPlacement block _side hand _cursorCoord) = [("Block",show block),("Hand",show hand)]
   onPacket (PlayerBlockPlacement block side hand _cursorCoord) = do
     -- Find out what item they are trying to place
-    heldSlot <- if hand == MainHand then getHolding else pure 45
+    heldSlot <- if hand == MainHand then holdingSlot <$> getPlayer else pure 45
     heldItem <- getInventorySlot heldSlot
     case heldItem of
       -- If they right click on a block with an empty hand, this will happen
@@ -708,7 +710,7 @@ instance Packet UseItem where
   packetId = 0x1D
   packetPretty (UseItem hand) = [("Hand",show hand)]
   onPacket (UseItem hand) = do
-    held <- getInventorySlot =<< (case hand of {MainHand -> getHolding; OffHand -> pure 45})
+    held <- getInventorySlot =<< (case hand of {MainHand -> holdingSlot <$> getPlayer; OffHand -> pure 45})
     logp $ "Used: " ++ show held
   parsePacket = do
     specificVarInt 0x1D <?> "Packet Id 0x1D"
@@ -726,6 +728,7 @@ instance Packet LoginStart where
   onPacket (LoginStart name) = do
     -- Log that they are logging in
     logt name "Logging In"
+    setUsername name
     -- Verify Token is fixed because why not
     -- TODO: make this a random token
     let vt = BS.pack [0xDE,0xAD,0xBE,0xEF]
@@ -734,7 +737,7 @@ instance Packet LoginStart where
     -- Send an encryption request to the client
     sendPacket (Client.EncryptionRequest sId encodedPublicKey vt)
     -- TODO
-    -- setPlayerState (AwaitingEncryptionResponse vt sId)
+    --setPlayerState (AwaitingEncryptionResponse vt sId)
   parsePacket = do
     specificVarInt 0x00
     LoginStart <$> parseVarString
@@ -765,23 +768,29 @@ instance Packet EncryptionResponse where
         let loginHash = genLoginHash "" ss encodedPublicKey
         -- Do the Auth stuff with Mojang
         -- TODO: This uses arbitrary IO, we should make it into an effect
-        name <- getUsername
+        name <- clientUsername <$> getPlayer
         authGetReq name loginHash >>= \case
           -- If the auth is borked, its probably Mojangs fault tbh
-          Nothing -> do
+          Left actualJSON -> do
             loge "Parse error on auth"
             -- Disclaim guilt
             sendPacket (Client.Disconnect $ jsonyText "Auth failed (not Lazersmoke's fault, probably!)")
-          Just (AuthPacket uuid nameFromAuth authProps) -> do
+            loge actualJSON
+          Right (AuthPacket uuid nameFromAuth authProps) -> do
+            _pid <- registerPlayer
             setUsername nameFromAuth
             setUUID uuid
             -- Tell the client to compress starting now. Agressive for testing
             -- EDIT: setting this to 3 gave us a bad frame exception :S
             -- TODO: merge this packet into `setCompression`. setCompression is already a Networking effect, so this is ok
+            -- The compression change gets into the networking effect before the packet sends from the queue :(
+            -- remove HasNetworking from onPacket
             sendPacket (Client.SetCompression 16)
             setCompression $ Just 16
             -- Send a login success. We are now in play mode
             sendPacket (Client.LoginSuccess (show uuid) nameFromAuth)
+            -- This is where the protocol specifies the state transition to be
+            setPlayerState Playing
             -- First 0 is player's EID, second is the dimension (overworld), 100 is max players
             -- TODO: enum for dimension
             sendPacket (Client.JoinGame 0 Survival 0 Peaceful 100 "default" False)
@@ -823,7 +832,7 @@ instance Packet StatusRequest where
     -- Get the list of connected players so we can show info about them in the server menu
     playersOnline <- allPlayers
     let userSample = intercalate "," . map (\p -> "{\"name\":\"" ++ clientUsername p ++ "\",\"id\":\"" ++ show (clientUUID p) ++ "\"}") $ playersOnline
-    let resp = "{\"version\":{\"name\":\"Civskell (1.11.2)\",\"protocol\":" ++ show protocolVersion ++ "},\"players\":{\"max\": 100,\"online\": " ++ show (length playersOnline) ++ ",\"sample\":[" ++ userSample ++ "]},\"description\":{\"text\":\"An Experimental Minecraft server written in Haskell | github.com/Lazersmoke/civskell\"},\"favicon\":\"" ++ image ++ "\"}"
+    let resp = "{\"version\":{\"name\":\"Civskell (1.11.2)\",\"protocol\":" ++ show protocolVersion ++ "},\"players\":{\"max\": 100,\"online\": " ++ show (length playersOnline) ++ ",\"sample\":[" ++ userSample ++ "]},\"description\":{\"text\":\"An Experimental Minecraft server written in Haskell | github.com/Lazersmoke/civskell\"}}" --,\"favicon\":\"" ++ image ++ "\"}"
     -- Send resp to clients
     sendPacket (Client.StatusResponse resp)
     -- TODO
