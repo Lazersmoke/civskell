@@ -57,7 +57,7 @@ setPlayerState u = overPlayer $ \p -> p {playerState = u}
 
 -- Add a new tid to the que
 {-# INLINE pendTeleport #-}
-pendTeleport :: (HasNetworking r,Logs r,HasPlayer r) => (Double,Double,Double) -> (Float,Float) -> Word8 -> Eff r ()
+pendTeleport :: (SendsPackets r,Logs r,HasPlayer r) => (Double,Double,Double) -> (Float,Float) -> Word8 -> Eff r ()
 pendTeleport xyz yp relFlag = do
   p <- usingPlayer $ \t -> do
     p <- readTVar t
@@ -75,7 +75,7 @@ clearTeleport tid = usingPlayer $ \t -> do
 
 -- We need the TQueue here to be the same one that is running in the sending thread
 {-# INLINE initPlayer #-}
-initPlayer :: (HasNetworking r, PerformsIO r, HasWorld r, Logs r) => TQueue (ForAny ClientPacket) -> Eff (Player ': r) a -> Eff r a
+initPlayer :: (SendsPackets r, PerformsIO r, HasWorld r, Logs r) => TQueue (ForAny ClientPacket) -> Eff (Player ': r) a -> Eff r a
 initPlayer pq e = do
   t <- send (newTVarIO playerData)
   runPlayer t e
@@ -102,7 +102,7 @@ initPlayer pq e = do
 
 -- Set the player's gamemode
 {-# INLINE setGamemode #-}
-setGamemode :: (HasNetworking r,Logs r,HasPlayer r) => Gamemode -> Eff r ()
+setGamemode :: (SendsPackets r,Logs r,HasPlayer r) => Gamemode -> Eff r ()
 setGamemode g = do
   overPlayer $ \p -> p {gameMode = g}
   sendPacket (Client.ChangeGameState (ChangeGamemode g))
@@ -111,7 +111,7 @@ setGamemode g = do
     Creative -> sendPacket (Client.PlayerAbilities (AbilityFlags True False True True) 0 1)
 
 {-# INLINE setInventorySlot #-}
-setInventorySlot :: (HasNetworking r,Logs r, HasPlayer r) => Short -> Slot -> Eff r ()
+setInventorySlot :: (SendsPackets r,Logs r, HasPlayer r) => Short -> Slot -> Eff r ()
 setInventorySlot slotNum slot = do
   overPlayer $ \p -> p {playerInventory = Map.insert slotNum slot (playerInventory p)}
   sendPacket (Client.SetSlot 0 (civskellToClientSlot slotNum) slot)
@@ -160,11 +160,15 @@ civskellToClientSlot s
   | s == 45 = s
   | otherwise = error "Bad Slot Number"
 
-runPlayer :: (PerformsIO r, HasNetworking r, HasWorld r, Logs r) => TVar PlayerData -> Eff (Player ': r) a -> Eff r a
+forkPlayer :: (HasPlayer q,PerformsIO r,SendsPackets r,HasWorld r,Logs r) => Eff (Player ': r) a -> Eff q (Eff r a)
+forkPlayer = send . ForkPlayer
+
+runPlayer :: (PerformsIO r, SendsPackets r, HasWorld r, Logs r) => TVar PlayerData -> Eff (Player ': r) a -> Eff r a
 runPlayer _ (Pure x) = return x
 runPlayer t (Eff u q) = case u of
   Inject (UsingPlayerData f) -> runPlayer t . runTCQ q =<< send (atomically $ f t)
   Inject RegisterPlayer -> runPlayer t . runTCQ q =<< newPlayer t
+  Inject (ForkPlayer e) -> runPlayer t (runTCQ q (runPlayer t e))
   -- Not our turn
   Weaken otherEffects -> Eff otherEffects (Singleton (\x -> runPlayer t (runTCQ q x)))
 

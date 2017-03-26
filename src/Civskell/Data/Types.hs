@@ -31,6 +31,7 @@ module Civskell.Data.Types
   ,jsonyText
   ,withLength
   ,withListLength
+  ,indentedHex
   -- Type synonyms
   ,EncryptionCouplet
   ,PerformsIO
@@ -75,6 +76,7 @@ module Civskell.Data.Types
   ,splitStack
   -- Aux Enums
   ,Difficulty(..)
+  ,Dimension(..)
   ,Gamemode(..)
   ,Hand(..)
   ,MoveMode(..)
@@ -93,8 +95,10 @@ module Civskell.Data.Types
   ,Logging(..)
   ,LogLevel(..)
   -- Network
-  ,HasNetworking
+  ,Networks
   ,Networking(..)
+  ,SendsPackets
+  ,Packeting(..)
   -- Packet
   ,Packet(..)
   ,ClientPacket(..)
@@ -113,6 +117,7 @@ module Civskell.Data.Types
 
 import Control.Eff
 import Control.Concurrent.STM
+import Hexdump (prettyHex)
 import Crypto.Cipher.AES (AES128)
 import Data.SuchThat
 import qualified Data.Text as Text
@@ -359,6 +364,13 @@ instance Serialize Difficulty where
   serialize Normal = BS.singleton 0x02
   serialize Hard = BS.singleton 0x03
 
+data Dimension = Nether | Overworld | TheEnd deriving Show
+
+instance Serialize Dimension where
+  serialize Nether = serialize (-1 :: Int32)
+  serialize Overworld = serialize (0 :: Int32)
+  serialize TheEnd = serialize (1 :: Int32)
+
 data Hand = MainHand | OffHand deriving (Show,Eq)
 
 -- Used in Client.Animation; Server.Animation just uses hand
@@ -503,10 +515,12 @@ type HasPlayer r = Member Player r
 data Player a where
   UsingPlayerData :: (TVar PlayerData -> STM a) -> Player a
   RegisterPlayer :: Player PlayerId
+  ForkPlayer :: (PerformsIO r, SendsPackets r, HasWorld r, Logs r) => Eff (Player ': r) a -> Player (Eff r a)
 
 type Logs r = Member Logging r
 
 data Logging a where
+  ForkLogger :: PerformsIO r => Eff (Logging ': r) a -> Logging (Eff r a)
   LogString :: LogLevel -> String -> Logging ()
 
 data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | VerboseLog | TaggedLog String | NormalLog deriving Eq
@@ -517,6 +531,7 @@ data WorldData = WorldData {chunks :: Map ChunkCoord ChunkSection, entities :: M
 type HasWorld r = Member World r
 
 data World a where
+  ForkWorld :: (Logs r,PerformsIO r) => Eff (World ': r) a -> World (Eff r a)
   GetChunk :: ChunkCoord -> World ChunkSection
   SetBlock :: BlockState -> BlockCoord -> World ()
   SetChunk :: ChunkSection -> ChunkCoord -> World ()
@@ -592,7 +607,7 @@ class Packet p where
   packetName :: String
   packetId :: VarInt
   -- Spawn a PLT on receipt of each packet
-  onPacket :: (HasNetworking r,PerformsIO r,Logs r,HasPlayer r,HasWorld r) => p -> Eff r ()
+  onPacket :: (SendsPackets r,PerformsIO r,Logs r,HasPlayer r,HasWorld r) => p -> Eff r ()
   onPacket p = send (LogString ErrorLog $ "Unsupported packet: " ++ showPacket p)
   parsePacket :: Parser p
 
@@ -607,14 +622,7 @@ showPacket pkt = formatPacket (packetName @p) (packetPretty pkt)
 
 newtype ServerPacket s = ServerPacket (SuchThatStar '[Packet,SP s])
 
---data ServerPacket s = forall p. (Packet p,PacketSide p ~ 'Server,PacketState p ~ s) => ServerPacket p
---instance Show (ServerPacket s) where show (SuchThatStar p) = showPacket p
-
---data ForAny (p :: k -> *) = forall s. ForAny (p s)
-
 newtype ClientPacket s = ClientPacket (SuchThatStar '[Packet,CP s,Serialize])
---instance Show (ClientPacket s) where show (ClientPacket p) = showPacket p
---instance Serialize (ClientPacket s) where serialize (ClientPacket p) = serialize p
 
 class Entity m where
   entityName :: String
@@ -685,18 +693,33 @@ instance Serialize (EntityMeta (Maybe BlockState)) where serialize (EntityMeta m
 
 newtype EntityMeta p = EntityMeta p
 
-type HasNetworking r = Member Networking r
+type Networks r = Member Networking r
 
 data Networking a where
-  SetCompressionLevel :: Maybe VarInt -> Networking ()
+  ForkNetwork :: PerformsIO r => Eff (Networking ': r) a -> Networking (Eff r a)
+  SetCompressionLevel :: VarInt -> Networking ()
   AddCompression :: BS.ByteString -> Networking BS.ByteString
-  SetupEncryption :: EncryptionCouplet -> Networking ()
+  SetupEncryption :: BS.ByteString -> Networking ()
   PutIntoNetwork :: BS.ByteString -> Networking ()
   --SetupDecryption :: DecryptionCouplet -> Networking ()
   GetFromNetwork :: Int -> Networking BS.ByteString
   RemoveCompression :: BS.ByteString -> Networking BS.ByteString
   IsPacketReady :: Networking Bool
+
+type SendsPackets r = Member Packeting r
+
+data Packeting a where
+  SendPacket :: ForAny ClientPacket -> Packeting ()
+  UnsafeSendBytes :: BS.ByteString -> Packeting ()
+  BeginEncrypting :: BS.ByteString -> Packeting ()
+  BeginCompression :: VarInt -> Packeting ()
+
+-- Indent the hexdump
+indentedHex :: BS.ByteString -> String
+indentedHex = init . unlines . map ("  "++) . lines . prettyHex
+
+
 -- PLTs can send packets, but not recieve them
 -- When PLTs perform networking actions, they need to be performed in order w.r.t. eachother, but not the PLT
 --
--- PLT dispatcher thread (HasNetworking) can recieve packets, but not send them
+-- PLT dispatcher thread (Networks) can recieve packets, but not send them

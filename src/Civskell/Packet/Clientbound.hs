@@ -21,8 +21,42 @@ import qualified Data.ByteString as BS
 
 import Civskell.Data.Types
 
-  -- Login
-  -- Reason
+data LegacyHandshakePong = LegacyHandshakePong
+instance Packet LegacyHandshakePong where
+  type PacketSide LegacyHandshakePong = 'Client
+  type PacketState LegacyHandshakePong = 'Handshaking
+  packetName = "LegacyHandshakePong"
+  packetId = 0xFF
+  packetPretty _ = []
+  parsePacket = error "Can't parse clientbound packet"
+instance Serialize LegacyHandshakePong where
+  serialize LegacyHandshakePong = BS.pack [0xFF,0x00,0x1b,0x00,0xa7
+    ,0x00,0x31 -- 1
+    ,0x00,0x00 -- Seperator
+    ,0x00,0x33 -- 3
+    ,0x00,0x31 -- 1
+    ,0x00,0x36 -- 6
+    ,0x00,0x00 -- Seperator
+    ,0x00,0x31 -- 1
+    ,0x00,0x2e -- .
+    ,0x00,0x31 -- 1
+    ,0x00,0x31 -- 1
+    ,0x00,0x2e -- .
+    ,0x00,0x32 -- 2
+    ,0x00,0x00 -- Seperator
+    ,0x00,0x43 -- C
+    ,0x00,0x69 -- i
+    ,0x00,0x76 -- v
+    ,0x00,0x73 -- s
+    ,0x00,0x6b -- k
+    ,0x00,0x65 -- e
+    ,0x00,0x6c -- l
+    ,0x00,0x6c -- l
+    ,0x00,0x00 -- Seperator
+    ,0x00,0x00 -- 0
+    ,0x00,0x00 -- Seperator
+    ,0x00,0x00 -- 0
+    ]
 
 data Disconnect = Disconnect String
 instance Packet Disconnect where
@@ -34,8 +68,8 @@ instance Packet Disconnect where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize Disconnect where
   serialize (Disconnect reason) = serialize reason
-  -- Server ID, Pub Key, Verify Token
 
+-- Server ID, Pub Key, Verify Token
 data EncryptionRequest = EncryptionRequest String BS.ByteString BS.ByteString
 instance Packet EncryptionRequest where
   type PacketSide EncryptionRequest = 'Client
@@ -46,8 +80,8 @@ instance Packet EncryptionRequest where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize EncryptionRequest where
   serialize (EncryptionRequest sId p vt) = serialize sId <> withLength p <> withLength vt
-  -- UUID (with hyphens), Username
 
+-- UUID (with hyphens), Username
 data LoginSuccess = LoginSuccess String String
 instance Packet LoginSuccess where
   type PacketSide LoginSuccess = 'Client
@@ -58,8 +92,8 @@ instance Packet LoginSuccess where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize LoginSuccess where
   serialize (LoginSuccess uuid name) = serialize uuid <> serialize name
-  -- Size threshold for compression
 
+-- Size threshold for compression
 data SetCompression = SetCompression VarInt
 instance Packet SetCompression where
   type PacketSide SetCompression = 'Client
@@ -70,9 +104,8 @@ instance Packet SetCompression where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize SetCompression where
   serialize (SetCompression thresh) = serialize thresh
-  -- Status
-  -- JSON String (for now)
 
+-- JSON String (for now)
 data StatusResponse = StatusResponse String
 instance Packet StatusResponse where
   type PacketSide StatusResponse = 'Client
@@ -118,8 +151,8 @@ instance Serialize SpawnObject where
       dat = serialize d <> (case mVel of {Just (EntityVelocity (dx,dy,dz)) -> serialize dx <> serialize dy <> serialize dz; Nothing -> serialize (0 :: Short) <> serialize (0 :: Short) <> serialize (0 :: Short)})
       (d,mVel) = objectData e
       EntityLocation (x,y,z) (yaw,pitch) = objectLocation e
-  -- EID, x, y, z, count
 
+-- EID, x, y, z, count
 data SpawnExpOrb = SpawnExpOrb EntityId (Double,Double,Double) Short
 instance Packet SpawnExpOrb where
   type PacketSide SpawnExpOrb = 'Client
@@ -130,8 +163,8 @@ instance Packet SpawnExpOrb where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize SpawnExpOrb where
   serialize (SpawnExpOrb _ _ _) = error "Unimplemented Serialization"
-  -- EID, Type (always 1 for thunderbolt), x, y, z
 
+-- EID, Type (always 1 for thunderbolt), x, y, z
 data SpawnGlobalEntity = SpawnGlobalEntity EntityId Word8 (Double,Double,Double)
 instance Packet SpawnGlobalEntity where
   type PacketSide SpawnGlobalEntity = 'Client
@@ -142,8 +175,8 @@ instance Packet SpawnGlobalEntity where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize SpawnGlobalEntity where
   serialize (SpawnGlobalEntity _ _ _) = error "Unimplemented Serialization"
-  -- EID, UUID, Type, x, y, z, yaw, pitch, head pitch, velx, vely, velz, Metadata
 
+-- EID, UUID, Type, x, y, z, yaw, pitch, head pitch, velx, vely, velz, Metadata
 data SpawnMob = SpawnMob EntityId UUID (Some Entity) Word8
 instance Packet SpawnMob where
   type PacketSide SpawnMob = 'Client
@@ -160,8 +193,8 @@ instance Serialize SpawnMob where
     where
       EntityVelocity (dx,dy,dz) = entityVelocity e
       EntityLocation (x,y,z) (yaw,pitch) = entityLocation e
-  -- EID, UUID, Title, Location,
 
+-- EID, UUID, Title, Location,
 data SpawnPainting = SpawnPainting EntityId String String {-Position NYI-} Word8
 instance Packet SpawnPainting where
   type PacketSide SpawnPainting = 'Client
@@ -172,8 +205,8 @@ instance Packet SpawnPainting where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize SpawnPainting where
   serialize (SpawnPainting _ _ _ {-NYI-} _) = error "Unimplemented Serialization"
-  -- EID, UUID, x, y, z, yaw, pitch, metadata
 
+-- EID, UUID, x, y, z, yaw, pitch, metadata
 data SpawnPlayer = SpawnPlayer EntityId String (Double,Double,Double) Word8 Word8
 instance Packet SpawnPlayer where
   type PacketSide SpawnPlayer = 'Client
@@ -184,8 +217,8 @@ instance Packet SpawnPlayer where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize SpawnPlayer where
   serialize (SpawnPlayer _ _ _ _ _ {-Metadata NYI-}) = error "Unimplemented Serialization"
-  -- EID, Animation ID (from table)
 
+-- EID, Animation ID (from table)
 data Animation = Animation EntityId Word8
 instance Packet Animation where
   type PacketSide Animation = 'Client
@@ -196,8 +229,8 @@ instance Packet Animation where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize Animation where
   serialize (Animation eid anim) = serialize eid <> serialize anim
-  -- List of all stats
 
+-- List of all stats
 data Statistics = Statistics [(String,VarInt)]
 instance Packet Statistics where
   type PacketSide Statistics = 'Client
@@ -208,8 +241,8 @@ instance Packet Statistics where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize Statistics where
   serialize (Statistics _) = error "Unimplemented Serialization"
-  -- EID, Block coord, stage (0-9)
 
+-- EID, Block coord, stage (0-9)
 data BlockBreakAnimation = BlockBreakAnimation EntityId BlockCoord Word8
 instance Packet BlockBreakAnimation where
   type PacketSide BlockBreakAnimation = 'Client
@@ -231,8 +264,8 @@ instance Packet UpdateBlockEntity where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize UpdateBlockEntity where
   serialize (UpdateBlockEntity _ _ _) = error "Unimplemented Serialization"
-  -- Block coord, Action Id (enum), Action Param, Block Type ; http://wiki.vg/Block_Actions
 
+-- Block coord, Action Id (enum), Action Param, Block Type ; http://wiki.vg/Block_Actions
 data BlockAction = BlockAction BlockCoord (Word8,Word8) VarInt
 instance Packet BlockAction where
   type PacketSide BlockAction = 'Client
@@ -243,8 +276,8 @@ instance Packet BlockAction where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize BlockAction where
   serialize (BlockAction _ _ _) = error "Unimplemented Serialization"
-  -- Block coord, Block ID (from global palette)
 
+-- Block coord, Block ID (from global palette)
 data BlockChange = BlockChange BlockCoord BlockState
 instance Packet BlockChange where
   type PacketSide BlockChange = 'Client
@@ -255,8 +288,8 @@ instance Packet BlockChange where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize BlockChange where
   serialize (BlockChange block bs) = serialize block <> serialize bs
-  -- UUID, Action (from enum)
 
+-- UUID, Action (from enum)
 data BossBar = BossBar String {- BossBarAction NYI -}
 instance Packet BossBar where
   type PacketSide BossBar = 'Client
@@ -267,8 +300,8 @@ instance Packet BossBar where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize BossBar where
   serialize (BossBar _ {- BossBarAction NYI -}) = error "Unimplemented Serialization"
-  -- Difficulty (0-3)
 
+-- Difficulty (0-3)
 data ServerDifficulty = ServerDifficulty Difficulty
 instance Packet ServerDifficulty where
   type PacketSide ServerDifficulty = 'Client
@@ -279,8 +312,8 @@ instance Packet ServerDifficulty where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize ServerDifficulty where
   serialize (ServerDifficulty dif) = serialize dif
-  -- List of matches for tab completion. Prefixed with length when sent
 
+-- List of matches for tab completion. Prefixed with length when sent
 data TabComplete = TabComplete [String]
 instance Packet TabComplete where
   type PacketSide TabComplete = 'Client
@@ -291,8 +324,8 @@ instance Packet TabComplete where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize TabComplete where
   serialize (TabComplete _) = error "Unimplemented Serialization"
-  -- JSON chat string, place to appear in (0:chatbox,1:sys msg. chatbox,2:hotbar)
 
+-- JSON chat string, place to appear in (0:chatbox,1:sys msg. chatbox,2:hotbar)
 data ChatMessage = ChatMessage String Word8
 instance Packet ChatMessage where
   type PacketSide ChatMessage = 'Client
@@ -303,8 +336,8 @@ instance Packet ChatMessage where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize ChatMessage where
   serialize (ChatMessage msg loc) = serialize msg <> serialize loc
-  -- Chunk x, Chunk z, List of (chunk relative coords, Block Id (global palette))
 
+-- Chunk x, Chunk z, List of (chunk relative coords, Block Id (global palette))
 data MultiBlockChange = MultiBlockChange (Int32,Int32) [((Word8,Word8,Word8),VarInt)]
 instance Packet MultiBlockChange where
   type PacketSide MultiBlockChange = 'Client
@@ -315,8 +348,8 @@ instance Packet MultiBlockChange where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize MultiBlockChange where
   serialize (MultiBlockChange _ _) = error "Unimplemented Serialization"
-  -- Window Id, Transaction Id, Accepted
 
+-- Window Id, Transaction Id, Accepted
 data ConfirmTransaction = ConfirmTransaction WindowId TransactionId Bool
 instance Packet ConfirmTransaction where
   type PacketSide ConfirmTransaction = 'Client
@@ -338,8 +371,8 @@ instance Packet CloseWindow where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize CloseWindow where
   serialize (CloseWindow _) = error "Unimplemented Serialization"
-  -- Window Id, Window Type (Enum), JSON chat string of Window Title, Num of Slots, optionally: EID of horse
 
+-- Window Id, Window Type (Enum), JSON chat string of Window Title, Num of Slots, optionally: EID of horse
 data OpenWindow = OpenWindow WindowId String String Word8 (Maybe EntityId)
 instance Packet OpenWindow where
   type PacketSide OpenWindow = 'Client
@@ -350,8 +383,8 @@ instance Packet OpenWindow where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize OpenWindow where
   serialize (OpenWindow _ _ _ _ _) = error "Unimplemented Serialization"
-  -- Window Id, List of <Slot>
 
+-- Window Id, List of <Slot>
 data WindowItems = WindowItems WindowId [Slot]
 instance Packet WindowItems where
   type PacketSide WindowItems = 'Client
@@ -362,8 +395,8 @@ instance Packet WindowItems where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize WindowItems where
   serialize (WindowItems winId slots) = serialize winId <> serialize (genericLength slots :: Int16) <> BS.concat (map serialize slots)
-  -- Window Id, Property (enum), Value (enum)
 
+-- Window Id, Property (enum), Value (enum)
 data WindowProperty = WindowProperty WindowId Short Short
 instance Packet WindowProperty where
   type PacketSide WindowProperty = 'Client
@@ -374,8 +407,8 @@ instance Packet WindowProperty where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize WindowProperty where
   serialize (WindowProperty _ _ _) = error "Unimplemented Serialization"
-  -- Window Id, Slot num, <Slot>
 
+-- Window Id, Slot num, <Slot>
 data SetSlot = SetSlot WindowId Short Slot
 instance Packet SetSlot where
   type PacketSide SetSlot = 'Client
@@ -386,8 +419,8 @@ instance Packet SetSlot where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize SetSlot where
   serialize (SetSlot wid slotNum slot) = serialize wid <> serialize slotNum <> serialize slot
-  -- Item Id (applies to all instances), Cooldown Ticks
 
+-- Item Id (applies to all instances), Cooldown Ticks
 data SetCooldown = SetCooldown VarInt VarInt
 instance Packet SetCooldown where
   type PacketSide SetCooldown = 'Client
@@ -398,8 +431,8 @@ instance Packet SetCooldown where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize SetCooldown where
   serialize (SetCooldown _ _) = error "Unimplemented Serialization"
-  -- Plugin Channel, Data
 
+-- Plugin Channel, Data
 data PluginMessage = PluginMessage String BS.ByteString
 instance Packet PluginMessage where
   type PacketSide PluginMessage = 'Client
@@ -410,8 +443,8 @@ instance Packet PluginMessage where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize PluginMessage where
   serialize (PluginMessage str bs) = serialize str <> bs
-  -- Sound Name (Enum), Sound Category (Enum), weird encoding for: x,y,z, Volume, Pitch
 
+-- Sound Name (Enum), Sound Category (Enum), weird encoding for: x,y,z, Volume, Pitch
 data NamedSoundEffect = NamedSoundEffect String VarInt (Int32,Int32,Int32) Float Float
 instance Packet NamedSoundEffect where
   type PacketSide NamedSoundEffect = 'Client
@@ -422,8 +455,8 @@ instance Packet NamedSoundEffect where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize NamedSoundEffect where
   serialize (NamedSoundEffect _ _ _ _ _) = error "Unimplemented Serialization"
-  -- Reason (JSON chat string)
 
+-- Reason (JSON chat string)
 data DisconnectPlay = DisconnectPlay String
 instance Packet DisconnectPlay where
   type PacketSide DisconnectPlay = 'Client
@@ -434,8 +467,8 @@ instance Packet DisconnectPlay where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize DisconnectPlay where
   serialize (DisconnectPlay _) = error "Unimplemented Serialization"
-  -- EID, Status (Enum)
 
+-- EID, Status (Enum)
 data EntityStatus = EntityStatus EntityId Word8
 instance Packet EntityStatus where
   type PacketSide EntityStatus = 'Client
@@ -446,8 +479,8 @@ instance Packet EntityStatus where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize EntityStatus where
   serialize (EntityStatus _ _) = error "Unimplemented Serialization"
-  -- x,y,z, radius, affected block offsets, velocity of pushed player
 
+-- x,y,z, radius, affected block offsets, velocity of pushed player
 data Explosion = Explosion (Float,Float,Float) Float [BlockCoord] (Float,Float,Float)
 instance Packet Explosion where
   type PacketSide Explosion = 'Client
@@ -458,8 +491,8 @@ instance Packet Explosion where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize Explosion where
   serialize (Explosion _ _ _ _) = error "Unimplemented Serialization"
-  -- Chunk X, Chunk Z
 
+-- Chunk X, Chunk Z
 data UnloadChunk = UnloadChunk (Int32,Int32)
 instance Packet UnloadChunk where
   type PacketSide UnloadChunk = 'Client
@@ -470,8 +503,8 @@ instance Packet UnloadChunk where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize UnloadChunk where
   serialize (UnloadChunk _) = error "Unimplemented Serialization"
-  -- Reason (Enum), Value (from Enum)
 
+-- Reason (Enum), Value (from Enum)
 data ChangeGameState = ChangeGameState GameStateChange
 instance Packet ChangeGameState where
   type PacketSide ChangeGameState = 'Client
@@ -490,8 +523,8 @@ instance Serialize ChangeGameState where
   serialize (ChangeGameState (FadeValue f)) = BS.singleton 0x07 <> serialize f
   serialize (ChangeGameState (FadeTime f)) = BS.singleton 0x08 <> serialize f
   serialize (ChangeGameState ElderGuardian) = BS.singleton 0x09 <> serialize (0 :: Float)
-  -- Random Id <-- Prevents Timeout
 
+-- Random Id <-- Prevents Timeout
 data KeepAlive = KeepAlive KeepAliveId
 instance Packet KeepAlive where
   type PacketSide KeepAlive = 'Client
@@ -502,8 +535,8 @@ instance Packet KeepAlive where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize KeepAlive where
   serialize (KeepAlive kid) = serialize kid
-  -- Chunk X, Chunk Z, Full Chunk?, Bitmask of slices present, [Chunk Section], optional: 256 byte array of biome data, [Block entity NBT tag]
 
+-- Chunk X, Chunk Z, Full Chunk?, Bitmask of slices present, [Chunk Section], optional: 256 byte array of biome data, [Block entity NBT tag]
 data ChunkData = ChunkData (Int32,Int32) Bool VarInt [ChunkSection] (Maybe BS.ByteString) [NBT]
 instance Packet ChunkData where
   type PacketSide ChunkData = 'Client
@@ -514,8 +547,8 @@ instance Packet ChunkData where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize ChunkData where
   serialize (ChunkData (cx,cz) guCont bitMask chunkSecs mBiomes blockEnts) = serialize cx <> serialize cz <> serialize guCont <> serialize bitMask <> withLength (BS.concat $ (map serialize chunkSecs) ++ maybeToList mBiomes) <> withListLength blockEnts
-  -- Effect Id (Enum), block coord, extra data (from Enum), disable relative?
 
+-- Effect Id (Enum), block coord, extra data (from Enum), disable relative?
 data Effect = Effect Int32 BlockCoord Int32 Bool
 instance Packet Effect where
   type PacketSide Effect = 'Client
@@ -526,11 +559,8 @@ instance Packet Effect where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize Effect where
   serialize (Effect _ _ _ _) = error "Unimplemented Serialization"
-  -- Particle
-  -- | Particle
-  -- EID, Gamemode (Enum), Dimension (Enum), Difficulty (Enum), Max Players (deprecated), Level Type, reduce debug info?
 
-data JoinGame = JoinGame EntityId Gamemode Int32 Difficulty Word8 String Bool
+data JoinGame = JoinGame EntityId Gamemode Dimension Difficulty Word8 String Bool
 instance Packet JoinGame where
   type PacketSide JoinGame = 'Client
   type PacketState JoinGame = 'Playing
@@ -541,8 +571,8 @@ instance Packet JoinGame where
 instance Serialize JoinGame where
   -- For whatever reason, we need the eid as an Int32 here, not a VarInt
   serialize (JoinGame eid gamemode dim dif maxp leveltype reduce) = serialize (unVarInt (unEID eid)) <> serialize gamemode <> serialize dim <> serialize dif <> serialize maxp <> serialize leveltype <> serialize reduce
-  -- Flags bitfield, fly speed, fov modifier
 
+-- Flags bitfield, fly speed, fov modifier
 data PlayerAbilities = PlayerAbilities AbilityFlags Float Float
 instance Packet PlayerAbilities where
   type PacketSide PlayerAbilities = 'Client
@@ -555,8 +585,8 @@ instance Packet PlayerAbilities where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize PlayerAbilities where
   serialize (PlayerAbilities flag fly fov) = serialize flag <> serialize fly <> serialize fov
-  -- x,y,z, yaw,pitch, relativity flags, TPconfirm Id
 
+-- x,y,z, yaw,pitch, relativity flags, TPconfirm Id
 data PlayerListItem a = PlayerListItem [(UUID,PlayerListAction a)]
 instance Packet (PlayerListItem a) where
   type PacketSide (PlayerListItem a) = 'Client
@@ -591,8 +621,8 @@ instance Packet PlayerPositionAndLook where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize PlayerPositionAndLook where
   serialize (PlayerPositionAndLook (x,y,z) (yaw,pitch) relFlag tpId) = serialize x <> serialize y <> serialize z <> serialize yaw <> serialize pitch <> serialize relFlag <> serialize tpId
-  -- Block pos of player spawn
 
+-- Block pos of player spawn
 data UpdateMetadata = UpdateMetadata EntityId [Maybe EntityMetadata]
 instance Packet UpdateMetadata where
   type PacketSide UpdateMetadata = 'Client
@@ -604,8 +634,8 @@ instance Packet UpdateMetadata where
   parsePacket = error "Can't parse clientbound packet"
 instance Serialize UpdateMetadata where
   serialize (UpdateMetadata eid mDats) = serialize eid <> serialize mDats
-  -- Block pos of player spawn
 
+-- Block pos of player spawn
 data SpawnPosition = SpawnPosition BlockCoord
 instance Packet SpawnPosition where
   type PacketSide SpawnPosition = 'Client

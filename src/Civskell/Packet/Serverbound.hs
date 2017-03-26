@@ -105,33 +105,7 @@ instance Packet LegacyHandshake where
   packetId = 0xFE
   packetPretty LegacyHandshake = []
   -- Legacy response
-  onPacket _ = rPut $ BS.pack [0xFF,0x00,0x1b,0x00,0xa7
-    ,0x00,0x31 -- 1
-    ,0x00,0x00 -- Seperator
-    ,0x00,0x33 -- 3
-    ,0x00,0x31 -- 1
-    ,0x00,0x36 -- 6
-    ,0x00,0x00 -- Seperator
-    ,0x00,0x31 -- 1
-    ,0x00,0x2e -- .
-    ,0x00,0x31 -- 1
-    ,0x00,0x31 -- 1
-    ,0x00,0x2e -- .
-    ,0x00,0x32 -- 2
-    ,0x00,0x00 -- Seperator
-    ,0x00,0x43 -- C
-    ,0x00,0x69 -- i
-    ,0x00,0x76 -- v
-    ,0x00,0x73 -- s
-    ,0x00,0x6b -- k
-    ,0x00,0x65 -- e
-    ,0x00,0x6c -- l
-    ,0x00,0x6c -- l
-    ,0x00,0x00 -- Seperator
-    ,0x00,0x00 -- 0
-    ,0x00,0x00 -- Seperator
-    ,0x00,0x00 -- 0
-    ]
+  onPacket LegacyHandshake = iSolemnlySwearIHaveNoIdeaWhatImDoing . serialize $ Client.LegacyHandshakePong
   parsePacket = do
     _ <- word8 0xFE
     _ <- takeByteString
@@ -262,8 +236,8 @@ instance Packet ClickWindow where
   packetName = "ClickWindow"
   packetId = 0x07
   packetPretty (ClickWindow wid slotNum transId invMode item) = [("Window Id",show wid),("Slot Number",show slotNum),("Transaction Id",show transId),("Inventory Mode",show invMode),("Subject Item",show item)]
+  -- TODO: check if the slot matches the client provided one
   onPacket (ClickWindow wid slotNum transId mode clientProvidedSlot) = if wid /= 0 then loge "Non-player inventories not supported" else case mode of
-    -- TODO: optimize and combine cases; right-click usually just means to move one item, but we consider it an entirely separate case here
     NormalClick rClick -> do
       -- Get the current state of affairs, and purely decide what to do with them
       doInventoryClick <$> getInventorySlot (clientToCivskellSlot slotNum) <*> getInventorySlot (-1) <*> pure rClick <*> pure clientProvidedSlot >>= \case
@@ -691,7 +665,6 @@ instance Packet PlayerBlockPlacement where
         -- Remove item from inventory
         let newSlot = if icount == 1 then EmptySlot else (Slot bid (icount - 1) dmg nbt)
         setInventorySlot heldSlot newSlot
-        -- Updates client as well
         -- TODO: map item damage to block damage somehow
         setBlock (BlockState bid 0) (blockOnSide block side)
   parsePacket = do
@@ -710,6 +683,7 @@ instance Packet UseItem where
   packetId = 0x1D
   packetPretty (UseItem hand) = [("Hand",show hand)]
   onPacket (UseItem hand) = do
+    -- Decide which slot they are using, and find the item in that hand
     held <- getInventorySlot =<< (case hand of {MainHand -> holdingSlot <$> getPlayer; OffHand -> pure 45})
     logp $ "Used: " ++ show held
   parsePacket = do
@@ -763,13 +737,14 @@ instance Packet EncryptionResponse where
       -- If it does, keep going
       Right ss -> do
         -- Start encrypting our packets, now that we have the shared secret
-        setupEncryption (makeEncrypter ss, ss, ss)
+        beginEncrypting ss
         -- Make the serverId hash for auth
         let loginHash = genLoginHash "" ss encodedPublicKey
         -- Do the Auth stuff with Mojang
         -- TODO: This uses arbitrary IO, we should make it into an effect
         name <- clientUsername <$> getPlayer
         authGetReq name loginHash >>= \case
+          -- TODO: we just crash if the token is negative :3 pls fix or make it a feature
           -- If the auth is borked, its probably Mojangs fault tbh
           Left actualJSON -> do
             loge "Parse error on auth"
@@ -777,33 +752,27 @@ instance Packet EncryptionResponse where
             sendPacket (Client.Disconnect $ jsonyText "Auth failed (not Lazersmoke's fault, probably!)")
             loge actualJSON
           Right (AuthPacket uuid nameFromAuth authProps) -> do
-            _pid <- registerPlayer
+            pid <- registerPlayer
             setUsername nameFromAuth
             setUUID uuid
             -- Tell the client to compress starting now. Agressive for testing
             -- EDIT: setting this to 3 gave us a bad frame exception :S
-            -- TODO: merge this packet into `setCompression`. setCompression is already a Networking effect, so this is ok
-            -- The compression change gets into the networking effect before the packet sends from the queue :(
-            -- remove HasNetworking from onPacket
             sendPacket (Client.SetCompression 16)
-            setCompression $ Just 16
+            beginCompression 16
             -- Send a login success. We are now in play mode
             sendPacket (Client.LoginSuccess (show uuid) nameFromAuth)
             -- This is where the protocol specifies the state transition to be
             setPlayerState Playing
-            -- First 0 is player's EID, second is the dimension (overworld), 100 is max players
-            -- TODO: enum for dimension
-            sendPacket (Client.JoinGame 0 Survival 0 Peaceful 100 "default" False)
+            -- 100 is the max players
+            sendPacket (Client.JoinGame pid Survival Overworld Peaceful 100 "default" False)
+            -- Also sends player abilities
             setGamemode Survival
             -- Tell them we aren't vanilla so no one gets mad at mojang for our fuck ups
             sendPacket (Client.PluginMessage "MC|Brand" (serialize "Civskell"))
-            -- Difficulty to peaceful (TODO: eventually a config file for these things)
+            -- Difficulty to peaceful
             sendPacket (Client.ServerDifficulty Peaceful)
             -- World Spawn/Compass Direction, not where they will spawn initially
             sendPacket (Client.SpawnPosition (Block (0,64,0)))
-            -- Player Abilities
-            -- Sent in setGamemode Survival
-            -- sendPacket (Client.PlayerAbilities (AbilityFlags False False False False) 0.0 1.0)
             -- Send initial world. Need a 7x7 grid or the client gets angry with us
             forM_ [0..48] $ \x -> sendPacket =<< colPacket ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
             -- Send an initial blank inventory
@@ -812,7 +781,6 @@ instance Packet EncryptionResponse where
             setInventorySlot 4 (Slot 1 32 0 Nothing)
             ps <- allPlayers
             sendPacket (Client.PlayerListItem (map (\p -> (clientUUID p,PlayerListAdd (clientUsername p) authProps Survival 0 Nothing)) ps))
-            -- NB: this is where the packet loop used to be invoked
   parsePacket = do
     specificVarInt 0x01
     ssLen <- fromEnum <$> parseVarInt
@@ -832,7 +800,7 @@ instance Packet StatusRequest where
     -- Get the list of connected players so we can show info about them in the server menu
     playersOnline <- allPlayers
     let userSample = intercalate "," . map (\p -> "{\"name\":\"" ++ clientUsername p ++ "\",\"id\":\"" ++ show (clientUUID p) ++ "\"}") $ playersOnline
-    let resp = "{\"version\":{\"name\":\"Civskell (1.11.2)\",\"protocol\":" ++ show protocolVersion ++ "},\"players\":{\"max\": 100,\"online\": " ++ show (length playersOnline) ++ ",\"sample\":[" ++ userSample ++ "]},\"description\":{\"text\":\"An Experimental Minecraft server written in Haskell | github.com/Lazersmoke/civskell\"}}" --,\"favicon\":\"" ++ image ++ "\"}"
+    let resp = "{\"version\":{\"name\":\"Civskell (1.11.2)\",\"protocol\":" ++ show protocolVersion ++ "},\"players\":{\"max\": 100,\"online\": " ++ show (length playersOnline) ++ ",\"sample\":[" ++ userSample ++ "]},\"description\":{\"text\":\"An Experimental Minecraft server written in Haskell | github.com/Lazersmoke/civskell\",\"favicon\":\"" ++ image ++ "\"}"
     -- Send resp to clients
     sendPacket (Client.StatusResponse resp)
     -- TODO

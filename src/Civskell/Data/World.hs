@@ -123,11 +123,15 @@ summonMob = send . SummonMob . ambiguate . Identity
 summonObject :: (Member World r, Object m) => m -> Eff r ()
 summonObject = send . SummonObject . ambiguate . Identity
 
+forkWorld :: (HasWorld q,Logs r,PerformsIO r) => Eff (World ': r) a -> Eff q (Eff r a)
+forkWorld = send . ForkWorld
+
 --data SpawnMob = SpawnMob EntityId String SomeMob (Double,Double,Double) Word8 Word8 Word8 Short Short Short -- Metadata NYI
 
 runWorld :: (Logs r, PerformsIO r) => MVar WorldData -> Eff (World ': r) a -> Eff r a
 runWorld _ (Pure x) = Pure x
 runWorld w' (Eff u q) = case u of
+  Inject (ForkWorld e) -> runWorld w' (runTCQ q (runWorld w' e))
   Inject (GetChunk chunk) -> runWorld w' . runTCQ q . Map.findWithDefault (ChunkSection Map.empty) chunk . chunks =<< send (readMVar w')
   Inject (SetBlock b' bc) -> do
     send $ modifyMVar_ w' $ \w -> do

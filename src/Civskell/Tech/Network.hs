@@ -7,7 +7,7 @@
 {-# LANGUAGE TypeApplications #-}
 module Civskell.Tech.Network
   (module Civskell.Data.Networking
-  ,sendPacket,sendClientPacket,getGenericPacket,authGetReq --,getPacketFromParser --,sendPacket,getPacket
+  ,getGenericPacket,authGetReq --,getPacketFromParser --,sendPacket,getPacket
   ) where
 
 import Control.Eff (Eff,send)
@@ -16,64 +16,20 @@ import Data.Bits
 import Data.Semigroup ((<>))
 import Data.Word (Word8)
 import Data.Aeson (fromJSON,json,Result(..))
-import Hexdump (prettyHex)
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Data.Attoparsec.ByteString
 import Unsafe.Coerce (unsafeCoerce)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
---import qualified Text.Parsec.Char as C
 import Data.SuchThat
 
 import Civskell.Data.Logging
 import Civskell.Data.Networking
 import Civskell.Data.Types
---import Civskell.Tech.Parse
 
---import qualified Civskell.Packet.Clientbound as Client
---import qualified Civskell.Packet.Serverbound as Server
-
--- Send something serializeable over the network
-sendPacket :: (Logs r,HasNetworking r,Serialize p,Packet p,PacketSide p ~ 'Client) => p -> Eff r ()
-sendPacket = sendClientPacket . ClientPacket . ambiguate . Identity
-
-sendClientPacket :: (Logs r,HasNetworking r) => ClientPacket s -> Eff r ()
-sendClientPacket (ClientPacket (SuchThat (Identity (s :: a)))) = do
-  -- Log its hex dump
-  logLevel ClientboundPacket $ showPacket s
-  --logLevel HexDump $ indentedHex (serialize s)
-  -- Send it
-  x <- addCompression (BS.append (serialize $ packetId @a) $ serialize s)
-  logLevel HexDump $ indentedHex x
-  rPut x
-
---getPacket :: forall p r. (Logs r,HasNetworking r,Packet p) => Eff r (Maybe p)
---getPacket = getPacketFromParser (parsePacket @p)
-{-
--- Get a packet from the network (high level) using a parser context to decide which parser set to use
-getPacketFromParser :: (Logs r,HasNetworking r,Packet p) => Parser p -> Eff r (Maybe p)
-getPacketFromParser p = do
-  -- Get the raw data (sans length)
-  pkt <- removeCompression =<< getRawPacket
-  -- TODO: Take advantage of incremental parsing maybe
-  -- Parse it
-  case parseOnly p pkt of
-    -- If it parsed ok, then
-    Right serverPkt -> do
-      -- Return it
-      logLevel ServerboundPacket $ showPacket serverPkt
-      logLevel HexDump $ indentedHex $ pkt
-      return $ Just serverPkt
-    -- If it didn't parse correctly, print the error and return Nothing
-    Left e -> do
-      logLevel ErrorLog "Failed to parse incoming packet"
-      logLevel ErrorLog (show e)
-      -- Hex dump is an error
-      logLevel ErrorLog $ indentedHex $ pkt
-      return Nothing
--}
-getGenericPacket :: (Logs r,HasNetworking r) => Eff r (Parser (ForAny ServerPacket)) -> Eff r (Maybe (ForAny ServerPacket))
+-- Takes an effect to decide which parser to use once the packet arrives, and returns the parsed packet when it arrives
+getGenericPacket :: (Logs r,Networks r) => Eff r (Parser (ForAny ServerPacket)) -> Eff r (Maybe (ForAny ServerPacket))
 getGenericPacket ep = do
   -- Get the raw data (sans length)
   pkt <- removeCompression =<< getRawPacket
@@ -97,7 +53,7 @@ getGenericPacket ep = do
 
 -- Get an unparsed packet from the network
 -- Returns the full, length annotated packet
-getRawPacket :: (HasNetworking r) => Eff r BS.ByteString
+getRawPacket :: (Networks r) => Eff r BS.ByteString
 getRawPacket = do
   -- Get the length it should be
   (l,lbs) <- getPacketLength
@@ -107,7 +63,7 @@ getRawPacket = do
   return (lbs <> pktData)
 
 -- TODO: merge with parseVarInt by abstracting the first line
-getPacketLength :: (HasNetworking r) => Eff r (VarInt,BS.ByteString)
+getPacketLength :: (Networks r) => Eff r (VarInt,BS.ByteString)
 getPacketLength = do
   -- Get the first byte
   l' <- rGet 1
@@ -123,14 +79,6 @@ getPacketLength = do
       return $ (thisPart .|. (shiftL next 7),l `BS.cons` bs)
     -- If its not set, then this is the last byte, so we return thisPart
     else return (thisPart,BS.singleton l)
-
--- Add "  " to each line
-shittyIndent :: String -> String
-shittyIndent = init . unlines . map ("  "++) . lines
-
--- Indent the hexdump
-indentedHex :: BS.ByteString -> String
-indentedHex = shittyIndent . prettyHex
 
 -- Get the auth info from the mojang server
 authGetReq :: (Logs r,PerformsIO r) => String -> String -> Eff r (Either String AuthPacket)

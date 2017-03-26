@@ -1,4 +1,6 @@
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ConstraintKinds #-}
@@ -10,6 +12,8 @@ import Control.Eff
 import Control.Concurrent.STM
 import Control.Concurrent (threadDelay)
 import Data.Semigroup
+import Data.SuchThat
+import Data.Functor.Identity
 import System.IO
 import Data.Attoparsec.ByteString
 import qualified Codec.Compression.Zlib as Z
@@ -17,41 +21,78 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 
 import Civskell.Data.Types
+import Civskell.Data.Logging
 import Civskell.Tech.Encrypt
 import Civskell.Tech.Parse
 
 {-# INLINE rGet #-}
-rGet :: HasNetworking n => Int -> Eff n BS.ByteString
+rGet :: Networks n => Int -> Eff n BS.ByteString
 rGet = send . GetFromNetwork
 
 {-# INLINE rPut #-}
-rPut :: HasNetworking n => BS.ByteString -> Eff n ()
+rPut :: Networks n => BS.ByteString -> Eff n ()
 rPut = send . PutIntoNetwork
 
 {-# INLINE setupEncryption #-}
-setupEncryption :: HasNetworking n => EncryptionCouplet -> Eff n ()
+setupEncryption :: Networks n => BS.ByteString -> Eff n ()
 setupEncryption = send . SetupEncryption
 
 {-# INLINE setCompression #-}
-setCompression :: HasNetworking n => Maybe VarInt -> Eff n ()
+setCompression :: Networks n => VarInt -> Eff n ()
 setCompression = send . SetCompressionLevel
 
 {-# INLINE addCompression #-}
-addCompression :: HasNetworking n => BS.ByteString -> Eff n BS.ByteString
+addCompression :: Networks n => BS.ByteString -> Eff n BS.ByteString
 addCompression = send . AddCompression
 
 {-# INLINE removeCompression #-}
-removeCompression :: HasNetworking n => BS.ByteString -> Eff n BS.ByteString
+removeCompression :: Networks n => BS.ByteString -> Eff n BS.ByteString
 removeCompression = send . RemoveCompression
 
 {-# INLINE isPacketReady #-}
-isPacketReady :: HasNetworking n => Eff n Bool
+isPacketReady :: Networks n => Eff n Bool
 isPacketReady = send IsPacketReady
+
+
+-- Send a Client Packet over the network
+sendPacket :: (SendsPackets r,Serialize p,Packet p,PacketSide p ~ 'Client) => p -> Eff r ()
+sendPacket = sendAnyPacket . ambiguate . ClientPacket . ambiguate . Identity
+
+sendAnyPacket :: SendsPackets r => ForAny ClientPacket -> Eff r ()
+sendAnyPacket = send . SendPacket
+
+iSolemnlySwearIHaveNoIdeaWhatImDoing :: SendsPackets r => BS.ByteString -> Eff r ()
+iSolemnlySwearIHaveNoIdeaWhatImDoing = send . UnsafeSendBytes
+
+beginEncrypting :: SendsPackets r => BS.ByteString -> Eff r ()
+beginEncrypting = send . BeginEncrypting
+
+beginCompression :: SendsPackets r => VarInt -> Eff r ()
+beginCompression = send . BeginCompression
+
+runPacketing :: (Logs r,Networks r) => Eff (Packeting ': r) a -> Eff r a
+runPacketing (Pure x) = Pure x
+runPacketing (Eff u q) = case u of
+  Weaken restOfU -> Eff restOfU (Singleton (runPacketing . runTCQ q))
+  Inject (SendPacket (SuchThat (ClientPacket (SuchThat (Identity (s :: a)))))) -> do
+    -- Log its hex dump
+    logLevel ClientboundPacket $ showPacket s
+    logLevel HexDump $ indentedHex (serialize s)
+    -- Send it
+    rPut =<< addCompression (BS.append (serialize $ packetId @a) $ serialize s)
+    runPacketing (runTCQ q ())
+  Inject (UnsafeSendBytes bytes) -> rPut bytes >> runPacketing (runTCQ q ())
+  Inject (BeginEncrypting ss) -> setupEncryption ss >> runPacketing (runTCQ q ())
+  Inject (BeginCompression thresh) -> setCompression thresh >> runPacketing (runTCQ q ())
+
+forkNetwork :: (Networks q,PerformsIO r) => Eff (Networking ': r) a -> Eff q (Eff r a)
+forkNetwork = send . ForkNetwork
 
 runNetworking :: PerformsIO r => TVar (Maybe EncryptionCouplet) -> TVar (Maybe VarInt) -> Handle -> Eff (Networking ': r) a -> Eff r a
 runNetworking _ _ _ (Pure x) = Pure x
 runNetworking mEnc mThresh hdl (Eff u q) = case u of
   Weaken restOfU -> Eff restOfU (Singleton (runNetworking mEnc mThresh hdl . runTCQ q))
+  Inject (ForkNetwork e) -> runNetworking mEnc mThresh hdl (runTCQ q (runNetworking mEnc mThresh hdl e))
   Inject (GetFromNetwork len) -> do
     dat <- send $ BS.hGet hdl len
     clear <- send . atomically $ readTVar mEnc >>= \case
@@ -70,8 +111,8 @@ runNetworking mEnc mThresh hdl (Eff u q) = case u of
         return bs'
     send (BS.hPut hdl enc)
     runNetworking mEnc mThresh hdl (runTCQ q ())
-  Inject (SetCompressionLevel thresh) -> send (atomically $ writeTVar mThresh thresh) >> runNetworking mEnc mThresh hdl (runTCQ q ())
-  Inject (SetupEncryption couplet) -> send (atomically $ writeTVar mEnc (Just couplet)) >> runNetworking mEnc mThresh hdl (runTCQ q ())
+  Inject (SetCompressionLevel thresh) -> send (atomically $ writeTVar mThresh (Just thresh)) >> runNetworking mEnc mThresh hdl (runTCQ q ())
+  Inject (SetupEncryption sharedSecret) -> send (atomically $ writeTVar mEnc (Just (makeEncrypter sharedSecret,sharedSecret,sharedSecret))) >> runNetworking mEnc mThresh hdl (runTCQ q ())
   Inject (AddCompression bs) -> send (readTVarIO mThresh) >>= \case
     -- Do not compress; annotate with length only
     Nothing -> runNetworking mEnc mThresh hdl (runTCQ q (withLength bs))

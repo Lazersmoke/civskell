@@ -7,6 +7,7 @@ module Civskell.Data.Logging
   (logg,loge,logt
   ,logLevel
   ,LogLevel(..)
+  ,forkLogger
   ,runLogger
   ) where
 
@@ -31,9 +32,13 @@ logt tag msg = send $ LogString (TaggedLog tag) msg
 logLevel :: Logs r => LogLevel -> String -> Eff r ()
 logLevel l s = send (LogString l s)
 
+forkLogger :: (Logs q,PerformsIO r) => Eff (Logging ': r) a -> Eff q (Eff r a)
+forkLogger = send . ForkLogger
+
 runLogger :: PerformsIO r => TQueue String -> Eff (Logging ': r) a -> Eff r a
 runLogger _ (Pure x) = return x
 runLogger s (Eff u q) = case u of
+  Inject (ForkLogger e) -> runLogger s (runTCQ q (runLogger s e))
   Inject (LogString level str) -> case level of
     HexDump -> do
       -- Hex dumps disabled for now
