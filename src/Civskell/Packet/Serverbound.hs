@@ -800,7 +800,7 @@ instance Packet StatusRequest where
     -- Get the list of connected players so we can show info about them in the server menu
     playersOnline <- allPlayers
     let userSample = intercalate "," . map (\p -> "{\"name\":\"" ++ clientUsername p ++ "\",\"id\":\"" ++ show (clientUUID p) ++ "\"}") $ playersOnline
-    let resp = "{\"version\":{\"name\":\"Civskell (1.11.2)\",\"protocol\":" ++ show protocolVersion ++ "},\"players\":{\"max\": 100,\"online\": " ++ show (length playersOnline) ++ ",\"sample\":[" ++ userSample ++ "]},\"description\":{\"text\":\"An Experimental Minecraft server written in Haskell | github.com/Lazersmoke/civskell\",\"favicon\":\"" ++ image ++ "\"}"
+    let resp = "{\"version\":{\"name\":\"Civskell (1.11.2)\",\"protocol\":" ++ show protocolVersion ++ "},\"players\":{\"max\": 100,\"online\": " ++ show (length playersOnline) ++ ",\"sample\":[" ++ userSample ++ "]},\"description\":{\"text\":\"An Experimental Minecraft server written in Haskell | github.com/Lazersmoke/civskell\"},\"favicon\":\"" ++ image ++ "\"}"
     -- Send resp to clients
     sendPacket (Client.StatusResponse resp)
     -- TODO

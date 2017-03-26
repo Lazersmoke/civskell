@@ -29,9 +29,11 @@ import Civskell.Data.Types
 getAKeypair :: PerformsIO r => Eff r (RSA.PublicKey,RSA.PrivateKey)
 getAKeypair = send (RSA.generate 128 65537 :: IO (RSA.PublicKey,RSA.PrivateKey))
 
+-- unsafePerformIO ourselves a keypair because we can save computation by using the same key for every client
 globalKeypair :: (RSA.PublicKey,RSA.PrivateKey)
 globalKeypair = unsafePerformIO $ runM getAKeypair
 
+-- Convieniently encoe the public part of it
 encodedPublicKey :: BS.ByteString
 encodedPublicKey = encodePubKey . fst $ globalKeypair
 
@@ -91,13 +93,11 @@ encodePubKey k = asnSequence <> withLengthAsn (algIdentifier <> pubKeyBitstring)
 intBytesRaw :: Integer -> BS.ByteString
 intBytesRaw = BS.reverse . BS.unfoldr (\i -> if i == 0 then Nothing else Just $ (fromIntegral i, shiftR i 8))
 
--- unIntBytesRaw gets the Integer represented by a BS
---unIntBytesRaw :: BS.ByteString -> Integer
---unIntBytesRaw = BS.foldr' (\b i -> shiftL i 8 + fromIntegral b) 0 . BS.reverse
-
+-- Gets the cipher for a shared secret
 makeEncrypter :: BS.ByteString -> AES128
 makeEncrypter ss = throwCryptoError $ cipherInit ss
 
+-- Encrypt a bytestring using the cfb8 aes128 cipher, and the provided shift register
 cfb8Encrypt :: AES128 -> BS.ByteString -> BS.ByteString -> (BS.ByteString,BS.ByteString)
 cfb8Encrypt c i = BS.foldl magic (BS.empty,i)
   where
@@ -110,6 +110,7 @@ cfb8Encrypt c i = BS.foldl magic (BS.empty,i)
         -- shift the new ciphertext into the shift register
         ivFinal = BS.tail iv `BS.snoc` ct
 
+-- Decrypt a bytestring using the cfb8 aes128 cipher, and the provided shift register
 cfb8Decrypt :: AES128 -> BS.ByteString -> BS.ByteString -> (BS.ByteString,BS.ByteString)
 cfb8Decrypt c i = BS.foldl magic (BS.empty,i)
   where
@@ -119,13 +120,7 @@ cfb8Decrypt c i = BS.foldl magic (BS.empty,i)
         -- snoc on cipher always
         ivFinal = BS.tail iv `BS.snoc` d
 
---bsFoldlM :: Monad m => (b -> Word8 -> m b) -> b -> BS.ByteString -> m b
---bsFoldlM f i bs = BS.foldr f' return bs i
-  --where f' x k z = f z x >>= k
-
---semCipherEncrypt :: BS.ByteString -> BS.ByteString -> BS.ByteString
-
--- Get a login hash from a sId, shared secret, and public key
+-- Get a login hash from a sId, shared secret, and public key. This is used for auth with Mojang
 genLoginHash :: String -> BS.ByteString -> BS.ByteString -> String
 genLoginHash sId ss pubKey =
   -- bit 159 (0-indexed from right) is the negativity bit
@@ -140,6 +135,8 @@ genLoginHash sId ss pubKey =
     -- the hash as a String of and SHA1 hash (this is the only way to export it)
     theHash = show . hashFinalize $ hashUpdates (hashInit :: Context SHA1) [Data.ByteString.UTF8.fromString sId,ss,pubKey]
 
+-- Confirm that the given information all jives together, proving that the client got the key correctly
+-- At the end, we get the shared secret if everything was gucci
 checkVTandSS :: RSA.PrivateKey -> BS.ByteString -> BS.ByteString -> BS.ByteString -> Either String BS.ByteString
 checkVTandSS priv vtFromClient ssFromClient actualVT = do
   -- Try to decrypt their vt response
@@ -156,5 +153,3 @@ checkVTandSS priv vtFromClient ssFromClient actualVT = do
         Left e -> Left $ "Failed to decrpyt Shared Secret: " ++ show e
         -- If everything worked properly, then return the shared secret
         Right ss -> Right ss
-
-

@@ -42,7 +42,7 @@ runLogger s (Eff u q) = case u of
   Inject (LogString level str) -> case level of
     HexDump -> do
       -- Hex dumps disabled for now
-      send . atomically $ writeTQueue s str
+      --send . atomically $ writeTQueue s str
       runLogger s (runTCQ q ())
     ClientboundPacket -> do
       send . atomically $ writeTQueue s ("[\x1b[32mSent\x1b[0m] " ++ str)

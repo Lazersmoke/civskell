@@ -52,18 +52,6 @@ keepAliveThread i = do
 loggingThread :: TQueue String -> IO ()
 loggingThread l = atomically (readTQueue l) >>= putStrLn >> loggingThread l
 
---tickThread :: (HasWorld r,Logs r, PerformsIO r) => Eff r ()
---tickThread = arbitraryWorld $ \w -> do
-  --forallPlayers tickPlayer
-  --send (threadDelay 50000)
-  --tickThread
-
---tickPlayer :: PlayerInfo -> PlayerInfo
---tickPlayer p = p {diggingBlocks = fmap b (diggingBlocks p)}
-  --where
-    --b (InProgress 20) = DoneBreaking
-    --b (InProgress n) = InProgress (n + 1)
-    --b DoneBreaking = DoneBreaking
 -- This is a hack; make something better in the future
 -- Note that World effect uses MVars safely enough that we can use the console with it and be OK
 terminal :: IO ()
@@ -81,29 +69,23 @@ connLoop wor logger sock = do
   -- Don't line buffer the network
   hSetBuffering handle NoBuffering
   -- Make new networking TVars for this client
+  netLock <- newMVar ()
   mEnc <- newTVarIO Nothing
   mThresh <- newTVarIO Nothing
   -- Packet TQueue
   pq <- newTQueueIO
   -- Getting thread
-  _ <- forkIO (runM $ runLogger logger $ runNetworking mEnc mThresh handle $ runWorld wor $ runPacketing $ initPlayer pq $ packetLoop)
+  _ <- forkIO (runM $ runLogger logger $ runNetworking netLock mEnc mThresh handle $ runWorld wor $ runPacketing $ initPlayer pq $ packetLoop)
   -- Sending thread
-  _ <- forkIO (runM $ runLogger logger $ runNetworking mEnc mThresh handle $ runPacketing $ flushPackets pq)
+  _ <- forkIO (runM $ runLogger logger $ runNetworking netLock mEnc mThresh handle $ runPacketing $ flushPackets pq)
   -- Wait for another connection
   connLoop wor logger sock
-
--- Wait for a Handshake, and hand it off when we get it
---connHandler :: (Logs r,PerformsIO r,HasWorld r) => Eff r ()
---connHandler = getPacket @Server.Handshake >>= maybe (loge "WTF no packet? REEEEEEEEEEEEE") handleHandshake
-
--- If its not a handshake packet, Log to console that we have a bad packet
--- Drop the connection by returning, since the client can't receive normal disconnect packets yet
---handleHandshake (ServerPacket (p::a)) = loge $ "Unexpected non-handshake packet with Id: " ++ show (packetId @a)
 
 -- TODO: remove PerformsIO constraint in favor of special STM effects or something
 flushPackets :: (Logs r,SendsPackets r,PerformsIO r) => TQueue (ForAny ClientPacket) -> Eff r ()
 flushPackets q = send (atomically $ readTQueue q) >>= sendAnyPacket >> flushPackets q
 
+-- Get packet -> Spawn thread -> Repeat loop for players
 packetLoop :: (PerformsIO r,HasPlayer r,Logs r,Networks r,HasWorld r) => Eff r ()
 packetLoop = do
   -- TODO: Fork new thread on every packet
@@ -117,12 +99,10 @@ packetLoop = do
     Just (SuchThat (ServerPacket (SuchThat (Identity q)))) -> do
       let op = onPacket q
       send . (>> pure ()) . forkIO =<< (runM <$>) . forkLogger =<< forkNetwork =<< forkWorld =<< (runPacketing <$> forkPlayer op)
-      
-
   packetLoop
   where
     -- This is an *action* to decide what parser to use. It needs to be like this because
-    -- the player could change states *while we are waiting for the next packet to arrive.
+    -- the player could change states *while we are waiting* for the next packet to arrive.
     -- This design ensures that the correct parser is always used.
     getParser = flip fmap (playerState <$> getPlayer) $ \case
       Handshaking -> ambiguate <$> Server.parseHandshakePacket
