@@ -55,6 +55,8 @@ module Civskell.Data.Types
   ,SendsPackets,Packeting(..)
   -- Packet
   ,Packet(..),ClientPacket(..),ServerPacket(..)
+  -- Configuration
+  ,Configured,Configuration(..),defaultConfiguration,forkConfig
   -- Entity
   ,Entity(..)
   ,EntityMetaType(..)
@@ -69,6 +71,7 @@ module Civskell.Data.Types
 
 import Control.Concurrent.STM
 import Control.Eff
+import Control.Eff.Reader
 import Crypto.Cipher.AES (AES128)
 import Data.Aeson hiding (Object)
 import Data.Aeson.Types hiding (Parser,Object)
@@ -486,7 +489,7 @@ data Logging a where
   -- Log a string at a given Log Level
   LogString :: LogLevel -> String -> Logging ()
   -- Commute a Logging effect out of a stack
-  ForkLogger :: PerformsIO r => Eff (Logging ': r) a -> Logging (Eff r a)
+  ForkLogger :: (Configured r,PerformsIO r) => Eff (Logging ': r) a -> Logging (Eff r a)
 
 -- TODO: replace this with a `data LogSpec = LogSpec {spec :: String -> String,level :: Int}`?
 -- Level of verbosity to log at
@@ -594,7 +597,7 @@ class Packet p where
   packetId :: VarInt
   -- Spawn a PLT on receipt of each packet
   -- TODO: remove arbitrary IO in favor of STM or something else
-  onPacket :: (SendsPackets r,PerformsIO r,Logs r,HasPlayer r,HasWorld r) => p -> Eff r ()
+  onPacket :: (Configured r,SendsPackets r,PerformsIO r,Logs r,HasPlayer r,HasWorld r) => p -> Eff r ()
   onPacket p = send (LogString ErrorLog $ "Unsupported packet: " ++ showPacket p)
   -- Parse a packet
   parsePacket :: Parser p
@@ -727,3 +730,33 @@ data Packeting a where
 -- Indent the hexdump; helper function
 indentedHex :: BS.ByteString -> String
 indentedHex = init . unlines . map ("  "++) . lines . prettyHex
+
+-- Reading the configuration is an effect
+type Configured r = Member (Reader Configuration) r
+
+data Configuration = Configuration
+  {shouldLog :: LogLevel -> Bool
+  ,spawnLocation :: BlockCoord
+  ,defaultDifficulty :: Difficulty
+  ,defaultDimension :: Dimension
+  ,defaultGamemode :: Gamemode
+  ,maxPlayers :: Word8
+  ,compressionThreshold :: Maybe VarInt
+  }
+
+defaultConfiguration :: Configuration
+defaultConfiguration = Configuration
+  {shouldLog = \case {HexDump -> False; _ -> True}
+  ,spawnLocation = Block (0,64,0)
+  ,defaultDifficulty = Peaceful
+  ,defaultDimension = Overworld
+  ,defaultGamemode = Survival
+  -- TODO: Check against this
+  ,maxPlayers = 100
+  ,compressionThreshold = Just 16
+  }
+
+forkConfig :: Configured q => Eff (Reader Configuration ': r) a -> Eff q (Eff r a)
+forkConfig e = do
+  c <- ask
+  return $ runReader' c e

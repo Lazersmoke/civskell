@@ -6,6 +6,7 @@
 module Civskell.Packet.Serverbound where
 
 import Data.Int
+import Control.Eff.Reader (ask)
 import Data.List (intercalate)
 import Data.Functor.Identity
 import Data.Word
@@ -752,27 +753,31 @@ instance Packet EncryptionResponse where
             sendPacket (Client.Disconnect $ jsonyText "Auth failed (not Lazersmoke's fault, probably!)")
             loge actualJSON
           Right (AuthPacket uuid nameFromAuth authProps) -> do
+            -- Get the config ready because we need it a lot here
+            c <- ask
             pid <- registerPlayer
             setUsername nameFromAuth
             setUUID uuid
-            -- Tell the client to compress starting now. Agressive for testing
-            -- EDIT: setting this to 3 gave us a bad frame exception :S
-            sendPacket (Client.SetCompression 16)
-            beginCompression 16
+            -- Warning: setting this to 3 gave us a bad frame exception :S
+            case compressionThreshold c of
+              -- If the config says to compress, inform the client
+              Just t -> sendPacket (Client.SetCompression t) >> beginCompression t
+              -- No compression -> don't do anything
+              Nothing -> pure ()
             -- Send a login success. We are now in play mode
             sendPacket (Client.LoginSuccess (show uuid) nameFromAuth)
             -- This is where the protocol specifies the state transition to be
             setPlayerState Playing
             -- 100 is the max players
-            sendPacket (Client.JoinGame pid Survival Overworld Peaceful 100 "default" False)
+            sendPacket (Client.JoinGame pid (defaultGamemode c) (defaultDimension c) (defaultDifficulty c) (maxPlayers c) "default" False)
             -- Also sends player abilities
-            setGamemode Survival
+            setGamemode (defaultGamemode c)
             -- Tell them we aren't vanilla so no one gets mad at mojang for our fuck ups
             sendPacket (Client.PluginMessage "MC|Brand" (serialize "Civskell"))
             -- Difficulty to peaceful
-            sendPacket (Client.ServerDifficulty Peaceful)
+            sendPacket (Client.ServerDifficulty (defaultDifficulty c))
             -- World Spawn/Compass Direction, not where they will spawn initially
-            sendPacket (Client.SpawnPosition (Block (0,64,0)))
+            sendPacket (Client.SpawnPosition (spawnLocation c))
             -- Send initial world. Need a 7x7 grid or the client gets angry with us
             forM_ [0..48] $ \x -> sendPacket =<< colPacket ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
             -- Send an initial blank inventory

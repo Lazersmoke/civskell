@@ -1,13 +1,9 @@
 module Main where
 
-import Lib
+import Civskell
 
+-- This is user code
 main :: IO ()
 main = do
   putStrLn "Starting..."
-  startListening
-
-mian :: IO ()
-mian = do
-  putStr "很好吃!"
-  mian
+  runServer defaultConfiguration

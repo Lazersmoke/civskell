@@ -18,15 +18,10 @@ import Data.NBT
 import qualified Data.Serialize as Ser
 
 import Civskell.Data.Types
---import qualified Civskell.Packet.Serverbound as Server
 
---unwrapPacket :: ServerPacket -> (forall p. Packet p => p)
---unwrapPacket (ServerPacket p) = p
 
 anyChar :: Parser Char
 anyChar = chr . fromIntegral <$> anyWord8
---parseUnknownPacket :: Parser (ServerPacket s)
---parseUnknownPacket = anyWord8 >>= unexpected . show
 
 parseHand :: Parser Hand
 parseHand = (specificVarInt 0x01 *> pure OffHand) <|> (specificVarInt 0x00 *> pure MainHand)
@@ -148,15 +143,3 @@ parseCompPkt = do
   dataLen <- parseVarInt
   bs <- takeByteString
   return (dataLen,bs)
-
--- Comes out to -1
---parseTest :: IO ()
---parseTest = case parse parseShort "" (BS.pack [0xff,0xff]) of
-  --Right a -> print a
-  --Left e -> print e
-
---satisfyBS :: (Word8 -> Bool) -> BSParser Word8
---satisfyBS p = tokenPrim (show . chr . fromEnum) nextpos boolToMaybe
-  --where
-    --nextpos prev thisTok otherToks = incSourceColumn prev 1
-    --boolToMaybe x = if p x then Just x else Nothing

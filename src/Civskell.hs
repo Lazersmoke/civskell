@@ -5,13 +5,14 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
-module Lib where
+module Civskell (module Civskell.Data.Types, runServer) where
 
 import Control.Concurrent (forkIO,threadDelay)
 import Data.Functor.Identity
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Eff (Eff,runM,send)
+import Control.Eff.Reader
 import System.Exit (exitSuccess)
 import System.IO (hSetBuffering,BufferMode(NoBuffering))
 import qualified Network as Net
@@ -25,22 +26,27 @@ import Civskell.Tech.Network
 import qualified Civskell.Packet.Clientbound as Client
 import qualified Civskell.Packet.Serverbound as Server
 
+runServer :: Configuration -> IO ()
+runServer c = runM $ runReader' c startListening
+
 -- Send new connections to connLoop, and listen on 25565
 -- Note for testing: Use virtualbox port forwarding to test locally
-startListening :: IO ()
+startListening :: (Configured r,PerformsIO r) => Eff r ()
 startListening = do
   -- Make an MVar for the global state. Use test version for the flat stone plains
-  wor <- newMVar testInitWorld
+  wor <- send $ newMVar testInitWorld
   -- Make a TQueue for logging
-  logger <- newTQueueIO :: IO (TQueue String)
+  logger <- send (newTQueueIO :: IO (TQueue String))
+  -- bad fork
+  (c :: Configuration) <- ask
   -- Fork a new thread to wait for incoming connections, and pass the world reference to it
-  _ <- forkIO (connLoop wor logger =<< Net.listenOn (Net.PortNumber 25565))
+  _ <- send . forkIO . runM . runReader' c . runLogger logger . runWorld wor . connLoop =<< send (Net.listenOn (Net.PortNumber 25565))
   -- Fork a thread to periodically send keep alives to everyone
-  _ <- forkIO (runM $ runLogger logger $ runWorld wor $ keepAliveThread 0)
+  _ <- send . forkIO . runM =<< (forkConfig . runLogger logger . runWorld wor $ keepAliveThread 0)
   -- Fork a thread to continuously log every log message
-  _ <- forkIO (loggingThread logger)
+  _ <- send $ forkIO (loggingThread logger)
   -- Listen for the console to say to quit
-  terminal
+  send $ terminal
 
 keepAliveThread :: (Logs r, HasWorld r,PerformsIO r) => KeepAliveId -> Eff r ()
 keepAliveThread i = do
@@ -60,33 +66,33 @@ terminal = do
   if l == "quit" then exitSuccess else terminal
 
 -- Spawns a new thread to deal with each new client
-connLoop :: MVar WorldData -> TQueue String -> Net.Socket -> IO ()
-connLoop wor logger sock = do
+connLoop :: (Logs r,HasWorld r,Configured r,PerformsIO r) => Net.Socket -> Eff r ()
+connLoop sock = do
   -- Accept is what waits for a new connection
-  (handle, cliHost, cliPort) <- Net.accept sock
+  (handle, cliHost, cliPort) <- send $ Net.accept sock
   -- Log that we got a connection
-  putStrLn $ "Got Client connection: " ++ show cliHost ++ ":" ++ show cliPort
+  logg $ "Got Client connection: " ++ show cliHost ++ ":" ++ show cliPort
   -- Don't line buffer the network
-  hSetBuffering handle NoBuffering
+  send $ hSetBuffering handle NoBuffering
   -- Make new networking TVars for this client
-  netLock <- newMVar ()
-  mEnc <- newTVarIO Nothing
-  mThresh <- newTVarIO Nothing
+  netLock <- send $ newMVar ()
+  mEnc <- send $ newTVarIO Nothing
+  mThresh <- send $ newTVarIO Nothing
   -- Packet TQueue
-  pq <- newTQueueIO
+  pq <- send $ newTQueueIO
   -- Getting thread
-  _ <- forkIO (runM $ runLogger logger $ runNetworking netLock mEnc mThresh handle $ runWorld wor $ runPacketing $ initPlayer pq $ packetLoop)
+  _ <- send . forkIO . runM =<< forkConfig =<< (forkLogger . runNetworking netLock mEnc mThresh handle =<< (forkWorld . runPacketing . initPlayer pq $ packetLoop))
   -- Sending thread
-  _ <- forkIO (runM $ runLogger logger $ runNetworking netLock mEnc mThresh handle $ runPacketing $ flushPackets pq)
+  _ <- send . forkIO . runM =<< forkConfig =<< (forkLogger . runNetworking netLock mEnc mThresh handle . runPacketing $ flushPackets pq)
   -- Wait for another connection
-  connLoop wor logger sock
+  connLoop sock
 
 -- TODO: remove PerformsIO constraint in favor of special STM effects or something
 flushPackets :: (Logs r,SendsPackets r,PerformsIO r) => TQueue (ForAny ClientPacket) -> Eff r ()
 flushPackets q = send (atomically $ readTQueue q) >>= sendAnyPacket >> flushPackets q
 
 -- Get packet -> Spawn thread -> Repeat loop for players
-packetLoop :: (PerformsIO r,HasPlayer r,Logs r,Networks r,HasWorld r) => Eff r ()
+packetLoop :: (Configured r,PerformsIO r,HasPlayer r,Logs r,Networks r,HasWorld r) => Eff r ()
 packetLoop = do
   -- TODO: Fork new thread on every packet
   -- Block until a packet arrives, then deal with it
@@ -98,7 +104,7 @@ packetLoop = do
     -- disabling the monomorphism restriction
     Just (SuchThat (ServerPacket (SuchThat (Identity q)))) -> do
       let op = onPacket q
-      send . (>> pure ()) . forkIO =<< (runM <$>) . forkLogger =<< forkNetwork =<< forkWorld =<< (runPacketing <$> forkPlayer op)
+      send . (>> pure ()) . forkIO =<< (runM <$>) . forkConfig =<< forkLogger =<< forkNetwork =<< forkWorld =<< (runPacketing <$> forkPlayer op)
   packetLoop
   where
     -- This is an *action* to decide what parser to use. It needs to be like this because
