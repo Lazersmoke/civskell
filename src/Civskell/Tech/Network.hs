@@ -29,7 +29,7 @@ import Civskell.Data.Networking
 import Civskell.Data.Types
 
 -- Takes an effect to decide which parser to use once the packet arrives, and returns the parsed packet when it arrives
-getGenericPacket :: (Logs r,Networks r) => Eff r (Parser (ForAny ServerPacket)) -> Eff r (Maybe (ForAny ServerPacket))
+getGenericPacket :: (Logs r,Networks r) => Eff r (Parser (ForAny InboundPacket)) -> Eff r (Maybe (ForAny InboundPacket))
 getGenericPacket ep = do
   -- Get the raw data (sans length)
   pkt <- removeCompression =<< getRawPacket
@@ -40,7 +40,7 @@ getGenericPacket ep = do
     -- If it parsed ok, then
     Right serverPkt -> do
       -- Return it
-      logLevel ServerboundPacket $ ambiguously (\(ServerPacket x) -> ambiguously (showPacket . runIdentity) x) serverPkt
+      logLevel ServerboundPacket $ ambiguously (\(InboundPacket x) -> ambiguously (showPacket . runIdentity) x) serverPkt
       logLevel HexDump $ indentedHex $ pkt
       return $ Just serverPkt
     -- If it didn't parse correctly, print the error and return Nothing

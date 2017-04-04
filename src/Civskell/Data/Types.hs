@@ -1,4 +1,5 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE BinaryLiterals #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -24,11 +25,14 @@ module Civskell.Data.Types
   -- Constants
   (airChunk,allCoords,protocolVersion
   -- Helper functions
-  ,blockInChunk,blockToChunk,blockToRelative,blockOnSide,showPacket,jsonyText,withLength,withListLength,indentedHex
+  ,blockInChunk,blockToChunk,blockToRelative,blockOnSide,showPacket,jsonyText,withLength,withListLength,indentedHex,serOpt
   -- Type synonyms
   ,EncryptionCouplet,PerformsIO,Short
   -- Blocks
-  ,BlockBreak(..),Block(..),BlockCoord,BlockOffset,BlockFace(..),BlockState(..)
+  ,BlockBreak(..),BlockLocation(..),BlockCoord,BlockOffset,BlockFace(..),CardinalDirection(..),BlockState(..)
+  -- Block class
+  ,Block(..),some,Air(..),showBlock,serializeBlock
+  ,Item(..)
   -- Chunks
   ,ChunkCoord(..),ChunkSection(..)
   -- Packet Information
@@ -40,9 +44,10 @@ module Civskell.Data.Types
   -- Aux Data Types
   ,PlayerData(..),UUID(..)
   -- Slot
-  ,Slot(..),slotAmount,removeCount,splitStack
+  ,Slot(..),slotAmount,removeCount,splitStack,slot
+  ,Inventory
   -- Aux Enums
-  ,Difficulty(..),Dimension(..),Gamemode(..),Hand(..),MoveMode(..),AbilityFlags(..),ServerState(..),Side(..)
+  ,Difficulty(..),Dimension(..),Gamemode(..),Hand(..),MoveMode(..),AbilityFlags(..),ServerState(..),Side(..),Window(..)
   -- Player
   ,HasPlayer,Player(..)
   -- World
@@ -54,7 +59,7 @@ module Civskell.Data.Types
   -- Packeting
   ,SendsPackets,Packeting(..)
   -- Packet
-  ,Packet(..),ClientPacket(..),ServerPacket(..)
+  ,Packet(..),ClientPacket,HandledPacket(..),OutboundPacket(..),InboundPacket(..)
   -- Configuration
   ,Configured,Configuration(..),defaultConfiguration,forkConfig
   -- Entity
@@ -70,6 +75,7 @@ module Civskell.Data.Types
   ) where
 
 import Control.Concurrent.STM
+import Data.Functor.Identity
 import Control.Eff
 import Control.Eff.Reader
 import Crypto.Cipher.AES (AES128)
@@ -106,6 +112,7 @@ protocolVersion = 316
 
 -- Type Synonyms
 type Short = Int16
+type Nibble = Word8
 -- Cipher, [Enc|Dec]
 type EncryptionCouplet = (AES128, BS.ByteString, BS.ByteString)
 -- `PerformsIO` effect
@@ -133,15 +140,15 @@ jsonyText s = "{\"text\":\"" ++ s ++ "\"}"
 data BlockBreak = InProgress Word8 | DoneBreaking
 
 -- A block coordinate, not an entity position. Ord is derivied for use in maps.
-data Block (r :: Relativity) = Block (Int,Int,Int) deriving (Eq,Ord)
-type BlockCoord = Block 'Absolute
-type BlockOffset = Block 'Relative
+data BlockLocation (r :: Relativity) = BlockLocation (Int,Int,Int) deriving (Eq,Ord)
+type BlockCoord = BlockLocation 'Absolute
+type BlockOffset = BlockLocation 'Relative
 
 instance Show BlockCoord where
-  show (Block (x,y,z)) = "(Block)<" ++ show x ++ "," ++ show y ++ "," ++ show z ++ ">"
+  show (BlockLocation (x,y,z)) = "(Block)<" ++ show x ++ "," ++ show y ++ "," ++ show z ++ ">"
 
 instance Show BlockOffset where
-  show (Block (x,y,z)) = "(Offset)<" ++ show x ++ "," ++ show y ++ "," ++ show z ++ ">"
+  show (BlockLocation (x,y,z)) = "(Offset)<" ++ show x ++ "," ++ show y ++ "," ++ show z ++ ">"
 
 {- This is a bad instance that took almost an hour to debug. It still isn't fixed, just worked around (it's derived, and we don't rely on its ordering in Map.elems)
 instance Ord BlockCoord where
@@ -149,7 +156,7 @@ instance Ord BlockCoord where
 -}
 
 instance Serialize BlockCoord where
-  serialize (Block (x,y,z)) = serialize $
+  serialize (BlockLocation (x,y,z)) = serialize $
     (shiftL (u x .&. 0x3FFFFFF) 38) .|.
     (shiftL (u y .&. 0xFFF) 26) .|.
     (u z .&. 0x3FFFFFF)
@@ -191,29 +198,39 @@ type TransactionId = Short
 type KeepAliveId = VarInt
 type TPConfirmId = VarInt
 
--- Block id, count, damage
-data Slot = EmptySlot | Slot Short Word8 Short (Maybe NbtContents) deriving Eq
+-- Item id, count, damage
+data Slot = EmptySlot | Slot (Some Item) Word8
+
+type Inventory = Map Short Slot
+
+slot :: Item i => i -> Word8 -> Slot
+slot i c = Slot (some i) c
+
+instance Eq Slot where
+  EmptySlot == EmptySlot = True
+  (Slot (SuchThat (Identity (a :: at))) ac) == (Slot (SuchThat (Identity (b :: bt))) bc) = itemId @at == itemId @bt && itemMeta a == itemMeta b && itemNBT a == itemNBT b && ac == bc
+  _ == _ = False
 
 slotAmount :: Slot -> Word8
 slotAmount EmptySlot = 0
-slotAmount (Slot _ c _ _) = c
+slotAmount (Slot _ c) = c
 
 -- Remove as many items as possible, up to count, return amount removed
 removeCount :: Word8 -> Slot -> (Word8,Slot)
 removeCount _ EmptySlot = (0,EmptySlot)
-removeCount c (Slot bid count dmg nbt) = if c < count then (c,Slot bid (count - c) dmg nbt) else (count,EmptySlot)
+removeCount c (Slot i count) = if c < count then (c,Slot i (count - c)) else (count,EmptySlot)
 
 -- Count is how many to put into first stack from second
 splitStack :: Word8 -> Slot -> (Slot,Slot)
 splitStack _ EmptySlot = (EmptySlot,EmptySlot)
-splitStack c s@(Slot bid _ dmg nbt) = (firstStack,secondStack)
+splitStack c s@(Slot i _) = (firstStack,secondStack)
   where
-    firstStack = if amtFirstStack == 0 then EmptySlot else Slot bid amtFirstStack dmg nbt
+    firstStack = if amtFirstStack == 0 then EmptySlot else Slot i amtFirstStack
     (amtFirstStack,secondStack) = removeCount c s
 
 instance Show Slot where
   show EmptySlot = "{}"
-  show (Slot bid count dmg mNbt) = "{" ++ show count ++ " of [" ++ show bid ++ ":" ++ show dmg ++ "]" ++ n mNbt ++ "}"
+  show (Slot (SuchThat (Identity (i :: it))) count) = "{" ++ show count ++ " of [" ++ show (itemId @it) ++ ":" ++ show (itemMeta i) ++ "]" ++ n (itemNBT i) ++ "}"
     where
       -- Only display the NBT if it is actually there
       n Nothing = ""
@@ -221,11 +238,19 @@ instance Show Slot where
 
 instance Serialize Slot where
   serialize EmptySlot = serialize (-1 :: Short)
-  serialize (Slot bid count dmg (Just nbt)) = serialize bid <> serialize count <> serialize dmg <> serialize (NBT "" nbt)
-  serialize (Slot bid count dmg Nothing) = serialize bid <> serialize count <> serialize dmg <> BS.singleton 0x00
+  serialize (Slot (SuchThat (Identity (i :: it))) count) = serialize (itemId @it) <> serialize count <> serialize (itemMeta i) <> (case itemNBT i of {Just nbt -> serialize (NBT "" nbt);Nothing -> BS.singleton 0x00})
+
+class Window w where
+  windowName :: String
+  windowIdentifier :: String
+  slotCount :: Short
+  -- Bool is transaction success
+  onWindowClick :: (HasWorld r,SendsPackets r,Logs r,HasPlayer r) => w -> WindowId -> Short -> TransactionId -> InventoryClickMode -> Eff r Bool
+  --clientToCivskellSlot :: Short -> Short
+  --civskellToClientSlot :: Short -> Short
 
 -- Maps coords to non-air blocks. BlockState 0 0 doesn't mean anything. Air just doesn't have anything in the map.
-data ChunkSection = ChunkSection (Map BlockOffset BlockState)
+data ChunkSection = ChunkSection (Map BlockOffset (Some Block))
 
 -- Derived instance is really long
 instance Show ChunkSection where
@@ -246,7 +271,7 @@ instance Serialize ChunkSection where
       -- Notify and crash *right away* if this gets fucked up. This only happens if we have a bad Ord instance.
       -- Note that Map.size is O(1) so we aren't wasting too much time here
       -- Merge the chunk's blocks with air because air blocks don't exist in the chunk normally
-      merged :: Map BlockOffset BlockState
+      merged :: Map BlockOffset (Some Block)
       merged = if Map.size (Map.union bs airChunk) == 4096 then Map.union bs airChunk else error "Bad Chunksection"
 
       -- `longChunks` is because Mojang likes to twist their data into weird shapes
@@ -254,8 +279,8 @@ instance Serialize ChunkSection where
       sArray = LBS.toStrict . longChunks . BB.toLazyByteString $ sBlockStates merged
 
       -- This should be the final result, but mojang is weird about chunk sections :S
-      sBlockStates :: Map BlockOffset BlockState -> BB.BitBuilder
-      sBlockStates m = foldl' (\bb bc -> aBlock (Map.findWithDefault (BlockState 0 0) bc m) `BB.append` bb) BB.empty allCoords
+      sBlockStates :: Map BlockOffset (Some Block) -> BB.BitBuilder
+      sBlockStates m = foldl' (\bb bc -> ambiguously (aBlock . runIdentity) (Map.findWithDefault (some Air) bc m) `BB.append` bb) BB.empty allCoords
 
       -- Annotate the data with its length in Minecraft Longs (should always be a whole number assuming 16^3 blocks/chunk)
       chunkData :: BS.ByteString
@@ -274,8 +299,8 @@ instance Serialize ChunkSection where
       bsChunksOf x = unfoldr (\a -> if not (LBS.null a) then Just (LBS.splitAt x a) else Nothing)
 
       -- Serialize a single block: 9 bits bid, 4 bits dmg
-      aBlock :: BlockState -> BB.BitBuilder
-      aBlock (BlockState bid dmg) = BB.fromBits 9 bid `BB.append` BB.fromBits 4 dmg
+      aBlock :: Block b => b -> BB.BitBuilder
+      aBlock (b :: bt) = BB.fromBits 9 (blockId @bt) `BB.append` BB.fromBits 4 (blockMeta b)
 
 -- Parsed form of the result of authenticating a player with Mojang
 data AuthPacket = AuthPacket UUID String [AuthProperty]
@@ -331,7 +356,32 @@ instance Serialize Dimension where
 
 data Hand = MainHand | OffHand deriving (Show,Eq)
 
-data BlockFace = Bottom | Top | North | South | West | East deriving (Show,Enum)
+data BlockFace = Bottom | Top | SideFace CardinalDirection deriving Show
+
+instance Enum BlockFace where
+  toEnum = \case
+    0 -> Bottom
+    1 -> Top
+    n -> SideFace (toEnum n)
+  fromEnum = \case
+    Bottom -> 0
+    Top -> 1
+    SideFace f -> fromEnum f
+
+data CardinalDirection = North | South | West | East deriving Show
+
+instance Enum CardinalDirection where
+  toEnum = \case
+    2 -> North
+    3 -> South
+    4 -> West
+    5 -> East
+    _ -> error "toEnum CardinalDirection"
+  fromEnum = \case
+    North -> 2
+    South -> 3
+    West -> 4
+    East -> 5
 
 -- Used in PlayerData
 data MoveMode = Sprinting | Sneaking | Walking | Gliding | Flying
@@ -401,47 +451,91 @@ data ClientStatusAction = PerformRespawn | RequestStats | OpenInventory deriving
 -- Block Coord helper functions
 -- Get the chunk an absolute coord is in
 blockToChunk :: BlockCoord -> ChunkCoord
-blockToChunk (Block (x,y,z)) = ChunkCoord (x `div` 16,y `div` 16,z `div` 16)
+blockToChunk (BlockLocation (x,y,z)) = ChunkCoord (x `div` 16,y `div` 16,z `div` 16)
 
 -- Get the relative location inside its chunk of an absolute block coord
 blockToRelative :: BlockCoord -> BlockOffset
-blockToRelative (Block (x,y,z)) = Block (f x,f y,f z)
+blockToRelative (BlockLocation (x,y,z)) = BlockLocation (f x,f y,f z)
   where
     -- We don't use negative relative coords in negative chunks
     f n = if mod n 16 < 0 then 16 + mod n 16 else mod n 16
 
 -- Get the block at a location in a chunk
-blockInChunk :: BlockOffset -> ChunkSection -> BlockState
-blockInChunk b (ChunkSection m) = fromMaybe (BlockState 0 0) (Map.lookup b m)
+blockInChunk :: BlockOffset -> ChunkSection -> Some Block
+blockInChunk b (ChunkSection m) = fromMaybe (some Air) (Map.lookup b m)
 
 -- Get the block coord adjacent to a given coord on a given side
 blockOnSide :: BlockCoord -> BlockFace -> BlockCoord
-blockOnSide (Block (x,y,z)) Bottom = Block (x,y-1,z)
-blockOnSide (Block (x,y,z)) Top = Block (x,y+1,z)
-blockOnSide (Block (x,y,z)) North = Block (x,y,z-1)
-blockOnSide (Block (x,y,z)) South = Block (x,y,z+1)
-blockOnSide (Block (x,y,z)) West = Block (x-1,y,z)
-blockOnSide (Block (x,y,z)) East = Block (x+1,y,z)
+blockOnSide (BlockLocation (x,y,z)) Bottom = BlockLocation (x,y-1,z)
+blockOnSide (BlockLocation (x,y,z)) Top = BlockLocation (x,y+1,z)
+blockOnSide (BlockLocation (x,y,z)) (SideFace North) = BlockLocation (x,y,z-1)
+blockOnSide (BlockLocation (x,y,z)) (SideFace South) = BlockLocation (x,y,z+1)
+blockOnSide (BlockLocation (x,y,z)) (SideFace West) = BlockLocation (x-1,y,z)
+blockOnSide (BlockLocation (x,y,z)) (SideFace East) = BlockLocation (x+1,y,z)
+
+some :: c a => a -> Some c
+some = ambiguate . Identity
+
+class Block b where
+  -- 1
+  blockId :: Short
+  -- "minecraft:stone"
+  blockIdentifier :: String
+  -- Stone -> 0; Granite -> 1
+  blockMeta :: b -> Nibble
+  -- By default, blocks without meta get 0
+  blockMeta _ = 0
+  -- Name in notchian english "Stone" or "Granite"
+  blockName :: b -> String
+  -- Some blocks do something when clicked
+  onClick :: forall r. (HasWorld r,HasPlayer r,SendsPackets r,Logs r) => Maybe (b -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Eff r ())
+  onClick = Nothing
+
+serializeBlock :: Block b => b -> BS.ByteString
+serializeBlock (b :: bt) = serialize $ shiftL (u (blockId @bt)) 4 .|. (v (blockMeta b) .&. 0x0f)
+  where
+    u = unsafeCoerce :: Short -> VarInt
+    v = unsafeCoerce :: Nibble -> VarInt
+
+showBlock :: Block b => b -> String
+showBlock (b :: bt) = "Block [" ++ show (blockId @bt) ++ ":" ++ show (blockMeta b) ++ "]"
+
+
+data Air = Air
+instance Block Air where
+  blockId = 0
+  blockIdentifier = "minecraft:air"
+  blockName _ = "Air"
+
+--class Block t => TileEntity t where
+  --tileEntityNBT :: t -> NBT
+
+class Item i where
+  -- TODO: Type level this when we have dependent types
+  itemId :: Short
+  itemIdentifier :: String
+  itemMeta :: i -> Short
+  itemMeta _ = 0
+  --itemPlaced :: i -> Maybe (Some Block)
+  --itemPlaced _ = Nothing
+  itemNBT :: i -> Maybe (NbtContents)
+  itemNBT _ = Nothing
+  -- TODO: param Slot i
+  parseItem :: Parser Slot
+  -- Some items do something when right clicked
+  onItemUse :: forall r. (HasWorld r,HasPlayer r,SendsPackets r,Logs r) => Maybe (i -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Eff r ())
+  onItemUse = Nothing
 
 -- The state of a block in the world (Block id, damage)
 data BlockState = BlockState Short Word8 deriving Eq
 
-instance Show BlockState where
-  show (BlockState bid dmg) = "Block [" ++ show bid ++ ":" ++ show dmg ++ "]"
-
-instance Serialize BlockState where
-  serialize (BlockState bid dmg) = serialize $ shiftL (u bid) 4 .|. (v dmg .&. 0x0f)
-    where
-      u = unsafeCoerce :: Short -> VarInt
-      v = unsafeCoerce :: Word8 -> VarInt
-
 -- All the relative coords within a chunk
 allCoords :: [BlockOffset]
-allCoords = [Block (x,y,z) | y <- [0..15], z <- [0..15], x <- [0..15]]
+allCoords = [BlockLocation (x,y,z) | y <- [0..15], z <- [0..15], x <- [0..15]]
 
 -- A chunk full of air (used in chunk serialization to fill in gaps in the Map
-airChunk :: Map BlockOffset BlockState
-airChunk = Map.fromList [(Block (x,y,z),BlockState 0 0) | x <- [0..15], z <- [0..15], y <- [0..15]]
+airChunk :: Map BlockOffset (Some Block)
+airChunk = Map.fromList [(BlockLocation (x,y,z),some Air) | x <- [0..15], z <- [0..15], y <- [0..15]]
 
 -- Helper function to format Packets during logging
 -- Takes a packet name and a list of properties (name value pairs). Empty values only show the name
@@ -456,11 +550,16 @@ data PlayerData = PlayerData
   ,nextTid :: VarInt
   ,keepAliveQue :: Set.Set VarInt
   ,nextKid :: VarInt
+  ,nextWid :: WindowId
+  -- Map of WindowId's to that window's metadata (including accessor effects)
+  ,windows :: Map WindowId (Some Window)
+  ,failedTransactions :: Set.Set (WindowId,TransactionId)
   ,holdingSlot :: Short
   ,playerPosition :: (Double,Double,Double)
   ,viewAngle :: (Float,Float)
   ,gameMode :: Gamemode
-  ,playerInventory :: Map Short Slot
+  -- player inventory is window 0
+  ,playerInventory :: Inventory
   ,diggingBlocks :: Map BlockCoord BlockBreak
   ,moveMode :: MoveMode
   ,playerState :: ServerState
@@ -468,7 +567,7 @@ data PlayerData = PlayerData
   ,clientBrand :: String
   ,clientUUID :: UUID
   ,playerId :: PlayerId
-  ,packetQueue :: TQueue (ForAny ClientPacket)
+  ,packetQueue :: TQueue (ForAny OutboundPacket)
   }
 
 -- Having transactional access to a single Player's data is an effect
@@ -507,9 +606,12 @@ data World a where
   -- TODO: redesign effect to slim down the effect interface to more general combinators, and bulk up the
   -- outside API interface to do what this is doing right now
   GetChunk :: ChunkCoord -> World ChunkSection
-  SetBlock :: BlockState -> BlockCoord -> World ()
+  RemoveBlock :: BlockCoord -> World ()
+  SetBlock :: Some Block -> BlockCoord -> World ()
   SetChunk :: ChunkSection -> ChunkCoord -> World ()
   SetColumn :: [ChunkSection] -> (Int,Int) -> Maybe BS.ByteString -> World ()
+  WorldReadTVar :: TVar a -> World a
+  WorldNewTVar :: a -> World (TVar a)
   FreshEID :: World EntityId
   FreshUUID :: World UUID
   SetPlayer :: PlayerId -> PlayerData -> World ()
@@ -520,7 +622,7 @@ data World a where
   SummonMob :: (Some Mob) -> World ()
   SummonObject :: (Some Object) -> World ()
   AllPlayers :: World [PlayerData]
-  BroadcastPacket :: ForAny ClientPacket -> World ()
+  BroadcastPacket :: ForAny OutboundPacket -> World ()
 
 -- Things that can be serialized into a BS for the network
 class Serialize s where
@@ -585,39 +687,41 @@ withListLength ls = serialize ((fromIntegral $ length ls) :: VarInt) <> BS.conca
 -- Class of types that are packets
 -- TODO: Split into Client/Server subclasses so we don't have lots of `undefined` parsePacket and onPacket everywhere
 class Packet p where
-  -- Side this packet is bound *to*
-  type PacketSide p :: Side
   -- State this packet is expected in
   type PacketState p :: ServerState
+  -- Side this packet is bound to
+  type PacketSide p :: Side
   -- Extract name-value pairs to pretty print a packet
   packetPretty :: p -> [(String,String)]
   -- Name of the packet. Example `data Meow = ...` has the name "Meow"
   packetName :: String
   -- Packet Id -- Put this in the type level? Fundep: `packetstate, packetId -> p`
   packetId :: VarInt
+
+-- Helper classes for using Data.SuchThat with TypeFamilies, which would otherwise be partially applied
+class (Packet p,PacketSide p ~ 'Server) => HandledPacket p where
   -- Spawn a PLT on receipt of each packet
   -- TODO: remove arbitrary IO in favor of STM or something else
   onPacket :: (Configured r,SendsPackets r,PerformsIO r,Logs r,HasPlayer r,HasWorld r) => p -> Eff r ()
-  onPacket p = send (LogString ErrorLog $ "Unsupported packet: " ++ showPacket p)
+  --onPacket p = send (LogString ErrorLog $ "Unsupported packet: " ++ showPacket p)
   -- Parse a packet
   parsePacket :: Parser p
 
--- Helper classes for using Data.SuchThat with TypeFamilies, which would otherwise be partially applied
-class (Packet p,PacketSide p ~ 'Server,s ~ PacketState p) => SP s p where {}
-instance (Packet p,PacketSide p ~ 'Server,s ~ PacketState p) => SP s p where {}
+class (HandledPacket p,PacketState p ~ s) => HP s p where {}
+instance (HandledPacket p,PacketState p ~ s) => HP s p where {}
 
-class (Packet p,PacketSide p ~ 'Client,s ~ PacketState p) => CP s p where {}
-instance (Packet p,PacketSide p ~ 'Client,s ~ PacketState p) => CP s p where {}
+class (Packet p,PacketSide p ~ 'Client,s ~ PacketState p,Serialize p) => ClientPacket s p | p -> s where {}
+instance (Packet p,PacketSide p ~ 'Client,s ~ PacketState p,Serialize p) => ClientPacket s p where {}
 
 -- We can't make this an actual `Show` instance without icky extentions
 showPacket :: forall p. Packet p => p -> String
 showPacket pkt = formatPacket (packetName @p) (packetPretty pkt)
 
--- A `ServerPacket s` is a thing that is a Packet, with PacketSide ~ 'Server, and PacketState ~ s
-newtype ServerPacket s = ServerPacket (SuchThatStar '[Packet,SP s])
+-- A `InboundPacket s` is a thing that is a HandledPacket with the given PacketState
+newtype InboundPacket s = InboundPacket (Some (HP s))
 
--- A `ClientPacket s` is a thing that is a Packet, with PacketSide ~ 'Client, and PacketState ~ s, and can be serialized
-newtype ClientPacket s = ClientPacket (SuchThatStar '[Packet,CP s,Serialize])
+-- A `OutboundPacket s` is a thing that is a ClientPacket with the given PacketState
+newtype OutboundPacket s = OutboundPacket (Some (ClientPacket s))
 
 -- Entities are things with properties
 class Entity m where
@@ -721,7 +825,7 @@ type SendsPackets r = Member Packeting r
 
 data Packeting a where
   -- Send a packet for any packet state
-  SendPacket :: ForAny ClientPacket -> Packeting ()
+  SendPacket :: ForAny OutboundPacket -> Packeting ()
   -- Send raw bytes over the network (used in LegacyHandshakePong)
   UnsafeSendBytes :: BS.ByteString -> Packeting ()
   BeginEncrypting :: BS.ByteString -> Packeting ()
@@ -747,7 +851,7 @@ data Configuration = Configuration
 defaultConfiguration :: Configuration
 defaultConfiguration = Configuration
   {shouldLog = \case {HexDump -> False; _ -> True}
-  ,spawnLocation = Block (0,64,0)
+  ,spawnLocation = BlockLocation (0,64,0)
   ,defaultDifficulty = Peaceful
   ,defaultDimension = Overworld
   ,defaultGamemode = Survival

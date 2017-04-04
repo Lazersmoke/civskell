@@ -14,8 +14,6 @@ import Data.Word
 import Data.Attoparsec.ByteString
 import Unsafe.Coerce
 import qualified Data.ByteString as BS
-import Data.NBT
-import qualified Data.Serialize as Ser
 
 import Civskell.Data.Types
 
@@ -34,20 +32,21 @@ parseUncompPkt = do
   return bs
 
 parseBlockFace :: Parser BlockFace
-parseBlockFace = choice
-  [specificByte 0x00 *> pure Bottom
-  ,specificByte 0x01 *> pure Top
-  ,specificByte 0x02 *> pure North
-  ,specificByte 0x03 *> pure South
-  ,specificByte 0x04 *> pure West
-  ,specificByte 0x05 *> pure East
-  ]
+parseBlockFace = toEnum . unsafeCoerce <$> anyWord8
+  --[specificByte 0x00 *> pure Bottom
+  --,specificByte 0x01 *> pure Top
+  --,specificByte 0x02 *> pure North
+  --,specificByte 0x03 *> pure South
+  --,specificByte 0x04 *> pure West
+  --,specificByte 0x05 *> pure East
+  --]
 
 parseVarString :: Parser String
 parseVarString = do
   size <- fromEnum <$> parseVarInt
   replicateM size anyChar
 
+{-
 parseSlot :: Parser Slot
 parseSlot = try emptySlot <|> nonEmptySlot
   where
@@ -66,8 +65,9 @@ parseSlot = try emptySlot <|> nonEmptySlot
           ns <- BS.pack <$> many anyWord8
           endOfInput
           return $ Slot bid cnt dmg (Just . (\(Right (NBT _ a)) -> a) $ Ser.decode (n `BS.cons` ns))
+-}
 
-parseBlockCoord :: Parser (Block r)
+parseBlockCoord :: Parser (BlockLocation r)
 parseBlockCoord = do
   xyz <- parseLong
   let x = u (shiftR xyz 38)
@@ -76,7 +76,7 @@ parseBlockCoord = do
   let y' = if y >= 2^(11 :: Integer) then y - 2^(12 :: Integer) else y
   let z = u $ xyz .&. 0x3FFFFFF
   let z' = if z >= 2^(25 :: Integer) then z - 2^(26 :: Integer) else z
-  return $ Block (x',y',z')
+  return $ BlockLocation (x',y',z')
   where
     u = unsafeCoerce :: Int64 -> Int
 

@@ -7,10 +7,12 @@ module Civskell.Packet.Serverbound where
 
 import Data.Int
 import Control.Eff.Reader (ask)
+--import Control.Eff
 import Data.List (intercalate)
 import Data.Functor.Identity
 import Data.Word
 import Data.Bits
+import qualified Data.Map as Map
 import qualified Data.ByteString as BS
 import Crypto.Hash (hash,Digest,SHA1)
 import Numeric (showHex)
@@ -18,12 +20,17 @@ import Control.Monad
 import Data.Attoparsec.ByteString hiding (take)
 import qualified Data.Attoparsec.ByteString as P
 import Data.SuchThat
+import qualified Data.Set as Set
 
 import Civskell.Data.Types hiding (Player)
 import Civskell.Tech.Parse
 import Civskell.Tech.Network
 import Civskell.Tech.Encrypt
-import Civskell.Entity.Mob
+import qualified Civskell.Entity.Base as Entity
+import qualified Civskell.Entity.Mob as Mob
+import qualified Civskell.Window as Window
+--import qualified Civskell.Tile as Tile
+import qualified Civskell.Item as Item
 import Civskell.Data.Player
 import Civskell.Data.Logging
 import Civskell.Data.World
@@ -31,40 +38,40 @@ import qualified Civskell.Packet.Clientbound as Client
 
   -- Protocol Version, Server Address, Server Port, Next State
 
-parseHandshakePacket :: Parser (ServerPacket 'Handshaking) --(Packet p, PacketSide p ~ 'Server, PacketState p ~ 'Handshaking) => Parser p
-parseHandshakePacket = choice [ServerPacket . ambiguate . Identity <$> parsePacket @Handshake, ServerPacket . ambiguate . Identity <$> parsePacket @LegacyHandshake] <?> "Handshake Packet"
+parseHandshakePacket :: Parser (InboundPacket 'Handshaking) --(Packet p, PacketSide p ~ 'Server, PacketState p ~ 'Handshaking) => Parser p
+parseHandshakePacket = choice [InboundPacket . ambiguate . Identity <$> parsePacket @Handshake, InboundPacket . ambiguate . Identity <$> parsePacket @LegacyHandshake] <?> "Handshake Packet"
 
-parseLoginPacket :: Parser (ServerPacket 'LoggingIn)
-parseLoginPacket = choice [ServerPacket . ambiguate . Identity <$> parsePacket @LoginStart, ServerPacket . ambiguate . Identity <$> parsePacket @EncryptionResponse] <?> "Login Packet"
+parseLoginPacket :: Parser (InboundPacket 'LoggingIn)
+parseLoginPacket = choice [InboundPacket . ambiguate . Identity <$> parsePacket @LoginStart, InboundPacket . ambiguate . Identity <$> parsePacket @EncryptionResponse] <?> "Login Packet"
 
-parseStatusPacket :: Parser (ServerPacket 'Status)
-parseStatusPacket = choice [ServerPacket . ambiguate . Identity <$> parsePacket @StatusRequest, ServerPacket . ambiguate . Identity <$> parsePacket @StatusPing] <?> "Status Packet"
+parseStatusPacket :: Parser (InboundPacket 'Status)
+parseStatusPacket = choice [InboundPacket . ambiguate . Identity <$> parsePacket @StatusRequest, InboundPacket . ambiguate . Identity <$> parsePacket @StatusPing] <?> "Status Packet"
 
 -- TODO: SuchThat '[SP 'Playing] Parser
-parsePlayPacket :: Parser (ServerPacket 'Playing)
+parsePlayPacket :: Parser (InboundPacket 'Playing)
 parsePlayPacket = choice
-  [ServerPacket . ambiguate . Identity <$> parsePacket @TPConfirm
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @ChatMessage
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @ClientStatus
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @ClientSettings
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @ConfirmTransaction
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @ClickWindow
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @CloseWindow
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @PluginMessage
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @UseEntity
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @KeepAlive
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @PlayerPosition
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @PlayerPositionAndLook
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @PlayerLook
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @Player
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @PlayerAbilities
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @PlayerDigging
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @EntityAction
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @HeldItemChange
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @CreativeInventoryAction
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @Animation
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @PlayerBlockPlacement
-  ,ServerPacket . ambiguate . Identity <$> parsePacket @UseItem
+  [InboundPacket . ambiguate . Identity <$> parsePacket @TPConfirm
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @ChatMessage
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @ClientStatus
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @ClientSettings
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @ConfirmTransaction
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @ClickWindow
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @CloseWindow
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @PluginMessage
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @UseEntity
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @KeepAlive
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @PlayerPosition
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @PlayerPositionAndLook
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @PlayerLook
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @Player
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @PlayerAbilities
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @PlayerDigging
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @EntityAction
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @HeldItemChange
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @CreativeInventoryAction
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @Animation
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @PlayerBlockPlacement
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @UseItem
   ] <?> "Play Packet"
 
 -- TODO: Re-specify parsers for different server states
@@ -80,6 +87,7 @@ instance Packet Handshake where
     ,("Server Address",addr ++ ":" ++ show port)
     ,("Requesting change to",case newstate of {1 -> "Status"; 2 -> "Login"; _ -> "Invalid"})
     ]
+instance HandledPacket Handshake where
   -- Normal handshake recieved
   onPacket (Handshake protocol _addr _port newstate) = if fromIntegral protocol == protocolVersion
     -- They are using the correct protocol version, so continue as they request
@@ -105,6 +113,7 @@ instance Packet LegacyHandshake where
   packetName = "LegacyHandshake"
   packetId = 0xFE
   packetPretty LegacyHandshake = []
+instance HandledPacket LegacyHandshake where
   -- Legacy response
   onPacket LegacyHandshake = iSolemnlySwearIHaveNoIdeaWhatImDoing . serialize $ Client.LegacyHandshakePong
   parsePacket = do
@@ -119,6 +128,7 @@ instance Packet TPConfirm where
   packetName = "TPConfirm"
   packetId = 0x00
   packetPretty (TPConfirm i) = [("Teleport Id",show i)]
+instance HandledPacket TPConfirm where
   -- Check the tid presented against all the tid's we have stored
   onPacket (TPConfirm tid) = clearTeleport tid >>= \case
     -- If it's valid, say so
@@ -136,7 +146,6 @@ instance Packet TabComplete where
   packetName = "TabComplete"
   packetId = 0x01
   packetPretty (TabComplete) = []
-  parsePacket = error "No parser for packet"
 
 data ChatMessage = ChatMessage String
 instance Packet ChatMessage  where
@@ -145,12 +154,15 @@ instance Packet ChatMessage  where
   packetName = "ChatMessage "
   packetId = 0x02
   packetPretty (ChatMessage msg) = [("Message",msg)]
+instance HandledPacket ChatMessage where
   onPacket (ChatMessage msg) = case msg of
     "/gamemode 1" -> setGamemode Creative
     "/gamemode 0" -> setGamemode Survival
     "chunks" -> forM_ [0..48] $ \x -> sendPacket =<< colPacket ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
-    "creeper" -> summonMob (Creeper defaultInsentient 0 False False)
-    "dump entities" -> summonMob (Creeper defaultInsentient 0 False False)
+    "creeper" -> summonMob (Mob.Creeper Entity.defaultInsentient 0 False False)
+    "/testchest" -> do
+      w <- openNewWindow (Window.Chest $ BlockLocation (0,0,0)) (jsonyText "Test Chest")
+      sendPacket (Client.WindowItems w $ Map.fromList [(5,slot Item.Stick 3)])
     _ -> do
       broadcastPacket (Client.ChatMessage (jsonyText msg) 0)
       name <- clientUsername <$> getPlayer
@@ -167,6 +179,7 @@ instance Packet ClientStatus where
   packetName = "ClientStatus"
   packetId = 0x03
   packetPretty (ClientStatus status) = [("Status",show status)]
+instance HandledPacket ClientStatus where
   onPacket (ClientStatus status) = case status of
     PerformRespawn -> logp "Client wants to perform respawn"
     RequestStats -> logp "Client requests stats"
@@ -193,6 +206,7 @@ instance Packet ClientSettings where
     ,("Skin bitmask",show skin)
     ,("Main Hand",show hand)
     ]
+instance HandledPacket ClientSettings where
   -- Teleport the client when they send this packet because reasons
   -- 0x00 means all absolute (It's a relativity flag bitfield)
   onPacket (ClientSettings _loc _viewDist _chatMode _chatColors _skin _hand) = pendTeleport (1.0,130.0,1.0) (0.0,0.0) 0x00
@@ -213,6 +227,14 @@ instance Packet ConfirmTransaction where
   packetName = "ConfirmTransaction"
   packetId = 0x05
   packetPretty (ConfirmTransaction wid transId acc) = [("Window Id",show wid),("Transaction Id",show transId),("Accepted",if acc then "Yes" else "No")]
+instance HandledPacket ConfirmTransaction where
+  onPacket (ConfirmTransaction wid transId _acc) = do
+    apologized <- Set.member (wid,transId) . failedTransactions <$> getPlayer
+    if apologized
+      then do
+        logg "Client apologized for bad transaction"
+        overPlayer $ \p -> p {failedTransactions = Set.delete (wid,transId) $ failedTransactions p}
+      else loge "Client apologized for non-existant transaction"
   parsePacket = do
     specificVarInt 0x05 <?> "Packet Id 0x05"
     ConfirmTransaction
@@ -227,7 +249,8 @@ instance Packet EnchantItem where
   packetName = "EnchantItem"
   packetId = 0x06
   packetPretty (EnchantItem) = []
-  parsePacket = error "No parser for packet"
+--instance HandledPacket EnchantItem where
+  --parsePacket = error "No parser for packet"
 
 -- Slot Number
 data ClickWindow = ClickWindow WindowId Short TransactionId InventoryClickMode Slot
@@ -237,35 +260,13 @@ instance Packet ClickWindow where
   packetName = "ClickWindow"
   packetId = 0x07
   packetPretty (ClickWindow wid slotNum transId invMode item) = [("Window Id",show wid),("Slot Number",show slotNum),("Transaction Id",show transId),("Inventory Mode",show invMode),("Subject Item",show item)]
-  -- TODO: check if the slot matches the client provided one
-  onPacket (ClickWindow wid slotNum transId mode clientProvidedSlot) = if wid /= 0 then loge "Non-player inventories not supported" else case mode of
-    NormalClick rClick -> do
-      -- Get the current state of affairs, and purely decide what to do with them
-      doInventoryClick <$> getInventorySlot (clientToCivskellSlot slotNum) <*> getInventorySlot (-1) <*> pure rClick <*> pure clientProvidedSlot >>= \case
-        -- If everything is in order
-        Just (newSlot,newHand) -> do
-          -- Set the slots to their new values
-          setInventorySlot (-1) newHand
-          setInventorySlot (clientToCivskellSlot slotNum) newSlot
-          -- Confirm the transaction was successful
-          sendPacket (Client.ConfirmTransaction wid transId True)
-        -- If something went wrong
-        Nothing -> do
-          -- Log to console
-          loge "Failed to confirm client transaction"
-          -- And tell the client it should say sorry
-          sendPacket (Client.ConfirmTransaction wid transId False)
-      -- Right click is exactly the same as left when shiftclicking
-    -- TODO: implement the rest of the clicking bs that minecraft does
-    ShiftClick _rClick -> pure ()
-    NumberKey _num -> pure ()
-    MiddleClick -> pure ()
-    ItemDropOut _isStack -> pure ()
-    -- "Painting" mode
-    PaintingMode _mode -> loge "Painting mode not supported"
-    -- Double click
-    DoubleClick -> loge "Double click not supported"
-
+instance HandledPacket ClickWindow where
+  -- This function needs to change items in the window Id it is given
+  onPacket (ClickWindow wid slotNum transId mode _clientProvidedSlot) = do
+    logp $ "Player clicked window " ++ show wid ++ " at slot number " ++ show slotNum
+    failing <- not . Set.null . failedTransactions <$> getPlayer
+    (SuchThat (Identity (w :: wt))) <- flip (Map.!) wid . windows <$> getPlayer
+    if failing then loge "Failed, but client is still sending clicks" else onWindowClick @wt w wid slotNum transId mode >>= sendPacket . Client.ConfirmTransaction wid transId
   parsePacket = do
     specificVarInt 0x07 <?> "Packet Id 0x07"
     wid <- parseWID
@@ -281,49 +282,8 @@ instance Packet ClickWindow where
       ,guard (elem b [0,1,2,4,5,6,8,9,10]) *> specificVarInt 0x05 *> pure (PaintingMode b)
       ,guard (b == 0) *> specificVarInt 0x06 *> pure DoubleClick
       ]
-    sl <- parseSlot
+    sl <- Item.parseSlot
     return $ ClickWindow wid slotNum transId mode sl
-
-doInventoryClick :: Slot -> Slot -> Bool -> Slot -> Maybe (Slot,Slot)
-doInventoryClick actualSlot currHeld rClick shouldBeSlot = if actualSlot /= shouldBeSlot then Nothing else case actualSlot of
-  EmptySlot -> case currHeld of
-    -- Both empty -> No-op
-    EmptySlot -> Just (actualSlot,currHeld)
-    -- Putting something in an empty slot
-    Slot currbid currcount currdmg currnbt -> Just (placed,newHeld)
-      where
-        -- If we right click, only place one item, left click places all of them
-        delta = if rClick then 1 else 64
-        -- If we don't have enough items to fill the delta, place them all and end up with an EmptySlot, otherwise remove the delta
-        newHeld = if currcount <= delta then EmptySlot else Slot currbid (currcount - delta) currdmg currnbt
-        -- The slot now has either the full delta, or our best attempt at filling the delta
-        placed = Slot currbid (min delta currcount) currdmg currnbt
-  Slot actbid actcount actdmg actnbt -> case currHeld of
-    -- Picking something up into an empty hand
-    EmptySlot -> Just (left,picked)
-      where
-        -- If we right click, take half, otherwise take as much as we can
-        delta = if rClick then actcount `div` 2 else min actcount 64
-        -- If we took it all, leave nothing, otherwise take what we took
-        left = if actcount == delta then EmptySlot else Slot actbid (actcount - delta) actdmg actnbt
-        -- We are now holding everything we picked up
-        picked = Slot actbid delta actdmg actnbt
-    -- Two item stacks interacting
-    Slot currbid currcount currdmg currnbt -> case currbid == actbid && currdmg == actdmg && currnbt == actnbt of
-      -- Like stacks; combine
-      True -> Just (inSlot,stillHeld)
-        where
-          -- How many items we can possibly place in the slot
-          spaceRemaining = 64 - actcount
-          -- If we right click, try to put one in, but put zero in if its already full, otherwise put as many as we can in
-          -- NOTE: delta <= currcount and spaceRemaining
-          delta = if rClick then min 1 spaceRemaining else max currcount spaceRemaining
-          -- If we put down everything, empty our hand, otherwise remove what we put down
-          stillHeld = if currcount == delta then EmptySlot else Slot currbid (currcount - delta) currdmg currnbt
-          -- Put the stuff we put into the slot, into the slot
-          inSlot = Slot actbid (actcount + delta) actdmg actnbt
-      -- Unlike stacks; swap
-      False -> Just (currHeld,actualSlot)
 
 data CloseWindow = CloseWindow WindowId
 instance Packet CloseWindow where
@@ -332,7 +292,12 @@ instance Packet CloseWindow where
   packetName = "CloseWindow"
   packetId = 0x08
   packetPretty (CloseWindow wid) = [("Window Id", show wid)]
-  onPacket (CloseWindow wid) = logp $ "Player is closing a window with id: " ++ show wid
+instance HandledPacket CloseWindow where
+  onPacket (CloseWindow w) = do
+    logp $ "Player is closing a window with id: " ++ show w
+    case w of
+      0 -> pure ()
+      wid -> overPlayer $ \p -> p {windows = Map.delete wid (windows p)}
   parsePacket = do
     specificVarInt 0x08 <?> "Packet Id 0x08"
     CloseWindow <$> parseWID
@@ -345,6 +310,7 @@ instance Packet PluginMessage where
   packetId = 0x09
   packetPretty (PluginMessage "MC|Brand" cliBrand) = [("Client Brand",show (BS.tail cliBrand))]
   packetPretty (PluginMessage chan bs) = [("Channel",show chan),("Payload",show bs)]
+instance HandledPacket PluginMessage where
   -- BS.tail removes the length prefixing
   onPacket (PluginMessage "MC|Brand" cliBrand) = setBrand $ show (BS.tail cliBrand)
   onPacket p = logp $ "Unsupported Plugin Message: " ++ showPacket p
@@ -361,6 +327,7 @@ instance Packet UseEntity where
   packetName = "UseEntity"
   packetId = 0x0A
   packetPretty (UseEntity targetEID action) = [("Target",show targetEID),("Action",show action)]
+instance HandledPacket UseEntity where
   onPacket (UseEntity targetEID action) = do
     (SuchThat (Identity (_ :: m))) <- getEntity targetEID
     logg $ entityName @m ++ " was " ++ show action ++ "(ed)"
@@ -381,6 +348,7 @@ instance Packet KeepAlive where
   packetName = "KeepAlive"
   packetId = 0x0B
   packetPretty (KeepAlive i) = [("Keep Alive Id",show i)]
+instance HandledPacket KeepAlive where
   onPacket (KeepAlive kid) = logp $ "Player sent keep alive pong with id: " ++ show kid
   parsePacket  = do
     specificVarInt 0x0B <?> "Packet Id 0x0B"
@@ -393,6 +361,7 @@ instance Packet PlayerPosition where
   packetName = "PlayerPosition"
   packetId = 0x0C
   packetPretty (PlayerPosition (x,y,z) grounded) = [("Positon",show (x,y,z)),("On Ground",show grounded)]
+instance HandledPacket PlayerPosition where
   onPacket (PlayerPosition (x,y,z) _grounded) = setPlayerPos (x,y,z)
   parsePacket = do
     specificVarInt 0x0C <?> "Packet Id 0x0C"
@@ -407,6 +376,7 @@ instance Packet PlayerPositionAndLook where
   packetName = "PlayerPositionAndLook"
   packetId = 0x0D
   packetPretty (PlayerPositionAndLook (x,y,z) (yaw,pitch) grounded) = [("Positon",show (x,y,z)),("Looking",show (yaw,pitch)),("On Ground",show grounded)]
+instance HandledPacket PlayerPositionAndLook where
   onPacket (PlayerPositionAndLook (x,y,z) (yaw,pitch) _grounded) = do
     setPlayerPos (x,y,z)
     setPlayerViewAngle (yaw,pitch)
@@ -424,6 +394,7 @@ instance Packet PlayerLook where
   packetName = "PlayerLook"
   packetId = 0x0E
   packetPretty (PlayerLook  (yaw,pitch) grounded) = [("Looking",show (yaw,pitch)),("On Ground",show grounded)]
+instance HandledPacket PlayerLook where
   onPacket (PlayerLook (y,p) _grounded) = setPlayerViewAngle (y,p)
   parsePacket = do
     specificVarInt 0x0E <?> "Packet Id 0x0E"
@@ -438,6 +409,7 @@ instance Packet Player where
   packetName = "Player"
   packetId = 0x0F
   packetPretty (Player grounded) = [("On Ground",show grounded)]
+instance HandledPacket Player where
   onPacket (Player _grounded) = pure ()
   parsePacket = do
     specificVarInt 0x0F <?> "Packet Id 0x0F"
@@ -450,7 +422,8 @@ instance Packet VehicleMove where
   packetName = "VehicleMove"
   packetId = 0x10
   packetPretty (VehicleMove) = []
-  parsePacket = error "No parser for packet"
+--instance HandledPacket VehicleMove where
+  --parsePacket = error "No parser for packet"
 
 data SteerBoat = SteerBoat
 instance Packet SteerBoat where
@@ -459,7 +432,8 @@ instance Packet SteerBoat where
   packetName = "SteerBoat"
   packetId = 0x11
   packetPretty (SteerBoat) = []
-  parsePacket = error "No parser for packet"
+--instance HandledPacket SteerBoat where
+  --parsePacket = error "No parser for packet"
 
 data PlayerAbilities = PlayerAbilities AbilityFlags Float Float
 instance Packet PlayerAbilities where
@@ -470,6 +444,7 @@ instance Packet PlayerAbilities where
   packetPretty (PlayerAbilities (AbilityFlags i f af c) flySpeed fovMod) = u i "Invulnerable" ++ u f "Flying" ++ u af "Allow Flying" ++ u c "Creative" ++ [("Flying Speed",show flySpeed),("FOV Modifier",show fovMod)]
     where
       u b s = if b then [(s,"")] else []
+instance HandledPacket PlayerAbilities where
   -- Only sent when flight is toggled
   onPacket (PlayerAbilities (AbilityFlags _i f _af _c) _flySpeed _fovMod) = if f then setMoveMode Flying else setMoveMode Walking
   parsePacket = do
@@ -493,6 +468,7 @@ instance Packet PlayerDigging where
     DropItem isStack -> [("Action","Drop " ++ if isStack then "Stack" else "Item")]
     ShootArrowOrFinishEating -> [("Action","inb4 Minecraft")]
     SwapHands -> [("Action","Swap items in hands")]
+instance HandledPacket PlayerDigging where
   onPacket p@(PlayerDigging action) = case action of
     StartDig block _side -> do
       logp $ "Started digging block: " ++ show block
@@ -513,9 +489,10 @@ instance Packet PlayerDigging where
       heldItem <- getInventorySlot heldSlot
       -- Drop the entire stack, or at most one item
       let (dropped,newHeld) = splitStack (if isStack then 64 else 1) heldItem
+      logp $ "Dropping: " ++ show dropped
       setInventorySlot heldSlot newHeld
       plaLoc <- playerPosition <$> getPlayer
-      summonObject (Item (BaseEntity (EntityLocation plaLoc (0,0)) (EntityVelocity (0,0,0)) 0x00 300 "" False False False) dropped)
+      summonObject (Mob.Item (Entity.BaseEntity (EntityLocation plaLoc (0,0)) (EntityVelocity (0,0,0)) 0x00 300 "" False False False) dropped)
     _ -> loge $ "Unhandled Player Dig Action: " ++ showPacket p
 
   parsePacket = do
@@ -545,6 +522,7 @@ instance Packet EntityAction where
     LeaveBed -> [("Action","Leave Bed")]
     HorseInventory -> [("Action","Open Horse Inventory")]
     ElytraFly -> [("Action","Elytra Fly")]
+instance HandledPacket EntityAction where
   -- We know the eid because its us
   onPacket (EntityAction _eid action) = case action of
     Sneak True -> setMoveMode Sneaking
@@ -576,7 +554,8 @@ instance Packet SteerVehicle where
   packetName = "SteerVehicle"
   packetId = 0x15
   packetPretty (SteerVehicle) = []
-  parsePacket = error "No parser for packet"
+--instance HandledPacket SteerVehicle where
+  --parsePacket = error "No parser for packet"
 
 data ResourcePackStatus = ResourcePackStatus
 instance Packet ResourcePackStatus where
@@ -585,7 +564,8 @@ instance Packet ResourcePackStatus where
   packetName = "ResourcePackStatus"
   packetId = 0x16
   packetPretty (ResourcePackStatus) = []
-  parsePacket = error "No parser for packet"
+--instance HandledPacket ResourcePackStatus where
+  --parsePacket = error "No parser for packet"
 
 data HeldItemChange = HeldItemChange Short
 instance Packet HeldItemChange where
@@ -594,6 +574,7 @@ instance Packet HeldItemChange where
   packetName = "HeldItemChange"
   packetId = 0x17
   packetPretty (HeldItemChange i) = [("Slot",show i)]
+instance HandledPacket HeldItemChange where
   -- Update the slot they are holding in the player data
   onPacket (HeldItemChange slotNum) = setHolding slotNum
   parsePacket = do
@@ -606,16 +587,17 @@ instance Packet CreativeInventoryAction where
   type PacketState CreativeInventoryAction = 'Playing
   packetName = "CreativeInventoryAction"
   packetId = 0x18
-  packetPretty (CreativeInventoryAction slot item) = [("Slot",show slot),("New Item", show item)]
+  packetPretty (CreativeInventoryAction slotNum item) = [("Slot",show slotNum),("New Item", show item)]
+instance HandledPacket CreativeInventoryAction where
   -- Clients handle all the dirty details such that this is just a "set slot" packet
   onPacket (CreativeInventoryAction slotNum slotDat) = do
     logp $ "Player creatively set slot " ++ show slotNum ++ " to {" ++ show slotDat ++ "}"
     -- TODO: This will echo back a SetSlot packet, add another way to access the effect inventory
     -- Maybe that is ok? idk requires further testing to be sure
-    setInventorySlot (clientToCivskellSlot slotNum) slotDat
+    setInventorySlot slotNum slotDat
   parsePacket = do
     specificVarInt 0x18 <?> "Packet Id 0x18"
-    CreativeInventoryAction <$> parseShort <*> parseSlot
+    CreativeInventoryAction <$> parseShort <*> Item.parseSlot
 
 data UpdateSign = UpdateSign
 instance Packet UpdateSign where
@@ -624,7 +606,8 @@ instance Packet UpdateSign where
   packetName = "UpdateSign"
   packetId = 0x19
   packetPretty (UpdateSign) = []
-  parsePacket = error "No parser for packet"
+--instance HandledPacket UpdateSign where
+  --parsePacket = error "No parser for packet"
 
 data Animation = Animation Hand
 instance Packet Animation where
@@ -633,6 +616,7 @@ instance Packet Animation where
   packetName = "Animation"
   packetId = 0x1A
   packetPretty (Animation hand) = [("Hand",show hand)]
+instance HandledPacket Animation where
   -- Don't do anything about the spammy animation packets
   onPacket (Animation _anim) = return ()
   parsePacket = do
@@ -646,7 +630,8 @@ instance Packet Spectate where
   packetName = "Spectate"
   packetId = 0x1B
   packetPretty (Spectate) = []
-  parsePacket = error "No parser for packet"
+--instance HandledPacket Spectate where
+  --parsePacket = error "No parser for packet"
 
 data PlayerBlockPlacement = PlayerBlockPlacement BlockCoord BlockFace Hand (Float,Float,Float)
 instance Packet PlayerBlockPlacement where
@@ -655,19 +640,27 @@ instance Packet PlayerBlockPlacement where
   packetName = "PlayerBlockPlacement"
   packetId = 0x1C
   packetPretty (PlayerBlockPlacement block _side hand _cursorCoord) = [("Block",show block),("Hand",show hand)]
-  onPacket (PlayerBlockPlacement block side hand _cursorCoord) = do
-    -- Find out what item they are trying to place
-    heldSlot <- if hand == MainHand then holdingSlot <$> getPlayer else pure 45
-    heldItem <- getInventorySlot heldSlot
-    case heldItem of
-      -- If they right click on a block with an empty hand, this will happen
-      EmptySlot -> logp "Trying to place air"
-      Slot bid icount dmg nbt -> do
-        -- Remove item from inventory
-        let newSlot = if icount == 1 then EmptySlot else (Slot bid (icount - 1) dmg nbt)
-        setInventorySlot heldSlot newSlot
-        -- TODO: map item damage to block damage somehow
-        setBlock (BlockState bid 0) (blockOnSide block side)
+instance HandledPacket PlayerBlockPlacement where
+  onPacket (PlayerBlockPlacement block side hand cursorCoord) = do
+    sb <- getBlock block
+    let oc = ambiguously (\(Identity (b :: bt)) -> ($b) <$> onClick @bt) sb
+    case oc of
+      Just cb -> cb block side hand cursorCoord
+      Nothing -> do
+        -- Find out what item they are trying to place
+        heldSlot <- if hand == MainHand then holdingSlot <$> getPlayer else pure 45
+        msl <- getInventorySlot (heldSlot + 36)
+        case msl of
+          EmptySlot -> logp "No item to use"
+          Slot (SuchThat (Identity (i :: it))) _cnt -> case onItemUse @it of
+            -- If they right click on a block with an empty hand, this will happen
+            Nothing -> logp "No onItemUse for item"
+            Just oiu -> oiu i block side hand cursorCoord
+            -- Remove item from inventory
+            --let newSlot = if icount == 1 then EmptySlot else (Slot i (icount - 1))
+            --setInventorySlot heldSlot newSlot
+            -- TODO: map item damage to block damage somehow
+            --setBlock (Tile.Chest North []) (blockOnSide block side)
   parsePacket = do
     specificVarInt 0x1C <?> "Packet Id 0x1C"
     PlayerBlockPlacement
@@ -683,6 +676,7 @@ instance Packet UseItem where
   packetName = "UseItem"
   packetId = 0x1D
   packetPretty (UseItem hand) = [("Hand",show hand)]
+instance HandledPacket UseItem where
   onPacket (UseItem hand) = do
     -- Decide which slot they are using, and find the item in that hand
     held <- getInventorySlot =<< (case hand of {MainHand -> holdingSlot <$> getPlayer; OffHand -> pure 45})
@@ -699,6 +693,7 @@ instance Packet LoginStart where
   packetId = 0x00
   packetPretty (LoginStart name) = [("Username",name)]
   -- Do the login process
+instance HandledPacket LoginStart where
   -- LoginStart packets contain their username as a String
   onPacket (LoginStart name) = do
     -- Log that they are logging in
@@ -727,6 +722,7 @@ instance Packet EncryptionResponse where
     [("Shared Secret Hash",(take 7 $ show (hash ss :: Digest SHA1)) ++ "...")
     ,("Verify Token Hash",(take 7 $ show (hash vt :: Digest SHA1)) ++ "...")
     ]
+instance HandledPacket EncryptionResponse where
   -- Wait for them to send an Encryption Response
   onPacket (EncryptionResponse ssFromClient vtFromClient) = do
     -- TODO: get this from getPlayerState >>= \(AwaitingEcnryptionResponse vt sId) ->
@@ -781,9 +777,9 @@ instance Packet EncryptionResponse where
             -- Send initial world. Need a 7x7 grid or the client gets angry with us
             forM_ [0..48] $ \x -> sendPacket =<< colPacket ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
             -- Send an initial blank inventory
-            sendPacket (Client.WindowItems 0 (replicate 45 EmptySlot))
+            sendPacket (Client.WindowItems 0 Map.empty)
             -- Give them some stone (for testing)
-            setInventorySlot 4 (Slot 1 32 0 Nothing)
+            setInventorySlot 4 (Slot (some Item.Stone) 32)
             ps <- allPlayers
             sendPacket (Client.PlayerListItem (map (\p -> (clientUUID p,PlayerListAdd (clientUsername p) authProps Survival 0 Nothing)) ps))
   parsePacket = do
@@ -801,6 +797,7 @@ instance Packet StatusRequest where
   packetName = "StatusRequest"
   packetId = 0x00
   packetPretty StatusRequest = []
+instance HandledPacket StatusRequest where
   onPacket _ = do
     -- Get the list of connected players so we can show info about them in the server menu
     playersOnline <- allPlayers
@@ -819,6 +816,7 @@ instance Packet StatusPing where
   packetName = "StatusPing"
   packetId = 0x01
   packetPretty (StatusPing i) = [("Ping Token","0x" ++ showHex i "")]
+instance HandledPacket StatusPing where
   -- Send a pong with the same ping token right away
   onPacket (StatusPing l) = sendPacket (Client.StatusPong l)
   parsePacket = do

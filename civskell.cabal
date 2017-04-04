@@ -15,7 +15,7 @@ cabal-version:       >=1.10
 
 library
   hs-source-dirs:      src
-  exposed-modules:     Civskell, Civskell.Data.Types, Civskell.Data.World, Civskell.Data.Player, Civskell.Tech.Network, Civskell.Tech.Encrypt, Civskell.Tech.Parse, Civskell.Packet.Serverbound, Civskell.Packet.Clientbound, Civskell.Data.Logging, Civskell.Data.Networking, Civskell.Entity.Mob
+  exposed-modules:     Civskell, Civskell.Data.Types, Civskell.Data.World, Civskell.Data.Player, Civskell.Tech.Network, Civskell.Tech.Encrypt, Civskell.Tech.Parse, Civskell.Packet.Serverbound, Civskell.Packet.Clientbound, Civskell.Data.Logging, Civskell.Data.Networking, Civskell.Entity.Mob, Civskell.Tile, Civskell.Item, Civskell.Entity.Base, Civskell.Window
   build-depends:       base >= 4.7 && < 5, network, bytestring, utf8-string, random, cryptonite, pretty-hex, time, http-client, http-client-tls, AES, reee-monads, zlib, cereal, nbt, containers, binary-strict, attoparsec, ghost-buster, aeson, unordered-containers, text, stm
   default-language:    Haskell2010
 

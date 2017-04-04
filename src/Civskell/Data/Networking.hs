@@ -51,9 +51,9 @@ removeCompression = send . RemoveCompression
 
 -- Send a Client Packet over the network
 sendPacket :: (SendsPackets r,Serialize p,Packet p,PacketSide p ~ 'Client) => p -> Eff r ()
-sendPacket = sendAnyPacket . ambiguate . ClientPacket . ambiguate . Identity
+sendPacket = sendAnyPacket . ambiguate . OutboundPacket . ambiguate . Identity
 
-sendAnyPacket :: SendsPackets r => ForAny ClientPacket -> Eff r ()
+sendAnyPacket :: SendsPackets r => ForAny OutboundPacket -> Eff r ()
 sendAnyPacket = send . SendPacket
 
 iSolemnlySwearIHaveNoIdeaWhatImDoing :: SendsPackets r => BS.ByteString -> Eff r ()
@@ -71,7 +71,7 @@ runPacketing (Pure x) = Pure x
 runPacketing (Eff u q) = case u of
   Weaken restOfU -> Eff restOfU (Singleton (runPacketing . runTCQ q))
   -- Unpack from the existentials to get the type information into a skolem, scoped tyvar
-  Inject (SendPacket (SuchThat (ClientPacket (SuchThat (Identity (s :: a)))))) -> do
+  Inject (SendPacket (SuchThat (OutboundPacket (SuchThat (Identity (s :: a)))))) -> do
     -- Log its hex dump
     logLevel ClientboundPacket $ showPacket s
     logLevel HexDump $ indentedHex (serialize s)

@@ -9,8 +9,10 @@ module Civskell (module Civskell.Data.Types, runServer) where
 
 import Control.Concurrent (forkIO,threadDelay)
 import Data.Functor.Identity
+import qualified Data.Set as Set
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
+import qualified Data.Map as Map
 import Control.Eff (Eff,runM,send)
 import Control.Eff.Reader
 import System.Exit (exitSuccess)
@@ -23,11 +25,47 @@ import Civskell.Data.Player
 import Civskell.Data.Types
 import Civskell.Data.World
 import Civskell.Tech.Network
+import qualified Civskell.Tile as Tile
+import qualified Civskell.Window as Window
 import qualified Civskell.Packet.Clientbound as Client
 import qualified Civskell.Packet.Serverbound as Server
 
 runServer :: Configuration -> IO ()
 runServer c = runM $ runReader' c startListening
+
+testInitWorld :: WorldData
+testInitWorld = initWorld {chunks = Map.fromList [(ChunkCoord (cx,cy,cz),exampleChunk) | cx <- [-3..3], cz <- [-3..3], cy <- [0..7]]}
+  where
+    exampleChunk = ChunkSection $ Map.fromList [(BlockLocation (x,y,z),some Tile.Stone) | x <- [0..15], y <- [0..15], z <- [0..15]]
+
+-- We need the TQueue here to be the same one that is running in the sending thread
+initPlayer :: (SendsPackets r, PerformsIO r, HasWorld r, Logs r) => TQueue (ForAny OutboundPacket) -> Eff (Player ': r) a -> Eff r a
+initPlayer pq e = do
+  t <- send (newTVarIO playerData)
+  runPlayer t e
+  where
+    playerData = PlayerData
+      {teleportConfirmationQue = Set.empty
+      ,nextTid = 0
+      ,keepAliveQue = Set.empty
+      ,nextKid = 0
+      ,nextWid = 1
+      ,windows = Map.fromList [(0,some Window.Player)]
+      ,playerInventory = Map.empty
+      ,failedTransactions = Set.empty
+      ,holdingSlot = 0
+      ,playerPosition = (0,0,0)
+      ,viewAngle = (0,0)
+      ,gameMode = Survival
+      ,diggingBlocks = Map.empty
+      ,moveMode = Walking
+      ,playerState = Handshaking
+      ,clientUsername = undefined
+      ,clientBrand = undefined
+      ,clientUUID = undefined
+      ,playerId = undefined
+      ,packetQueue = pq
+      }
 
 -- Send new connections to connLoop, and listen on 25565
 -- Note for testing: Use virtualbox port forwarding to test locally
@@ -88,7 +126,7 @@ connLoop sock = do
   connLoop sock
 
 -- TODO: remove PerformsIO constraint in favor of special STM effects or something
-flushPackets :: (Logs r,SendsPackets r,PerformsIO r) => TQueue (ForAny ClientPacket) -> Eff r ()
+flushPackets :: (Logs r,SendsPackets r,PerformsIO r) => TQueue (ForAny OutboundPacket) -> Eff r ()
 flushPackets q = send (atomically $ readTQueue q) >>= sendAnyPacket >> flushPackets q
 
 -- Get packet -> Spawn thread -> Repeat loop for players
@@ -102,7 +140,7 @@ packetLoop = do
     -- You can't substitute `onPacket q` for `op` except using the let binding as shown below. The type gods
     -- will become angry and smite you where you stand. TODO: investigate appeasing the type gods by enabling/
     -- disabling the monomorphism restriction
-    Just (SuchThat (ServerPacket (SuchThat (Identity q)))) -> do
+    Just (SuchThat (InboundPacket (SuchThat (Identity q)))) -> do
       let op = onPacket q
       send . (>> pure ()) . forkIO =<< (runM <$>) . forkConfig =<< forkLogger =<< forkNetwork =<< forkWorld =<< (runPacketing <$> forkPlayer op)
   packetLoop
