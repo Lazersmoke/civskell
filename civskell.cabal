@@ -1,14 +1,14 @@
 name:                civskell
 version:             0.1.0.0
-synopsis:            Initial project template from stack
+synopsis:            Civcraft-like minecraft server in Haskell
 description:         Please see README.md
-homepage:            https://github.com/githubuser/civskell#readme
+homepage:            https://github.com/Lazersmoke/civskell
 license:             BSD3
 license-file:        LICENSE
-author:              Author name here
-maintainer:          example@example.com
-copyright:           2017 Author name here
-category:            Web
+author:              Lazersmoke
+maintainer:          lazersmoke@gmail.com
+copyright:           2017 Lazersmoke :P
+category:            Mineman
 build-type:          Simple
 extra-source-files:  README.md
 cabal-version:       >=1.10
@@ -28,4 +28,4 @@ executable civskell-exe
 
 source-repository head
   type:     git
-  location: https://github.com/githubuser/civskell
+  location: https://github.com/Lazersmoke/civskell
