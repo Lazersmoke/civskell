@@ -6,4 +6,4 @@ import Civskell
 main :: IO ()
 main = do
   putStrLn "Starting..."
-  runServer defaultConfiguration
+  runServer defaultConfiguration {shouldLog = \l -> case l of {NormalLog -> True; TaggedLog _ -> True; _ -> False}}

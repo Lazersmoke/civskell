@@ -63,10 +63,12 @@ openNewWindow winType title = do
   sendPacket (Client.OpenWindow wid (some winType) title Nothing)
   return wid
 
-openWindowWithItems :: (HasWorld r,SendsPackets r,HasPlayer r,Window w) => w -> String -> TVar Inventory -> Eff r WindowId
-openWindowWithItems ty name tI = do
+openWindowWithItems :: (HasWorld r,SendsPackets r,HasPlayer r,Logs r,Window w) => w -> String -> TVar Inventory -> Eff r WindowId
+openWindowWithItems (ty :: tyT) name tI = do
   wid <- openNewWindow ty name
-  items <- send (WorldReadTVar tI) 
+  playerInv <- Map.mapKeysMonotonic (+(27 - 9)) . playerInventory <$> getPlayer
+  items <- Map.union playerInv <$> (send . WorldSTM $ readTVar tI)
+  logp $ "Sending window " ++ show wid ++ " of type " ++ windowIdentifier @tyT ++ " with items " ++ show items
   sendPacket (Client.WindowItems wid items)
   return wid
 

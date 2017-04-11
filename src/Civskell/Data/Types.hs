@@ -18,14 +18,14 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE RankNTypes #-}
--- ^^^ BEHOLD: THE 19 HORSEMEN OF THE HASKPOCALYPSE ^^^ --
+-- ^^^ BEHOLD: THE 20 HORSEMEN OF THE HASKPOCALYPSE ^^^ --
 
 -- TODO: This export list is pretty scary. We should make tiered modules or something
 module Civskell.Data.Types
   -- Constants
   (airChunk,allCoords,protocolVersion
   -- Helper functions
-  ,blockInChunk,blockToChunk,blockToRelative,blockOnSide,showPacket,jsonyText,withLength,withListLength,indentedHex,serOpt
+  ,blockInChunk,blockToChunk,blockToRelative,blockOnSide,showPacket,jsonyText,withLength,withListLength,indentedHex,serOpt,comb
   -- Type synonyms
   ,EncryptionCouplet,PerformsIO,Short
   -- Blocks
@@ -45,7 +45,7 @@ module Civskell.Data.Types
   ,PlayerData(..),UUID(..)
   -- Slot
   ,Slot(..),slotAmount,removeCount,splitStack,slot
-  ,Inventory
+  ,Inventory,getSlot,setSlot
   -- Aux Enums
   ,Difficulty(..),Dimension(..),Gamemode(..),Hand(..),MoveMode(..),AbilityFlags(..),ServerState(..),Side(..),Window(..)
   -- Player
@@ -202,6 +202,12 @@ type TPConfirmId = VarInt
 data Slot = EmptySlot | Slot (Some Item) Word8
 
 type Inventory = Map Short Slot
+
+getSlot :: Short -> Inventory -> Slot
+getSlot = Map.findWithDefault EmptySlot
+
+setSlot :: Short -> Slot -> Inventory -> Inventory
+setSlot = Map.insert
 
 slot :: Item i => i -> Word8 -> Slot
 slot i c = Slot (some i) c
@@ -483,13 +489,26 @@ class Block b where
   blockIdentifier :: String
   -- Stone -> 0; Granite -> 1
   blockMeta :: b -> Nibble
-  -- By default, blocks without meta get 0
   blockMeta _ = 0
+  -- By default, blocks without meta get 0
+  --blockMeta _ = 0
   -- Name in notchian english "Stone" or "Granite"
   blockName :: b -> String
   -- Some blocks do something when clicked
   onClick :: forall r. (HasWorld r,HasPlayer r,SendsPackets r,Logs r) => Maybe (b -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Eff r ())
   onClick = Nothing
+
+{-
+block :: Short -> String -> String -> b -> Block b
+block bid ident dat = Block
+  {blockId = bid
+  ,blockIdentifier = ident
+  ,blockData = dat
+  ,blockMeta = const 0
+  ,blockName = const ident
+  ,onClick = Nothing
+  }
+-}
 
 serializeBlock :: Block b => b -> BS.ByteString
 serializeBlock (b :: bt) = serialize $ shiftL (u (blockId @bt)) 4 .|. (v (blockMeta b) .&. 0x0f)
@@ -500,12 +519,12 @@ serializeBlock (b :: bt) = serialize $ shiftL (u (blockId @bt)) 4 .|. (v (blockM
 showBlock :: Block b => b -> String
 showBlock (b :: bt) = "Block [" ++ show (blockId @bt) ++ ":" ++ show (blockMeta b) ++ "]"
 
-
 data Air = Air
+
 instance Block Air where
-  blockId = 0
   blockIdentifier = "minecraft:air"
   blockName _ = "Air"
+  blockId = 0
 
 --class Block t => TileEntity t where
   --tileEntityNBT :: t -> NBT
@@ -610,8 +629,7 @@ data World a where
   SetBlock :: Some Block -> BlockCoord -> World ()
   SetChunk :: ChunkSection -> ChunkCoord -> World ()
   SetColumn :: [ChunkSection] -> (Int,Int) -> Maybe BS.ByteString -> World ()
-  WorldReadTVar :: TVar a -> World a
-  WorldNewTVar :: a -> World (TVar a)
+  WorldSTM :: STM a -> World a
   FreshEID :: World EntityId
   FreshUUID :: World UUID
   SetPlayer :: PlayerId -> PlayerData -> World ()
@@ -864,3 +882,6 @@ forkConfig :: Configured q => Eff (Reader Configuration ': r) a -> Eff q (Eff r 
 forkConfig e = do
   c <- ask
   return $ runReader' c e
+
+comb :: Some c -> (forall a. c a => r) -> r
+comb (SuchThat (Identity (_ :: a))) f = f @a

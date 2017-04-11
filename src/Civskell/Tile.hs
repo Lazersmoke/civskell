@@ -56,8 +56,8 @@ instance Block Chest where
   blockIdentifier = "minecraft:chest"
   blockMeta (Chest face _) = fromIntegral $ fromEnum face
   blockName _ = "Chest"
-  onClick = Just $ \(Chest _facing items) xyz _ _ _ -> do
+  onClick = Just $ \(Chest _facing items) _xyz _ _ _ -> do
     sendPacket (Client.ChatMessage (jsonyText "How are you today? I'm doing just swimmingly myself ;)") 0)
-    _wid <- openWindowWithItems (Window.Chest xyz) (jsonyText "Satisfied Chest") items
+    _wid <- openWindowWithItems (Window.Chest items) (jsonyText "Satisfied Chest") items
     return ()
     -- TODO: callback for changing items in chest

@@ -6,6 +6,7 @@
 module Civskell.Window where
 
 import qualified Data.Set as Set
+import Control.Concurrent.STM
 import Data.SuchThat
 import Data.Functor.Identity
 import Control.Eff
@@ -29,7 +30,9 @@ defaultInventoryClick gs ss wid slotNum transId = \case
     -- If everything is in order
     Just (newSlot,newHand) -> do
       -- Set the slots to their new values
+      logp $ "Setting slot -1 to " ++ show newHand
       ss (-1) newHand
+      logp $ "Setting slot " ++ show slotNum ++ " to " ++ show newSlot
       ss slotNum newSlot
       -- Confirm the transaction was successful
       return True --sendPacket (Client.ConfirmTransaction wid transId True)
@@ -124,12 +127,19 @@ instance Window Player where
 -}
 -- Chests are numbered *after* the off hand slot (45)
 -- Num rows (9 per row)
-data Chest = Chest BlockCoord
+data Chest = Chest (TVar Inventory)
 instance Window Chest where
   windowName = "Chest"
   windowIdentifier = "minecraft:chest"
   slotCount {-(Chest rows _)-} = 27 -- rows * 9
-  onWindowClick (Chest {-_-} _i) _ _ _ _ = return True
+  onWindowClick (Chest i) = defaultInventoryClick gsChest ssChest
+    where
+      gsChest slotNum = if slotNum > 26 || slotNum == (-1)
+        then getInventorySlot (slotNum - 18)
+        else getSlot slotNum <$> send (WorldSTM $ readTVar i)
+      ssChest slotNum s' = if slotNum > 26 || slotNum == (-1)
+        then setInventorySlot (slotNum - 18) s'
+        else send . WorldSTM $ modifyTVar i (setSlot slotNum s')
  {- clientToCivskellSlot s
     | s < slotCount @Chest = s + 45
     | otherwise = clientToCivskellSlot @Player s

@@ -7,7 +7,8 @@ module Civskell.Packet.Serverbound where
 
 import Data.Int
 import Control.Eff.Reader (ask)
---import Control.Eff
+import Control.Eff
+import Control.Concurrent.STM
 import Data.List (intercalate)
 import Data.Functor.Identity
 import Data.Word
@@ -161,8 +162,10 @@ instance HandledPacket ChatMessage where
     "chunks" -> forM_ [0..48] $ \x -> sendPacket =<< colPacket ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
     "creeper" -> summonMob (Mob.Creeper Entity.defaultInsentient 0 False False)
     "/testchest" -> do
-      w <- openNewWindow (Window.Chest $ BlockLocation (0,0,0)) (jsonyText "Test Chest")
-      sendPacket (Client.WindowItems w $ Map.fromList [(5,slot Item.Stick 3)])
+      let items = Map.fromList [(5,slot Item.Stick 3)]
+      i <- send (WorldSTM $ newTVar items)
+      _ <- openWindowWithItems (Window.Chest i) (jsonyText "Test Chest") i
+      return ()
     _ -> do
       broadcastPacket (Client.ChatMessage (jsonyText msg) 0)
       name <- clientUsername <$> getPlayer

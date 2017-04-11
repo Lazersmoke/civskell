@@ -61,6 +61,6 @@ baseEntityVelocity :: BaseEntity -> EntityVelocity
 baseEntityVelocity (BaseEntity _ v _ _ _ _ _ _) = v
 
 baseEntityMeta :: BaseEntity -> [EntityMetadata]
-baseEntityMeta (BaseEntity _ _ statusBM air name nameVisible silent noGrav) = [mm statusBM,mm air,mm name,mm nameVisible,mm silent,mm noGrav]
+baseEntityMeta (BaseEntity _ _ statusBM airRemaining name nameVisible silent noGrav) = [mm statusBM,mm airRemaining,mm name,mm nameVisible,mm silent,mm noGrav]
 
 

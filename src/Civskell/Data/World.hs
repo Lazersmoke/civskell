@@ -25,23 +25,23 @@ initWorld :: WorldData
 initWorld = WorldData {chunks = Map.empty,entities = Map.empty,players = Map.empty,nextEID = 0,nextUUID = UUID (0,1)}
 
 {-# INLINE getChunk #-}
-getChunk :: Member World r => ChunkCoord -> Eff r ChunkSection
+getChunk :: HasWorld r => ChunkCoord -> Eff r ChunkSection
 getChunk = send . GetChunk
 
 {-# INLINE getBlock #-}
-getBlock :: Member World r => BlockCoord -> Eff r (Some Block)
+getBlock :: HasWorld r => BlockCoord -> Eff r (Some Block)
 getBlock b = blockInChunk (blockToRelative b) <$> getChunk (blockToChunk b)
 
 {-# INLINE setChunk #-}
-setChunk :: Member World r => ChunkSection -> ChunkCoord -> Eff r ()
+setChunk :: HasWorld r => ChunkSection -> ChunkCoord -> Eff r ()
 setChunk c' cc = send $ SetChunk c' cc
 
 {-# INLINE setBlock #-}
-setBlock :: (Member World r, Block b) => b -> BlockCoord -> Eff r ()
+setBlock :: (HasWorld r,Block b) => b -> BlockCoord -> Eff r ()
 setBlock b' bc = send $ SetBlock (some b') bc
 
 {-# INLINE setColumn #-}
-setColumn :: Member World r => [ChunkSection] -> (Int,Int) -> Maybe BS.ByteString -> Eff r ()
+setColumn :: HasWorld r => [ChunkSection] -> (Int,Int) -> Maybe BS.ByteString -> Eff r ()
 setColumn cs cxz mBio = send $ SetColumn cs cxz mBio
 
 {-# INLINE colPacket #-}
@@ -58,55 +58,55 @@ chunksToColumnPacket cs (cx,cz) mbio = Client.ChunkData (fromIntegral cx,fromInt
     isAirChunk (ChunkSection m) = Map.null m
 
 {-# INLINE removeBlock #-}
-removeBlock :: Member World r => BlockCoord -> Eff r ()
+removeBlock :: HasWorld r => BlockCoord -> Eff r ()
 removeBlock = send . RemoveBlock
 
 {-# INLINE setPlayer #-}
-setPlayer :: Member World r => PlayerId -> PlayerData -> Eff r ()
+setPlayer :: HasWorld r => PlayerId -> PlayerData -> Eff r ()
 setPlayer i p = send $ SetPlayer i p
 
 {-# INLINE lookupPlayer #-}
-lookupPlayer :: Member World r => PlayerId -> Eff r PlayerData
+lookupPlayer :: HasWorld r => PlayerId -> Eff r PlayerData
 lookupPlayer = send . GetPlayer
 
 {-# INLINE modifyPlayer #-}
-modifyPlayer :: Member World r => PlayerId -> (PlayerData -> PlayerData) -> Eff r ()
+modifyPlayer :: HasWorld r => PlayerId -> (PlayerData -> PlayerData) -> Eff r ()
 modifyPlayer i f = setPlayer i =<< f <$> lookupPlayer i
 
 {-# INLINE freshEID #-}
-freshEID :: Member World r => Eff r EntityId
+freshEID :: HasWorld r => Eff r EntityId
 freshEID = send FreshEID
 
 {-# INLINE freshUUID #-}
-freshUUID :: Member World r => Eff r UUID
+freshUUID :: HasWorld r => Eff r UUID
 freshUUID = send FreshUUID
 
 {-# INLINE newPlayer #-}
-newPlayer :: Member World r => TVar PlayerData -> Eff r PlayerId
+newPlayer :: HasWorld r => TVar PlayerData -> Eff r PlayerId
 newPlayer = send . NewPlayer
 
 {-# INLINE allPlayers #-}
-allPlayers :: Member World r => Eff r [PlayerData]
+allPlayers :: HasWorld r => Eff r [PlayerData]
 allPlayers = send AllPlayers
 
 {-# INLINE broadcastPacket #-}
-broadcastPacket :: (Member World r,Packet p, PacketSide p ~ 'Client,Serialize p) => p -> Eff r ()
+broadcastPacket :: (HasWorld r,Packet p, PacketSide p ~ 'Client,Serialize p) => p -> Eff r ()
 broadcastPacket = send . BroadcastPacket . ambiguate . OutboundPacket . ambiguate . Identity
 
 {-# INLINE getEntity #-}
-getEntity :: (Member World r) => EntityId -> Eff r (Some Entity)
+getEntity :: (HasWorld r) => EntityId -> Eff r (Some Entity)
 getEntity = send . GetEntity
 
 {-# INLINE deleteEntity #-}
-deleteEntity :: (Member World r) => EntityId -> Eff r ()
+deleteEntity :: (HasWorld r) => EntityId -> Eff r ()
 deleteEntity = send . DeleteEntity
 
 {-# INLINE summonMob #-}
-summonMob :: (Member World r, Mob m) => m -> Eff r ()
+summonMob :: (HasWorld r, Mob m) => m -> Eff r ()
 summonMob = send . SummonMob . ambiguate . Identity
 
 {-# INLINE summonObject #-}
-summonObject :: (Member World r, Object m) => m -> Eff r ()
+summonObject :: (HasWorld r, Object m) => m -> Eff r ()
 summonObject = send . SummonObject . ambiguate . Identity
 
 forkWorld :: (HasWorld q,Logs r,PerformsIO r) => Eff (World ': r) a -> Eff q (Eff r a)
@@ -178,6 +178,5 @@ runWorld w' (Eff u q) = case u of
   Inject (BroadcastPacket pkt) -> do
     send . atomically . mapM_ (\p -> readTVar p >>= \pd -> case playerState pd of {Playing -> flip writeTQueue pkt . packetQueue $ pd; _ -> pure ()}) . players =<< send (readMVar w')
     runWorld w' (runTCQ q ())
-  Inject (WorldReadTVar t) -> runWorld w' . runTCQ q =<< send (readTVarIO t)
-  Inject (WorldNewTVar a) -> runWorld w' . runTCQ q =<< send (newTVarIO a)
+  Inject (WorldSTM stm) -> runWorld w' . runTCQ q =<< send (atomically stm)
   Weaken u' -> Eff u' (Singleton (runWorld w' . runTCQ q))

@@ -18,6 +18,7 @@ import Data.Semigroup
 import Data.Word
 import Numeric (showHex)
 import qualified Data.ByteString as BS
+import Unsafe.Coerce
 
 import Civskell.Data.Types
 --import qualified Civskell.Window as Window
@@ -269,7 +270,7 @@ instance Packet BlockChange where
   packetId = 0x0B
   packetPretty (BlockChange bc bs) = [("Block",show bc),("New State",ambiguously (showBlock . runIdentity) bs)]
 instance Serialize BlockChange where
-  serialize (BlockChange block bs) = serialize block <> ambiguously (serializeBlock . runIdentity) bs
+  serialize (BlockChange bc bs) = serialize bc <> ambiguously (serializeBlock . runIdentity) bs
 
 -- UUID, Action (from enum)
 data BossBar = BossBar String {- BossBarAction NYI -}
@@ -356,7 +357,7 @@ instance Packet OpenWindow where
   packetId = 0x13
   packetPretty (OpenWindow wid (SuchThat (Identity (_ :: winT))) title horseEid) = [("Window Id",show wid),("Window Type",windowName @winT),("Window Title",show title)] ++ (case horseEid of {Just eid -> [("Horse EID",show eid)];Nothing -> []})
 instance Serialize OpenWindow where
-  serialize (OpenWindow wid (SuchThat (Identity (_ :: winT))) title horseEid) = serialize wid <> serialize (windowIdentifier @winT) <> serialize title <> serialize (slotCount @winT) <> (case horseEid of {Just eid -> serialize eid;Nothing -> BS.empty})
+  serialize (OpenWindow wid (SuchThat (Identity (_ :: winT))) title horseEid) = serialize wid <> serialize (windowIdentifier @winT) <> serialize title <> serialize ((unsafeCoerce :: Short -> Word8) $ slotCount @winT) <> (case horseEid of {Just eid -> serialize eid;Nothing -> BS.empty})
 
 -- Window Id, Slots
 data WindowItems = WindowItems WindowId Inventory
@@ -367,7 +368,8 @@ instance Packet WindowItems where
   packetId = 0x14
   packetPretty (WindowItems wid slots) = [("Window Id",show wid),("Slot Count",show (Map.size slots))]
 instance Serialize WindowItems where
-  serialize (WindowItems winId slots) = serialize winId <> serialize (fromIntegral $ Map.size slots :: Int16) <> BS.concat (map serialize $ Map.elems slots)
+  -- redo
+  serialize (WindowItems winId slots) = serialize winId <> serialize (fromIntegral $ 1 + fst (Map.findMax slots) :: Int16) <> BS.concat (map (\x -> serialize $ Map.findWithDefault EmptySlot x slots) [0..(fst $ Map.findMax slots)])
 
 -- Window Id, Property (enum), Value (enum)
 data WindowProperty = WindowProperty WindowId Short Short
@@ -597,7 +599,7 @@ instance Packet SpawnPosition where
   type PacketState SpawnPosition = 'Playing
   packetName = "SpawnPosition"
   packetId = 0x43
-  packetPretty (SpawnPosition block) = [("Spawn",show block)]
+  packetPretty (SpawnPosition bc) = [("Spawn",show bc)]
 instance Serialize SpawnPosition where
   serialize (SpawnPosition pos) = serialize pos
 

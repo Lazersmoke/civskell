@@ -5,6 +5,7 @@
 module Civskell.Item where
 
 import Data.Attoparsec.ByteString
+import Control.Concurrent.STM
 import Control.Eff
 --import Data.NBT
 import Control.Monad
@@ -74,4 +75,4 @@ instance Item Chest where
   itemIdentifier = "minecraft:chest"
   parseItem = standardParser Chest
   -- TODO: Directionalize
-  onItemUse = Just $ \Chest bc bf hand fff -> send (WorldNewTVar Map.empty) >>= \items -> placeBlock (Tile.Chest North items) bc bf hand fff
+  onItemUse = Just $ \Chest bc bf hand fff -> send (WorldSTM $ newTVar Map.empty) >>= \items -> placeBlock (Tile.Chest North items) bc bf hand fff
