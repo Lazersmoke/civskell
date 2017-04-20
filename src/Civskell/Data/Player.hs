@@ -69,7 +69,7 @@ openWindowWithItems (ty :: tyT) name tI = do
   playerInv <- Map.mapKeysMonotonic (+(27 - 9)) . playerInventory <$> getPlayer
   items <- Map.union playerInv <$> (send . WorldSTM $ readTVar tI)
   logp $ "Sending window " ++ show wid ++ " of type " ++ windowIdentifier @tyT ++ " with items " ++ show items
-  sendPacket (Client.WindowItems wid items)
+  sendPacket (Client.WindowItems wid items (slotCount @tyT))
   return wid
 
 -- Add a new tid to the que
@@ -98,9 +98,9 @@ setGamemode g = do
     Creative -> sendPacket (Client.PlayerAbilities (AbilityFlags True False True True) 0 1)
 
 -- TODO: Semantic slot descriptors
-setInventorySlot :: (SendsPackets r,Logs r, HasPlayer r) => Short -> Slot -> Eff r ()
+setInventorySlot :: (SendsPackets r,Logs r, HasPlayer r) => Short -> Maybe Slot -> Eff r ()
 setInventorySlot slotNum slotData = do
-  overPlayer $ \p -> p {playerInventory = Map.insert slotNum slotData (playerInventory p)}
+  overPlayer $ \p -> p {playerInventory = setSlot slotNum slotData (playerInventory p)}
   sendPacket (Client.SetSlot 0 slotNum slotData)
  
 --getPacket :: forall p r. (Logs r,HasPlayer r,Packet p) => Eff r (Maybe p)
@@ -111,8 +111,8 @@ setInventorySlot slotNum slotData = do
 --flushInbox = send FlushInbox
 
 {-# INLINE getInventorySlot #-}
-getInventorySlot :: (HasPlayer r) => Short -> Eff r Slot
-getInventorySlot slotNum = (Map.findWithDefault EmptySlot slotNum) . playerInventory <$> getPlayer
+getInventorySlot :: (HasPlayer r) => Short -> Eff r (Maybe Slot)
+getInventorySlot slotNum = Map.lookup slotNum . playerInventory <$> getPlayer
 
 {-# INLINE registerPlayer #-}
 registerPlayer :: HasPlayer r => Eff r PlayerId

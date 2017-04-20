@@ -18,7 +18,7 @@ instance Entity Item where
   entitySize _ = (0.25,0.25,0.25)
   entityLocation (Item e _) = baseEntityLocation e
   entityVelocity (Item e _) = baseEntityVelocity e
-  entityMeta (Item e slotData) = baseEntityMeta e ++ [mm slotData]
+  entityMeta (Item e slotData) = baseEntityMeta e ++ [mm (Just slotData)]
 
 data Creeper = Creeper Insentient VarInt Bool Bool
 instance Mob Creeper where {}

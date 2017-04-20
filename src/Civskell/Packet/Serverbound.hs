@@ -256,7 +256,7 @@ instance Packet EnchantItem where
   --parsePacket = error "No parser for packet"
 
 -- Slot Number
-data ClickWindow = ClickWindow WindowId Short TransactionId InventoryClickMode Slot
+data ClickWindow = ClickWindow WindowId Short TransactionId InventoryClickMode (Maybe Slot)
 instance Packet ClickWindow where
   type PacketSide ClickWindow = 'Server
   type PacketState ClickWindow = 'Playing
@@ -495,7 +495,7 @@ instance HandledPacket PlayerDigging where
       logp $ "Dropping: " ++ show dropped
       setInventorySlot heldSlot newHeld
       plaLoc <- playerPosition <$> getPlayer
-      summonObject (Mob.Item (Entity.BaseEntity (EntityLocation plaLoc (0,0)) (EntityVelocity (0,0,0)) 0x00 300 "" False False False) dropped)
+      summonObject (Mob.Item (Entity.BaseEntity (EntityLocation plaLoc (0,0)) (EntityVelocity (0,0,0)) 0x00 300 "" False False False) ((\(Just x) -> x) dropped))
     _ -> loge $ "Unhandled Player Dig Action: " ++ showPacket p
 
   parsePacket = do
@@ -584,7 +584,7 @@ instance HandledPacket HeldItemChange where
     specificVarInt 0x17 <?> "Packet Id 0x17"
     HeldItemChange <$> parseShort
 
-data CreativeInventoryAction = CreativeInventoryAction Short Slot
+data CreativeInventoryAction = CreativeInventoryAction Short (Maybe Slot)
 instance Packet CreativeInventoryAction where
   type PacketSide CreativeInventoryAction = 'Server
   type PacketState CreativeInventoryAction = 'Playing
@@ -654,8 +654,8 @@ instance HandledPacket PlayerBlockPlacement where
         heldSlot <- if hand == MainHand then holdingSlot <$> getPlayer else pure 45
         msl <- getInventorySlot (heldSlot + 36)
         case msl of
-          EmptySlot -> logp "No item to use"
-          Slot (SuchThat (Identity (i :: it))) _cnt -> case onItemUse @it of
+          Nothing -> logp "No item to use"
+          Just (Slot (SuchThat (Identity (i :: it))) _cnt) -> case onItemUse @it of
             -- If they right click on a block with an empty hand, this will happen
             Nothing -> logp "No onItemUse for item"
             Just oiu -> oiu i block side hand cursorCoord
@@ -780,9 +780,9 @@ instance HandledPacket EncryptionResponse where
             -- Send initial world. Need a 7x7 grid or the client gets angry with us
             forM_ [0..48] $ \x -> sendPacket =<< colPacket ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
             -- Send an initial blank inventory
-            sendPacket (Client.WindowItems 0 Map.empty)
+            sendPacket (Client.WindowItems 0 Map.empty 0)
             -- Give them some stone (for testing)
-            setInventorySlot 4 (Slot (some Item.Stone) 32)
+            setInventorySlot 4 (Just $ Slot (some Item.Stone) 32)
             ps <- allPlayers
             sendPacket (Client.PlayerListItem (map (\p -> (clientUUID p,PlayerListAdd (clientUsername p) authProps Survival 0 Nothing)) ps))
   parsePacket = do

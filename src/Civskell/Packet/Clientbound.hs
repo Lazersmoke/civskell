@@ -7,7 +7,7 @@
 module Civskell.Packet.Clientbound where
 
 import Crypto.Hash (hash,Digest,SHA1)
-import qualified Data.Map as Map
+--import qualified Data.Map as Map
 import Data.Functor.Identity
 import Data.Bits
 import Data.Int
@@ -18,6 +18,7 @@ import Data.Semigroup
 import Data.Word
 import Numeric (showHex)
 import qualified Data.ByteString as BS
+import qualified Data.Map as Map
 import Unsafe.Coerce
 
 import Civskell.Data.Types
@@ -360,16 +361,19 @@ instance Serialize OpenWindow where
   serialize (OpenWindow wid (SuchThat (Identity (_ :: winT))) title horseEid) = serialize wid <> serialize (windowIdentifier @winT) <> serialize title <> serialize ((unsafeCoerce :: Short -> Word8) $ slotCount @winT) <> (case horseEid of {Just eid -> serialize eid;Nothing -> BS.empty})
 
 -- Window Id, Slots
-data WindowItems = WindowItems WindowId Inventory
+data WindowItems = WindowItems WindowId Inventory Short
 instance Packet WindowItems where
   type PacketSide WindowItems = 'Client
   type PacketState WindowItems = 'Playing
   packetName = "WindowItems"
   packetId = 0x14
-  packetPretty (WindowItems wid slots) = [("Window Id",show wid),("Slot Count",show (Map.size slots))]
+  packetPretty (WindowItems wid _slots sc) = [("Window Id",show wid),("Slot Count",show sc)]
 instance Serialize WindowItems where
   -- redo
-  serialize (WindowItems winId slots) = serialize winId <> serialize (fromIntegral $ 1 + fst (Map.findMax slots) :: Int16) <> BS.concat (map (\x -> serialize $ Map.findWithDefault EmptySlot x slots) [0..(fst $ Map.findMax slots)])
+  serialize (WindowItems winId slots sc) = serialize winId <> serialize sc <> BS.concat slotList
+    where
+      slotList = map serialize . Map.elems $ Map.union (Map.map Just slots) fullList
+      fullList = Map.fromList . map (\x -> (x,Nothing)) $ [0..sc]
 
 -- Window Id, Property (enum), Value (enum)
 data WindowProperty = WindowProperty WindowId Short Short
@@ -383,7 +387,7 @@ instance Serialize WindowProperty where
   serialize (WindowProperty _ _ _) = error "Unimplemented Serialization"
 
 -- Window Id, Slot num, <Slot>
-data SetSlot = SetSlot WindowId Short Slot
+data SetSlot = SetSlot WindowId Short (Maybe Slot)
 instance Packet SetSlot where
   type PacketSide SetSlot = 'Client
   type PacketState SetSlot = 'Playing

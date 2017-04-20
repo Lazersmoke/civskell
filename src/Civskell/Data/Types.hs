@@ -199,52 +199,49 @@ type KeepAliveId = VarInt
 type TPConfirmId = VarInt
 
 -- Item id, count, damage
-data Slot = EmptySlot | Slot (Some Item) Word8
+data Slot = Slot (Some Item) Word8
 
 type Inventory = Map Short Slot
 
-getSlot :: Short -> Inventory -> Slot
-getSlot = Map.findWithDefault EmptySlot
+getSlot :: Short -> Inventory -> Maybe Slot
+getSlot = Map.lookup
 
-setSlot :: Short -> Slot -> Inventory -> Inventory
-setSlot = Map.insert
+setSlot :: Short -> Maybe Slot -> Inventory -> Inventory
+setSlot i Nothing = Map.delete i
+setSlot i (Just x) = Map.insert i x
 
 slot :: Item i => i -> Word8 -> Slot
 slot i c = Slot (some i) c
 
 instance Eq Slot where
-  EmptySlot == EmptySlot = True
   (Slot (SuchThat (Identity (a :: at))) ac) == (Slot (SuchThat (Identity (b :: bt))) bc) = itemId @at == itemId @bt && itemMeta a == itemMeta b && itemNBT a == itemNBT b && ac == bc
-  _ == _ = False
 
 slotAmount :: Slot -> Word8
-slotAmount EmptySlot = 0
 slotAmount (Slot _ c) = c
 
 -- Remove as many items as possible, up to count, return amount removed
-removeCount :: Word8 -> Slot -> (Word8,Slot)
-removeCount _ EmptySlot = (0,EmptySlot)
-removeCount c (Slot i count) = if c < count then (c,Slot i (count - c)) else (count,EmptySlot)
+removeCount :: Word8 -> Maybe Slot -> (Word8,Maybe Slot)
+removeCount _ Nothing = (0,Nothing)
+removeCount c (Just (Slot i count)) = if c < count then (c,Just $ Slot i (count - c)) else (count,Nothing)
 
 -- Count is how many to put into first stack from second
-splitStack :: Word8 -> Slot -> (Slot,Slot)
-splitStack _ EmptySlot = (EmptySlot,EmptySlot)
-splitStack c s@(Slot i _) = (firstStack,secondStack)
+splitStack :: Word8 -> Maybe Slot -> (Maybe Slot,Maybe Slot)
+splitStack _ Nothing = (Nothing,Nothing)
+splitStack c s@(Just (Slot i _)) = (firstStack,secondStack)
   where
-    firstStack = if amtFirstStack == 0 then EmptySlot else Slot i amtFirstStack
+    firstStack = if amtFirstStack == 0 then Nothing else Just $ Slot i amtFirstStack
     (amtFirstStack,secondStack) = removeCount c s
 
 instance Show Slot where
-  show EmptySlot = "{}"
   show (Slot (SuchThat (Identity (i :: it))) count) = "{" ++ show count ++ " of [" ++ show (itemId @it) ++ ":" ++ show (itemMeta i) ++ "]" ++ n (itemNBT i) ++ "}"
     where
       -- Only display the NBT if it is actually there
       n Nothing = ""
       n (Just nbt) = " with tags: " ++ show nbt
 
-instance Serialize Slot where
-  serialize EmptySlot = serialize (-1 :: Short)
-  serialize (Slot (SuchThat (Identity (i :: it))) count) = serialize (itemId @it) <> serialize count <> serialize (itemMeta i) <> (case itemNBT i of {Just nbt -> serialize (NBT "" nbt);Nothing -> BS.singleton 0x00})
+instance Serialize (Maybe Slot) where
+  serialize Nothing = serialize (-1 :: Short)
+  serialize (Just (Slot (SuchThat (Identity (i :: it))) count)) = serialize (itemId @it) <> serialize count <> serialize (itemMeta i) <> (case itemNBT i of {Just nbt -> serialize (NBT "" nbt);Nothing -> BS.singleton 0x00})
 
 class Window w where
   windowName :: String
@@ -540,7 +537,7 @@ class Item i where
   itemNBT :: i -> Maybe (NbtContents)
   itemNBT _ = Nothing
   -- TODO: param Slot i
-  parseItem :: Parser Slot
+  parseItem :: Parser (Maybe Slot)
   -- Some items do something when right clicked
   onItemUse :: forall r. (HasWorld r,HasPlayer r,SendsPackets r,Logs r) => Maybe (i -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Eff r ())
   onItemUse = Nothing
@@ -801,8 +798,8 @@ instance Serialize (EntityMeta Float) where serialize (EntityMeta a) = serialize
 instance EntityMetaType String where entityMetaFlag = 0x03
 instance Serialize (EntityMeta String) where serialize (EntityMeta a) = serialize a
 
-instance EntityMetaType Slot where entityMetaFlag = 0x05
-instance Serialize (EntityMeta Slot) where serialize (EntityMeta a) = serialize a
+instance EntityMetaType (Maybe Slot) where entityMetaFlag = 0x05
+instance Serialize (EntityMeta (Maybe Slot)) where serialize (EntityMeta a) = serialize a
 
 instance EntityMetaType Bool where entityMetaFlag = 0x06
 instance Serialize (EntityMeta Bool) where serialize (EntityMeta a) = serialize a
