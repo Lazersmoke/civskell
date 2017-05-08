@@ -50,7 +50,7 @@ removeCompression :: Networks n => BS.ByteString -> Eff n BS.ByteString
 removeCompression = send . RemoveCompression
 
 -- Send a Client Packet over the network
-sendPacket :: (SendsPackets r,Serialize p,Packet p,PacketSide p ~ 'Client) => p -> Eff r ()
+sendPacket :: (SendsPackets r,Serialize p,Packet p) => p -> Eff r ()
 sendPacket = sendAnyPacket . ambiguate . OutboundPacket . ambiguate . Identity
 
 sendAnyPacket :: SendsPackets r => ForAny OutboundPacket -> Eff r ()

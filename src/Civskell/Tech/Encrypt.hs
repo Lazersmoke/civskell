@@ -89,6 +89,10 @@ encodePubKey k = asnSequence <> withLengthAsn (algIdentifier <> pubKeyBitstring)
     bytesOfModulus = intBytesRaw $ RSA.public_n k
     bytesOfExponent = intBytesRaw $ RSA.public_e k
 
+-- public key, VT, and shared secret to encrypted (shared secret, verify token)
+genEncryptionResponse :: BS.ByteString -> BS.ByteString -> BS.ByteString -> (BS.ByteString,BS.ByteString)
+genEncryptionResponse pubKeyEnc vt ss = error "Not implemented: Civskell.Tech.Encrypt.genEncryptionResponse"
+
 -- intBytesRaw gets the variable-length byte encoding of a number
 intBytesRaw :: Integer -> BS.ByteString
 intBytesRaw = BS.reverse . BS.unfoldr (\i -> if i == 0 then Nothing else Just $ (fromIntegral i, shiftR i 8))

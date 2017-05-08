@@ -22,7 +22,7 @@ library
 executable civskell-exe
   hs-source-dirs:      app
   main-is:             Main.hs
-  ghc-options:         -threaded -fprof-auto -rtsopts -with-rtsopts=-N
+  ghc-options:         -threaded -fprof-auto
   build-depends:       base, HsOpenSSL, civskell
   default-language:    Haskell2010
 

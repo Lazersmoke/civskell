@@ -324,7 +324,7 @@ instance FromJSON AuthProperty where
   parseJSON (Data.Aeson.Object o) = AuthProperty <$> o .: "name" <*> o .: "value" <*> o .:? "signature"
   parseJSON x = typeMismatch "AuthProperty" x
 
--- This is used in PacketSide as a kind
+-- This used to be used in PacketSide as a kind
 data Side = Server | Client
 
 -- Kind for BlockOffset vs BlockCoord
@@ -704,8 +704,6 @@ withListLength ls = serialize ((fromIntegral $ length ls) :: VarInt) <> BS.conca
 class Packet p where
   -- State this packet is expected in
   type PacketState p :: ServerState
-  -- Side this packet is bound to
-  type PacketSide p :: Side
   -- Extract name-value pairs to pretty print a packet
   packetPretty :: p -> [(String,String)]
   -- Name of the packet. Example `data Meow = ...` has the name "Meow"
@@ -714,7 +712,7 @@ class Packet p where
   packetId :: VarInt
 
 -- Helper classes for using Data.SuchThat with TypeFamilies, which would otherwise be partially applied
-class (Packet p,PacketSide p ~ 'Server) => HandledPacket p where
+class Packet p => HandledPacket p where
   -- Spawn a PLT on receipt of each packet
   -- TODO: remove arbitrary IO in favor of STM or something else
   onPacket :: (Configured r,SendsPackets r,PerformsIO r,Logs r,HasPlayer r,HasWorld r) => p -> Eff r ()
@@ -722,21 +720,21 @@ class (Packet p,PacketSide p ~ 'Server) => HandledPacket p where
   -- Parse a packet
   parsePacket :: Parser p
 
-class (HandledPacket p,PacketState p ~ s) => HP s p where {}
+class (HandledPacket p,PacketState p ~ s) => HP s p | p -> s where {}
 instance (HandledPacket p,PacketState p ~ s) => HP s p where {}
 
-class (Packet p,PacketSide p ~ 'Client,s ~ PacketState p,Serialize p) => ClientPacket s p | p -> s where {}
-instance (Packet p,PacketSide p ~ 'Client,s ~ PacketState p,Serialize p) => ClientPacket s p where {}
+class (Packet p,s ~ PacketState p) => PacketWithState s p | p -> s where {}
+instance (Packet p,s ~ PacketState p) => PacketWithState s p where {}
 
 -- We can't make this an actual `Show` instance without icky extentions
 showPacket :: forall p. Packet p => p -> String
 showPacket pkt = formatPacket (packetName @p) (packetPretty pkt)
 
 -- A `InboundPacket s` is a thing that is a HandledPacket with the given PacketState
-newtype InboundPacket s = InboundPacket (Some (HP s))
+newtype InboundPacket s = InboundPacket (SuchThatStar '[PacketWithState s,HandledPacket])
 
 -- A `OutboundPacket s` is a thing that is a ClientPacket with the given PacketState
-newtype OutboundPacket s = OutboundPacket (Some (ClientPacket s))
+newtype OutboundPacket s = OutboundPacket (SuchThatStar '[PacketWithState s,Serialize])
 
 -- Entities are things with properties
 class Entity m where
