@@ -494,6 +494,7 @@ class Block b where
   -- Some blocks do something when clicked
   onClick :: forall r. (HasWorld r,HasPlayer r,SendsPackets r,Logs r) => Maybe (b -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Eff r ())
   onClick = Nothing
+  droppedItem :: Maybe (Some Item)
 
 {-
 block :: Short -> String -> String -> b -> Block b
@@ -716,9 +717,14 @@ class Packet p => HandledPacket p where
   -- Spawn a PLT on receipt of each packet
   -- TODO: remove arbitrary IO in favor of STM or something else
   onPacket :: (Configured r,SendsPackets r,PerformsIO r,Logs r,HasPlayer r,HasWorld r) => p -> Eff r ()
+  -- No default defn. here so that we get compiler warnings for not implmenting
   --onPacket p = send (LogString ErrorLog $ "Unsupported packet: " ++ showPacket p)
   -- Parse a packet
   parsePacket :: Parser p
+  -- Can `onPacket` possibly poke the packet state, so we need to wait for it to
+  -- finish in serial, not parallel?
+  canPokePacketState :: Bool
+  canPokePacketState = False
 
 class (HandledPacket p,PacketState p ~ s) => HP s p | p -> s where {}
 instance (HandledPacket p,PacketState p ~ s) => HP s p where {}
@@ -731,10 +737,10 @@ showPacket :: forall p. Packet p => p -> String
 showPacket pkt = formatPacket (packetName @p) (packetPretty pkt)
 
 -- A `InboundPacket s` is a thing that is a HandledPacket with the given PacketState
-newtype InboundPacket s = InboundPacket (SuchThatStar '[PacketWithState s,HandledPacket])
+type InboundPacket s = SuchThatStar '[PacketWithState s,HandledPacket]
 
 -- A `OutboundPacket s` is a thing that is a ClientPacket with the given PacketState
-newtype OutboundPacket s = OutboundPacket (SuchThatStar '[PacketWithState s,Serialize])
+type OutboundPacket s = SuchThatStar '[PacketWithState s,Serialize]
 
 -- Entities are things with properties
 class Entity m where

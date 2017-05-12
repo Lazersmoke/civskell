@@ -140,9 +140,13 @@ packetLoop = do
     -- You can't substitute `onPacket q` for `op` except using the let binding as shown below. The type gods
     -- will become angry and smite you where you stand. TODO: investigate appeasing the type gods by enabling/
     -- disabling the monomorphism restriction
-    Just (SuchThat (InboundPacket (SuchThat (Identity q)))) -> do
-      let op = onPacket q
-      send . (>> pure ()) . forkIO =<< (runM <$>) . forkConfig =<< forkLogger =<< forkNetwork =<< forkWorld =<< (runPacketing <$> forkPlayer op)
+    Just (SuchThat (InboundPacket (SuchThat (Identity q)))) -> if canPokePacketState q
+      -- Serial mode
+      then onPacket q
+      -- Parallel mode
+      else do
+        let op = onPacket q
+        send . (>> pure ()) . forkIO =<< (runM <$>) . forkConfig =<< forkLogger =<< forkNetwork =<< forkWorld =<< (runPacketing <$> forkPlayer op)
   packetLoop
   where
     -- This is an *action* to decide what parser to use. It needs to be like this because
