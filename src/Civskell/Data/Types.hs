@@ -79,8 +79,8 @@ import Data.Functor.Identity
 import Control.Eff
 import Control.Eff.Reader
 import Crypto.Cipher.AES (AES128)
-import Data.Aeson hiding (Object)
-import Data.Aeson.Types hiding (Parser,Object)
+--import Data.Aeson hiding (Object)
+--import Data.Aeson.Types hiding (Parser,Object)
 import Data.Attoparsec.ByteString (Parser)
 import Data.Bits
 import Data.Bits (Bits)
@@ -97,7 +97,7 @@ import Hexdump (prettyHex)
 import Numeric (readHex)
 import Numeric (showHex)
 import Unsafe.Coerce (unsafeCoerce)
-import qualified Data.Aeson
+--import qualified Data.Aeson
 import qualified Data.Binary.BitBuilder as BB
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
@@ -228,6 +228,9 @@ data BlockBreak
 data BlockLocation (r :: Relativity)
   = BlockLocation (Int,Int,Int) -- (x,y,z)
   deriving (Eq,Ord)
+
+-- Kind for BlockOffset vs BlockCoord
+data Relativity = Relative | Absolute
 
 -- BlockLocations have some weakish dimensionality. `Absolute` means that it is
 -- an absolute coord relative to (0,0,0). `Relative` means that it is an offset,
@@ -453,7 +456,7 @@ instance Serialize ChunkSection where
 -- Auth infrastructure is scary, I hope it doesn't break ever :3
 -- Parsed form of the result of authenticating a player with Mojang
 data AuthPacket = AuthPacket UUID String [AuthProperty]
-
+{-
 -- FromJSON instances parse JSON into AuthPackets
 instance FromJSON AuthPacket where
   parseJSON (Data.Aeson.Object o) = AuthPacket <$> o .: "id" <*> o .: "name" <*> (o .: "properties")
@@ -462,24 +465,25 @@ instance FromJSON AuthPacket where
 instance FromJSON UUID where
   parseJSON (String s) = return $ (\i -> UUID (fromInteger $ i .&. 0xFFFFFFFFFFFFFFFF,fromInteger $ shiftR i 8)) . fst . head . readHex . Text.unpack $ s
   parseJSON x = typeMismatch "UUID" x
-
+-}
 -- Helper type to support the arbitrary properties in auth packets
 data AuthProperty = AuthProperty String String (Maybe String)
 
-instance FromJSON AuthProperty where
+{-instance FromJSON AuthProperty where
   parseJSON (Data.Aeson.Object o) = AuthProperty <$> o .: "name" <*> o .: "value" <*> o .:? "signature"
   parseJSON x = typeMismatch "AuthProperty" x
+-}
 
--- This used to be used in PacketSide as a kind
-data Side = Server | Client
-
--- Kind for BlockOffset vs BlockCoord
-data Relativity = Relative | Absolute
-
--- These are used for to select the correct parser (packet id 0 is reused in all four modes)
+-- Packets are ambiguous in the Notchian spec, so we need to carry around a
+-- "State" that tells us how to parse the packets. This should eventually be
+-- replaced by a config option that contains just a `Set (Parser Packet)` or
+-- something like that.
 data ServerState = Handshaking | Playing | LoggingIn | Status
 
--- Minecraft Notchian Enums
+--------------------
+-- Notchian Enums --
+--------------------
+
 data Gamemode = Survival | Creative {- | Adventure | Spectator -} deriving Show
 
 instance Serialize Gamemode where
@@ -532,10 +536,14 @@ instance Enum CardinalDirection where
     West -> 4
     East -> 5
 
--- Used in PlayerData
 data MoveMode = Sprinting | Sneaking | Walking | Gliding | Flying
 
--- Packet Helper data types
+-------------------------
+-- Packet Helper Types --
+-------------------------
+-- Should these be moved next to their respective packet definitions in
+-- Civskell.Packet.*bound?
+
 -- Used in Client.Animation; Server.Animation just uses hand
 data AnimationAction = SwingHand Hand | Critical Bool | TakeDamage | LeaveBedAnimation deriving Show
 
