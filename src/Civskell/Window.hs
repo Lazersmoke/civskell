@@ -23,7 +23,7 @@ instance Window Container where
   slotCount (Container s) = s
 -}
 
-defaultInventoryClick :: (SendsPackets r,Logs r,HasWorld r,HasPlayer r) => (Short -> Eff r (Maybe Slot)) -> (Short -> Maybe Slot -> Eff r ()) -> WindowId -> Short -> TransactionId -> InventoryClickMode -> Eff r Bool
+defaultInventoryClick :: (SendsPackets r,Logs r,HasWorld r,HasPlayer r) => (Short -> Eff r Slot) -> (Short -> Slot -> Eff r ()) -> WindowId -> Short -> TransactionId -> InventoryClickMode -> Eff r Bool
 defaultInventoryClick gs ss wid slotNum transId = \case
   -- Get the current state of affairs, and purely decide what to do with them
   NormalClick rClick -> doInventoryClick <$> gs slotNum <*> gs (-1) <*> pure rClick >>= \case
@@ -54,34 +54,34 @@ defaultInventoryClick gs ss wid slotNum transId = \case
   -- Double click
   DoubleClick -> loge "Double click not supported" >> return False
 
-doInventoryClick :: Maybe Slot -> Maybe Slot -> Bool -> Maybe (Maybe Slot,Maybe Slot)
+doInventoryClick :: Slot -> Slot -> Bool -> Maybe (Slot,Slot)
 doInventoryClick actualSlot currHeld rClick = case actualSlot of
-  Nothing -> case currHeld of
+  Slot Nothing -> case currHeld of
     -- Both empty -> No-op
-    Nothing -> Just (actualSlot,currHeld)
+    Slot Nothing -> Just (actualSlot,currHeld)
     -- Putting something in an empty slot
-    Just (Slot curri currcount) -> Just (placed,newHeld)
+    Slot (Just (SlotData curri currcount)) -> Just (Slot placed,Slot newHeld)
       where
         -- If we right click, only place one item, left click places all of them
         delta = if rClick then 1 else 64
         -- If we don't have enough items to fill the delta, place them all and end up with an Nothing, otherwise remove the delta
-        newHeld = if currcount <= delta then Nothing else Just $ Slot curri (currcount - delta)
+        newHeld = if currcount <= delta then Nothing else Just $ SlotData curri (currcount - delta)
         -- The slot now has either the full delta, or our best attempt at filling the delta
-        placed = Just $ Slot curri (min delta currcount)
-  Just (Slot (SuchThat (Identity (acti :: actit))) actcount) -> case currHeld of
+        placed = Just $ SlotData curri (min delta currcount)
+  Slot (Just (SlotData (SuchThat (Identity (acti :: actit))) actcount)) -> case currHeld of
     -- Picking something up into an empty hand
-    Nothing -> Just (left,Just picked)
+    Slot Nothing -> Just (Slot left,Slot $ Just picked)
       where
         -- If we right click, take half, otherwise take as much as we can
         delta = if rClick then actcount `div` 2 else min actcount 64
         -- If we took it all, leave nothing, otherwise take what we took
-        left = if actcount == delta then Nothing else Just $ Slot (some acti) (actcount - delta)
+        left = if actcount == delta then Nothing else Just $ SlotData (some acti) (actcount - delta)
         -- We are now holding everything we picked up
-        picked = Slot (some acti) delta
+        picked = SlotData (some acti) delta
     -- Two item stacks interacting
-    Just (Slot (SuchThat (Identity (curri :: currit))) currcount) -> case itemId @currit == itemId @actit && itemMeta curri == itemMeta acti && itemNBT curri == itemNBT acti of
+    Slot (Just (SlotData (SuchThat (Identity (curri :: currit))) currcount)) -> case itemId @currit == itemId @actit && itemMeta curri == itemMeta acti && itemNBT curri == itemNBT acti of
       -- Like stacks; combine
-      True -> Just (inSlot,stillHeld)
+      True -> Just (Slot inSlot,Slot stillHeld)
         where
           -- How many items we can possibly place in the slot
           spaceRemaining = 64 - actcount
@@ -89,9 +89,9 @@ doInventoryClick actualSlot currHeld rClick = case actualSlot of
           -- NOTE: delta <= currcount and spaceRemaining
           delta = if rClick then min 1 spaceRemaining else max currcount spaceRemaining
           -- If we put down everything, empty our hand, otherwise remove what we put down
-          stillHeld = if currcount == delta then Nothing else Just $ Slot (some curri) (currcount - delta)
+          stillHeld = if currcount == delta then Nothing else Just $ SlotData (some curri) (currcount - delta)
           -- Put the stuff we put into the slot, into the slot
-          inSlot = Just $ Slot (some acti) (actcount + delta)
+          inSlot = Just $ SlotData (some acti) (actcount + delta)
       -- Unlike stacks; swap
       False -> Just (currHeld,actualSlot)
 

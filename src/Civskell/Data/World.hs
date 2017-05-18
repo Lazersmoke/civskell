@@ -14,6 +14,7 @@ import Control.Eff
 import Control.Monad (forM)
 import Data.Bits
 import Data.SuchThat
+import Data.Bytes.Serial
 import qualified Data.ByteString as BS
 import qualified Data.Map.Lazy as Map
 
@@ -49,7 +50,7 @@ colPacket :: HasWorld r => (Int,Int) -> Maybe BS.ByteString -> Eff r Client.Chun
 colPacket (cx,cz) mbio = forM [0..15] (\cy -> getChunk (ChunkCoord (cx,cy,cz))) >>= \cs -> return (chunksToColumnPacket cs (cx,cz) mbio)
 
 chunksToColumnPacket :: [ChunkSection] -> (Int,Int) -> Maybe BS.ByteString -> Client.ChunkData
-chunksToColumnPacket cs (cx,cz) mbio = Client.ChunkData (fromIntegral cx,fromIntegral cz) True (bitMask cs) (filter (not . isAirChunk) cs) mbio []
+chunksToColumnPacket cs (cx,cz) mbio = Client.ChunkData (fromIntegral cx,fromIntegral cz) True (bitMask cs) (filter (not . isAirChunk) cs) mbio (ProtocolList [])
   where
     -- [Bool] -> VarInt basically
     bitMask as = foldr (\b i -> fromBool b .|. shiftL i 1) 0 (map (not . isAirChunk) as)
@@ -90,7 +91,7 @@ allPlayers :: HasWorld r => Eff r [PlayerData]
 allPlayers = send AllPlayers
 
 {-# INLINE broadcastPacket #-}
-broadcastPacket :: (HasWorld r,Packet p, PacketSide p ~ 'Client,Serialize p) => p -> Eff r ()
+broadcastPacket :: (HasWorld r,Packet p, PacketSide p ~ 'Client,Serial p) => p -> Eff r ()
 broadcastPacket = send . BroadcastPacket . ambiguate . OutboundPacket . ambiguate . Identity
 
 {-# INLINE getEntity #-}
@@ -133,7 +134,7 @@ runWorld w' (Eff u q) = case u of
     runWorld w' (runTCQ q ())
   Inject (SetChunk c' cc@(ChunkCoord (x,y,z))) -> do
     send $ modifyMVar_ w' $ \w -> return w {chunks = Map.insert cc c' (chunks w)}
-    runWorld w' $ broadcastPacket (Client.ChunkData (fromIntegral x,fromIntegral z) False (bit y) [c'] Nothing [])
+    runWorld w' $ broadcastPacket (Client.ChunkData (fromIntegral x,fromIntegral z) False (bit y) [c'] Nothing (ProtocolList []))
     runWorld w' (runTCQ q ())
   Inject (SetColumn col' (cx,cz) mBio) -> do
     send $ modifyMVar_ w' $ \w -> return w {chunks = fst $ foldl (\(m,i) c -> (Map.insert (ChunkCoord (cx,i,cz)) c m,i + 1)) (chunks w,0) col'}
@@ -159,7 +160,7 @@ runWorld w' (Eff u q) = case u of
   Inject (SummonMob (SuchThat m)) -> do
     (eid,uuid) <- send . modifyMVar w' $ \w -> do
       return (w {entities = Map.insert (nextEID w) (SuchThat m) (entities w),nextEID = succ (nextEID w),nextUUID = incUUID (nextUUID w)},(nextEID w,nextUUID w))
-    runWorld w' $ broadcastPacket $ Client.SpawnMob eid uuid (SuchThat m) 0
+    runWorld w' $ broadcastPacket $ Client.makeSpawnMob eid uuid 0 (SuchThat m)
     runWorld w' (runTCQ q ())
     where
       incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
@@ -167,7 +168,7 @@ runWorld w' (Eff u q) = case u of
     (eid,uuid) <- send . modifyMVar w' $ \w -> do
       return (w {entities = Map.insert (nextEID w) (SuchThat m) (entities w),nextEID = succ (nextEID w),nextUUID = incUUID (nextUUID w)},(nextEID w,nextUUID w))
     runWorld w' $ broadcastPacket $ Client.SpawnObject eid uuid (SuchThat m)
-    runWorld w' $ broadcastPacket $ Client.UpdateMetadata eid (map Just $ entityMeta (runIdentity m))
+    runWorld w' $ broadcastPacket $ Client.UpdateMetadata eid (EntityPropertySet $ map Just $ entityMeta (runIdentity m))
     runWorld w' (runTCQ q ())
     where
       incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)

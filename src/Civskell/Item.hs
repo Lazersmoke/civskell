@@ -18,7 +18,7 @@ import Civskell.Data.World
 import Civskell.Data.Logging
 import qualified Civskell.Tile as Tile
 
-parseSlot :: Parser (Maybe Slot)
+parseSlot :: Parser Slot
 parseSlot = choice
   [emptySlot
   ,parseItem @Stick
@@ -26,14 +26,14 @@ parseSlot = choice
   ,parseItem @Chest
   ]
 
-emptySlot :: Parser (Maybe Slot)
+emptySlot :: Parser Slot
 emptySlot = do
   bid <- parseShort
   guard $ bid == -1
-  return Nothing
+  return $ Slot Nothing
 
 -- Parse an item based on its blockId, assuming no metadata and no nbt
-standardParser :: forall i. Item i => i -> Parser (Maybe Slot)
+standardParser :: forall i. Item i => i -> Parser Slot
 standardParser r = do
   bid <- parseShort
   guard $ bid == itemId @i
@@ -42,17 +42,17 @@ standardParser r = do
   guard $ dmg == 0
   nbtFlair <- anyWord8
   guard $ nbtFlair == 0
-  return . Just $ Slot (some r) cnt
+  return . Slot . Just $ SlotData (some r) cnt
 
 placeBlock :: (HasWorld r,SendsPackets r,HasPlayer r,Logs r,Block b) => b -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Eff r ()
 placeBlock b bc bf hand _ = do
   -- Find out what item they are trying to place
   heldSlot <- if hand == MainHand then (+36) . holdingSlot <$> getPlayer else pure 45
   getInventorySlot heldSlot >>= \case
-    Nothing -> loge "Fight me; this is not possible! (literally Nothing has a `placeBlock` callback)"
-    Just (Slot i icount) -> do
+    Slot Nothing -> loge "Fight me; this is not possible! (literally Nothing has a `placeBlock` callback)"
+    Slot (Just (SlotData i icount)) -> do
       -- Remove item from inventory
-      let newSlot = if icount == 1 then Nothing else Just (Slot i (icount - 1))
+      let newSlot = if icount == 1 then Slot Nothing else Slot $ Just (SlotData i (icount - 1))
       setInventorySlot heldSlot newSlot
       setBlock b (blockOnSide bc bf)
 

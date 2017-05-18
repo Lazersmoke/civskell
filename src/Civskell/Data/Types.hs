@@ -2,6 +2,7 @@
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE BinaryLiterals #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -36,15 +37,16 @@ module Civskell.Data.Types
   -- Chunks
   ,ChunkCoord(..),ChunkSection(..)
   -- Packet Information
-  ,AnimationAction(..),PlayerListAction(..),PlayerListActionType(..),EntityInteraction(..)
+  ,AnimationAction(..),PlayerListAction(..),PlayerListActionType(..),PlayerListActionEnum(..),EntityInteraction(..)
   ,ClientStatusAction(..),GameStateChange(..),InventoryClickMode(..),PlayerDigAction(..)
   ,PlayerEntityAction(..),AuthPacket(..),AuthProperty(..)
   -- Id's and newtypes
   ,VarInt(..),EntityId(..),PlayerId,WindowId(..),KeepAliveId,TPConfirmId,TransactionId
+  ,ProtocolString(..),ProtocolList(..),ProtocolNBT(..)
   -- Aux Data Types
   ,PlayerData(..),UUID(..)
   -- Slot
-  ,Slot(..),slotAmount,removeCount,splitStack,slot
+  ,Slot(..),SlotData(..),slotAmount,removeCount,splitStack,slot
   ,Inventory,getSlot,setSlot
   -- Aux Enums
   ,Difficulty(..),Dimension(..),Gamemode(..),Hand(..),MoveMode(..),AbilityFlags(..),ServerState(..),Side(..),Window(..)
@@ -66,36 +68,36 @@ module Civskell.Data.Types
   ,Entity(..)
   ,EntityMetaType(..)
   ,EntityMeta(..)
+  ,EntityPropertySet(..)
   ,EntityMetadata
   ,EntityLocation(..)
   ,EntityVelocity(..)
   ,Mob
   ,Object(..)
-  ,Serialize(..)
   ) where
 
 import Control.Concurrent.STM
 import Data.Functor.Identity
+import Data.Foldable
 import Control.Eff
 import Control.Eff.Reader
+import Control.Monad
 import Crypto.Cipher.AES (AES128)
 import Data.Aeson hiding (Object)
 import Data.Aeson.Types hiding (Parser,Object)
 import Data.Attoparsec.ByteString (Parser)
 import Data.Bits
-import Data.Bits (Bits)
 import Data.Int (Int16,Int32,Int64)
-import Data.List (intercalate)
-import Data.List (unfoldr,foldl')
+import Data.List (intercalate,unfoldr)
 import Data.Map.Lazy (Map)
 import Data.Maybe (fromMaybe)
 import Data.NBT
-import Data.Semigroup ((<>))
 import Data.SuchThat
+import Data.String
+import qualified GHC.Exts as Exts
 import Data.Word (Word64,Word8)
 import Hexdump (prettyHex)
-import Numeric (readHex)
-import Numeric (showHex)
+import Numeric (readHex,showHex)
 import Unsafe.Coerce (unsafeCoerce)
 import qualified Data.Aeson
 import qualified Data.Binary.BitBuilder as BB
@@ -103,12 +105,23 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.UTF8
 import qualified Data.Map.Lazy as Map
-import qualified Data.Serialize as Ser
+import Data.Bytes.Serial
+import Data.Bytes.Put
+import Data.Bytes.Get
+import qualified Data.Serialize as Cereal
 import qualified Data.Set as Set
 import qualified Data.Text as Text
 
 protocolVersion :: Integer
 protocolVersion = 316
+
+newtype ProtocolNBT = ProtocolNBT {unProtocolNBT :: NBT}
+
+instance Serial ProtocolNBT where
+  serialize = putByteString . Cereal.runPut . Cereal.put . unProtocolNBT
+  deserialize = remaining >>= \r -> getByteString (fromIntegral r) >>= \bs -> case Cereal.runGet Cereal.get bs of
+    Left e -> error e
+    Right a -> return (ProtocolNBT a)
 
 -- Type Synonyms
 type Short = Int16
@@ -128,12 +141,13 @@ instance Show UUID where
       -- Reformat the uuid to what the client expects
       reformat = ins 8 . ins 12 . ins 16 . ins 20
 
-instance Serialize UUID where
-  serialize (UUID (a,b)) = serialize a <> serialize b
+instance Serial UUID where
+  serialize (UUID (a,b)) = putWord64be a >> putWord64be b
+  deserialize = (UUID .) . (,) <$> getWord64be <*> getWord64be
 
 -- Simple way to inject a text message into a json chat string
-jsonyText :: String -> String
-jsonyText s = "{\"text\":\"" ++ s ++ "\"}"
+jsonyText :: String -> ProtocolString
+jsonyText s = ProtocolString $ "{\"text\":\"" ++ s ++ "\"}"
 
 -- Datatypes
 -- Used in PlayerInfo to track the breaking stage of a block the player is mining
@@ -155,13 +169,17 @@ instance Ord BlockCoord where
   compare a@(BlockCoord (xa,ya,za)) b@(BlockCoord (xb,yb,zb)) = if a == b then EQ else if yb > ya then GT else if zb > za then GT else if xb > xa then GT else LT
 -}
 
-instance Serialize BlockCoord where
+instance Serial BlockCoord where
   serialize (BlockLocation (x,y,z)) = serialize $
     (shiftL (u x .&. 0x3FFFFFF) 38) .|.
     (shiftL (u y .&. 0xFFF) 26) .|.
     (u z .&. 0x3FFFFFF)
     where
       u = unsafeCoerce :: Int -> Int64
+  -- Untested
+  deserialize = (\w -> BlockLocation (u $ 0x3FFFFFF .&. (w `shiftR` 38),u $ 0xFFF .&. (w `shiftR` 26),u $ 0x3FFFFFF .&. w)) <$> deserialize @Int64
+    where
+      u = unsafeCoerce :: Int64 -> Int
 
 newtype ChunkCoord = ChunkCoord (Int,Int,Int) deriving (Eq,Ord)
 
@@ -172,25 +190,36 @@ instance Show ChunkCoord where
 newtype VarInt = VarInt {unVarInt :: Int32} deriving (Bits,Enum,Eq,Integral,Num,Ord,Real)
 instance Show VarInt where show = show . unVarInt
 
-instance Serialize VarInt where
+instance Serial VarInt where
   serialize n = if moreAfter
     -- If there are more, set the msb and recurse
-    then (0b10000000 .|. writeNow) `BS.cons` serialize (shiftR n 7)
+    then putWord8 (0b10000000 .|. writeNow) >> serialize (shiftR n 7)
     -- Otherwise, just use this one
-    else BS.singleton writeNow
+    else putWord8 writeNow
     where
       -- Write first seven bits
-      writeNow = (unsafeCoerce :: VarInt -> Word8) $ n .&. 0b1111111
+      writeNow = (unsafeCoerce :: VarInt -> Word8) $ n .&. 0b01111111
       -- Are there more bytes to add?
-      moreAfter = shiftR n 7 /= 0
+      moreAfter = testBit n 7
+  -- untested
+  deserialize = do
+    b <- getWord8
+    if testBit b 7 
+      then (\rest -> (unsafeCoerce $ b .&. 0b01111111) .&. shiftL rest 8) <$> deserialize @VarInt
+      else return (unsafeCoerce $ b .&. 0b01111111)
 
+-- TODO: Investigate GND for Serial here: it has to do with some role nonsense
 newtype EntityId = EntityId {unEID :: VarInt} deriving (Bits,Enum,Eq,Integral,Num,Ord,Real)
 instance Show EntityId where show = (\p -> "Entity Id {" ++ p ++ "}") . show . unEID
-instance Serialize EntityId where serialize = serialize . unEID
+instance Serial EntityId where
+  serialize = serialize . unEID
+  deserialize = EntityId <$> deserialize
 
 newtype WindowId = WindowId {unWID :: Word8} deriving (Bits,Enum,Eq,Integral,Num,Ord,Real)
 instance Show WindowId where show = (\p -> "Window Id {" ++ p ++ "}") . show . unWID
-instance Serialize WindowId where serialize = serialize . unWID
+instance Serial WindowId where
+  serialize = serialize . unWID
+  deserialize = WindowId <$> deserialize
 
 type PlayerId = EntityId
 
@@ -199,50 +228,6 @@ type KeepAliveId = VarInt
 type TPConfirmId = VarInt
 
 -- Item id, count, damage
-data Slot = Slot (Some Item) Word8
-
-type Inventory = Map Short Slot
-
-getSlot :: Short -> Inventory -> Maybe Slot
-getSlot = Map.lookup
-
-setSlot :: Short -> Maybe Slot -> Inventory -> Inventory
-setSlot i Nothing = Map.delete i
-setSlot i (Just x) = Map.insert i x
-
-slot :: Item i => i -> Word8 -> Slot
-slot i c = Slot (some i) c
-
-instance Eq Slot where
-  (Slot (SuchThat (Identity (a :: at))) ac) == (Slot (SuchThat (Identity (b :: bt))) bc) = itemId @at == itemId @bt && itemMeta a == itemMeta b && itemNBT a == itemNBT b && ac == bc
-
-slotAmount :: Slot -> Word8
-slotAmount (Slot _ c) = c
-
--- Remove as many items as possible, up to count, return amount removed
-removeCount :: Word8 -> Maybe Slot -> (Word8,Maybe Slot)
-removeCount _ Nothing = (0,Nothing)
-removeCount c (Just (Slot i count)) = if c < count then (c,Just $ Slot i (count - c)) else (count,Nothing)
-
--- Count is how many to put into first stack from second
-splitStack :: Word8 -> Maybe Slot -> (Maybe Slot,Maybe Slot)
-splitStack _ Nothing = (Nothing,Nothing)
-splitStack c s@(Just (Slot i _)) = (firstStack,secondStack)
-  where
-    firstStack = if amtFirstStack == 0 then Nothing else Just $ Slot i amtFirstStack
-    (amtFirstStack,secondStack) = removeCount c s
-
-instance Show Slot where
-  show (Slot (SuchThat (Identity (i :: it))) count) = "{" ++ show count ++ " of [" ++ show (itemId @it) ++ ":" ++ show (itemMeta i) ++ "]" ++ n (itemNBT i) ++ "}"
-    where
-      -- Only display the NBT if it is actually there
-      n Nothing = ""
-      n (Just nbt) = " with tags: " ++ show nbt
-
-instance Serialize (Maybe Slot) where
-  serialize Nothing = serialize (-1 :: Short)
-  serialize (Just (Slot (SuchThat (Identity (i :: it))) count)) = serialize (itemId @it) <> serialize count <> serialize (itemMeta i) <> (case itemNBT i of {Just nbt -> serialize (NBT "" nbt);Nothing -> BS.singleton 0x00})
-
 class Window w where
   windowName :: String
   windowIdentifier :: String
@@ -260,16 +245,17 @@ instance Show ChunkSection where
   show _ = "<Chunk Section>"
 
 -- TODO: Add paletteing. Right now, we send a full 13 bits for *every block*
-instance Serialize ChunkSection where
-  serialize (ChunkSection bs) = serialize bitsPerBlock <> palette <> chunkData <> lights <> lights
+-- Lights twice for (((reasons)))
+instance Serial ChunkSection where
+  serialize (ChunkSection bs) = serialize bitsPerBlock >> putWord8 0x00 >> chunkData >> lights >> lights
     where
-      lights = LBS.toStrict $ BB.toLazyByteString $ createLights $ merged
+      lights = putLazyByteString . BB.toLazyByteString . createLights $ merged
 
       -- First 9 bits are the block id, last 4 are the damage
       bitsPerBlock = 13 :: VarInt
 
       -- Send 0x00 as the length of the palette since we aren't using it
-      palette = BS.singleton 0x00
+      --palette = BS.singleton 0x00
 
       -- Notify and crash *right away* if this gets fucked up. This only happens if we have a bad Ord instance.
       -- Note that Map.size is O(1) so we aren't wasting too much time here
@@ -278,16 +264,17 @@ instance Serialize ChunkSection where
       merged = if Map.size (Map.union bs airChunk) == 4096 then Map.union bs airChunk else error "Bad Chunksection"
 
       -- `longChunks` is because Mojang likes to twist their data into weird shapes
-      sArray :: BS.ByteString
-      sArray = LBS.toStrict . longChunks . BB.toLazyByteString $ sBlockStates merged
+      -- Might need to remove it idk
+      sArray :: LBS.ByteString
+      sArray = longChunks . BB.toLazyByteString $ sBlockStates merged
 
       -- This should be the final result, but mojang is weird about chunk sections :S
       sBlockStates :: Map BlockOffset (Some Block) -> BB.BitBuilder
-      sBlockStates m = foldl' (\bb bc -> ambiguously (aBlock . runIdentity) (Map.findWithDefault (some Air) bc m) `BB.append` bb) BB.empty allCoords
+      sBlockStates m = foldr (\bc bb -> ambiguously (aBlock . runIdentity) (Map.findWithDefault (some Air) bc m) `BB.append` bb) BB.empty allCoords
 
       -- Annotate the data with its length in Minecraft Longs (should always be a whole number assuming 16^3 blocks/chunk)
-      chunkData :: BS.ByteString
-      chunkData = serialize (fromIntegral (BS.length sArray) `div` 8 :: VarInt) <> sArray
+      chunkData :: MonadPut m => m ()
+      chunkData = serialize (fromIntegral (LBS.length sArray) `div` 8 :: VarInt) >> putLazyByteString sArray
 
       -- Right now we `const 15` the blocks, so all the blocks are fullbright
       -- TODO: Add lighting information somewhere or derive it here
@@ -301,9 +288,10 @@ instance Serialize ChunkSection where
       bsChunksOf :: Int64 -> LBS.ByteString -> [LBS.ByteString]
       bsChunksOf x = unfoldr (\a -> if not (LBS.null a) then Just (LBS.splitAt x a) else Nothing)
 
-      -- Serialize a single block: 9 bits bid, 4 bits dmg
+      -- Serial a single block: 9 bits bid, 4 bits dmg
       aBlock :: Block b => b -> BB.BitBuilder
       aBlock (b :: bt) = BB.fromBits 9 (blockId @bt) `BB.append` BB.fromBits 4 (blockMeta b)
+  deserialize = error "Unimplemented: Deserialization of Chunk Sections"
 
 -- Parsed form of the result of authenticating a player with Mojang
 data AuthPacket = AuthPacket UUID String [AuthProperty]
@@ -336,26 +324,42 @@ data ServerState = Handshaking | Playing | LoggingIn | Status
 -- Minecraft Notchian Enums
 data Gamemode = Survival | Creative {- | Adventure | Spectator -} deriving Show
 
-instance Serialize Gamemode where
-  serialize Survival = BS.singleton 0x00
-  serialize Creative = BS.singleton 0x01
-  -- serialize Adventure = BS.singleton 0x02
-  -- serialize Spectator = BS.singleton 0x03
+instance Serial Gamemode where
+  serialize = putWord8 . \case
+    Survival -> 0x00 
+    Creative -> 0x01 
+  deserialize = getWord8 >>= pure . \case
+    0x00 -> Survival
+    0x01 -> Creative
+    x -> error $ "Deserialization error: deserialize @Gamemode called with " ++ show x
 
 data Difficulty = Peaceful | Easy | Normal | Hard deriving Show
 
-instance Serialize Difficulty where
-  serialize Peaceful = BS.singleton 0x00
-  serialize Easy = BS.singleton 0x01
-  serialize Normal = BS.singleton 0x02
-  serialize Hard = BS.singleton 0x03
+instance Serial Difficulty where
+  serialize = putWord8 . \case
+    Peaceful -> 0x00
+    Easy -> 0x01
+    Normal -> 0x02
+    Hard -> 0x03
+  deserialize = getWord8 >>= pure . \case
+    0x00 -> Peaceful 
+    0x01 -> Easy 
+    0x02 -> Normal 
+    0x03 -> Hard 
+    x -> error $ "Deserialization error: deserialize @Difficulty called with " ++ show x
 
 data Dimension = Nether | Overworld | TheEnd deriving Show
 
-instance Serialize Dimension where
-  serialize Nether = serialize (-1 :: Int32)
-  serialize Overworld = serialize (0 :: Int32)
-  serialize TheEnd = serialize (1 :: Int32)
+instance Serial Dimension where
+  serialize = serialize . \case
+    Nether -> (-1 :: Int32)
+    Overworld -> (0 :: Int32)
+    TheEnd -> (1 :: Int32)
+  deserialize = getWord8 >>= pure . \case
+    (-1) -> Nether
+    0 -> Overworld
+    1 -> TheEnd
+    x -> error $ "Deserialization error: deserialize @Dimension called with " ++ show x
 
 data Hand = MainHand | OffHand deriving (Show,Eq)
 
@@ -393,19 +397,35 @@ data MoveMode = Sprinting | Sneaking | Walking | Gliding | Flying
 -- Used in Client.Animation; Server.Animation just uses hand
 data AnimationAction = SwingHand Hand | Critical Bool | TakeDamage | LeaveBedAnimation deriving Show
 
-instance Serialize AnimationAction where
-  serialize (SwingHand MainHand) = BS.singleton 0x00
-  serialize TakeDamage = BS.singleton 0x01
-  serialize LeaveBedAnimation = BS.singleton 0x02
-  serialize (SwingHand OffHand) = BS.singleton 0x03
-  serialize (Critical False) = BS.singleton 0x04
-  serialize (Critical True) = BS.singleton 0x05
+instance Serial AnimationAction where
+  serialize x = putWord8 $ case x of
+    (SwingHand MainHand) -> 0x00
+    TakeDamage -> 0x01
+    LeaveBedAnimation -> 0x02
+    (SwingHand OffHand) -> 0x03
+    (Critical False) -> 0x04
+    (Critical True) -> 0x05
+  deserialize = getWord8 >>= pure . \case
+    0x00 -> SwingHand MainHand
+    0x01 -> TakeDamage
+    0x02 -> LeaveBedAnimation
+    0x03 -> SwingHand OffHand
+    0x04 -> Critical False
+    0x05 -> Critical True
+    _ -> error "Bad Deserialize on AnimationAction"
 
 -- Used in Server.UseEntity
 data EntityInteraction = Attack | Interact Hand | InteractAt (Float,Float,Float) Hand deriving Show
 
 -- Helper kind for PlayerListAction
 data PlayerListActionType = AddPlayer | UpdateGamemode | UpdateLatency | UpdateName | RemovePlayer
+
+class (Serial (PlayerListAction a)) => PlayerListActionEnum a where playerListActionEnum :: VarInt
+instance PlayerListActionEnum 'AddPlayer where playerListActionEnum = 0
+instance PlayerListActionEnum 'UpdateGamemode where playerListActionEnum = 1
+instance PlayerListActionEnum 'UpdateLatency where playerListActionEnum = 2
+instance PlayerListActionEnum 'UpdateName where playerListActionEnum = 3
+instance PlayerListActionEnum 'RemovePlayer where playerListActionEnum = 4
 
 -- Used in Client.PlayerListItem
 data PlayerListAction (a :: PlayerListActionType) where
@@ -415,17 +435,32 @@ data PlayerListAction (a :: PlayerListActionType) where
   PlayerListName :: (Maybe String) -> PlayerListAction 'UpdateName
   PlayerListRemove :: PlayerListAction 'RemovePlayer
 
-instance Serialize (UUID,PlayerListAction a) where
-  serialize (u,p) = serialize u <> serialize p
-
-instance Serialize (PlayerListAction a) where
-  serialize (PlayerListAdd name props gm ping mDispName) = serialize name <> serialize ((fromIntegral $ length props) :: VarInt) <> BS.concat (map serProp props) <> serialize gm <> serialize ping <> serOpt mDispName
+instance Serial (PlayerListAction 'AddPlayer) where
+  serialize (PlayerListAdd name props gm ping mDispName) = serialize (ProtocolString name) >> serialize ((fromIntegral $ length props) :: VarInt) >> traverse_ serProp props >> serialize gm >> serialize ping >> serOpt mDispName
     where
-      serProp (AuthProperty n value mSigned) = serialize n <> serialize value <> serOpt mSigned
+      serProp (AuthProperty n value mSigned) = serialize n >> serialize value >> serOpt mSigned
+  deserialize = do
+    name <- unProtocolString <$> deserialize @ProtocolString
+    len <- deserialize @VarInt
+    PlayerListAdd <$> pure name <*> replicateM (fromIntegral len) deserProp <*> deserialize @Gamemode <*> deserialize @VarInt <*> deserOpt @String
+    where
+      deserProp = AuthProperty <$> deserialize @String <*> deserialize @String <*> deserOpt @String
+
+instance Serial (PlayerListAction 'UpdateGamemode) where
   serialize (PlayerListGamemode gm) = serialize gm
+  deserialize = PlayerListGamemode <$> deserialize @Gamemode
+
+instance Serial (PlayerListAction 'UpdateLatency) where
   serialize (PlayerListLatency ping) = serialize ping
+  deserialize = PlayerListLatency <$> deserialize @VarInt
+
+instance Serial (PlayerListAction 'UpdateName) where
   serialize (PlayerListName mDisp) = serOpt mDisp
-  serialize PlayerListRemove = BS.empty
+  deserialize = PlayerListName <$> deserOpt @String
+
+instance Serial (PlayerListAction 'RemovePlayer) where
+  serialize PlayerListRemove = return ()
+  deserialize = return PlayerListRemove
 
 -- Used in Server.PlayerDigging
 data PlayerDigAction = StartDig BlockCoord BlockFace | StopDig BlockCoord BlockFace | EndDig BlockCoord BlockFace | DropItem Bool | ShootArrowOrFinishEating | SwapHands
@@ -440,10 +475,11 @@ data InventoryClickMode = NormalClick Bool | ShiftClick Bool | NumberKey Word8 |
 -- Invuln, Flying, Allow Flying, Creative
 data AbilityFlags = AbilityFlags Bool Bool Bool Bool
 
-instance Serialize AbilityFlags where
+instance Serial AbilityFlags where
   serialize (AbilityFlags i f af c) = serialize $ u i 0 .|. u f 1 .|. u af 2 .|. u c 3
     where
       u b n = shiftL (unsafeCoerce b :: Word8) n
+  deserialize = (\w -> AbilityFlags (testBit w 0) (testBit w 1) (testBit w 2) (testBit w 3)) <$> getWord8
 
 -- Used in Client.ChangeGameState
 data GameStateChange = InvalidBed | Raining Bool | ChangeGamemode Gamemode | ExitTheEnd Bool | DemoMessage | ArrowHitOtherPlayer | FadeValue Float | FadeTime Float | ElderGuardian
@@ -507,7 +543,7 @@ block bid ident dat = Block
   }
 -}
 
-serializeBlock :: Block b => b -> BS.ByteString
+serializeBlock :: (MonadPut m,Block b) => b -> m ()
 serializeBlock (b :: bt) = serialize $ shiftL (u (blockId @bt)) 4 .|. (v (blockMeta b) .&. 0x0f)
   where
     u = unsafeCoerce :: Short -> VarInt
@@ -537,10 +573,67 @@ class Item i where
   itemNBT :: i -> Maybe (NbtContents)
   itemNBT _ = Nothing
   -- TODO: param Slot i
-  parseItem :: Parser (Maybe Slot)
+  parseItem :: Parser Slot
   -- Some items do something when right clicked
   onItemUse :: forall r. (HasWorld r,HasPlayer r,SendsPackets r,Logs r) => Maybe (i -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Eff r ())
   onItemUse = Nothing
+
+newtype Slot = Slot (Maybe SlotData)
+
+instance Show Slot where
+  show (Slot (Just dat)) = "{" ++ show dat ++ "}"
+  show (Slot Nothing) = "{}"
+
+data SlotData = SlotData (Some Item) Word8
+type Inventory = Map Short Slot
+
+getSlot :: Short -> Inventory -> Slot
+getSlot = Map.findWithDefault (Slot Nothing)
+
+setSlot :: Short -> Slot -> Inventory -> Inventory
+setSlot i (Slot Nothing) = Map.delete i
+setSlot i s = Map.insert i s
+
+slot :: Item i => i -> Word8 -> Slot
+slot i c = Slot . Just $ SlotData (some i) c
+
+instance Eq SlotData where
+  (SlotData (SuchThat (Identity (a :: at))) ac) == (SlotData (SuchThat (Identity (b :: bt))) bc) = itemId @at == itemId @bt && itemMeta a == itemMeta b && itemNBT a == itemNBT b && ac == bc
+
+slotAmount :: Slot -> Word8
+slotAmount (Slot (Just (SlotData _ c))) = c
+slotAmount (Slot Nothing) = 0
+
+-- Remove as many items as possible, up to count, return amount removed
+removeCount :: Word8 -> Slot -> (Word8,Slot)
+removeCount _ (Slot Nothing) = (0,Slot Nothing)
+removeCount c (Slot (Just (SlotData i count))) = if c < count then (c,Slot . Just $ SlotData i (count - c)) else (count,Slot Nothing)
+
+-- Count is how many to put into first stack from second
+splitStack :: Word8 -> Slot -> (Slot,Slot)
+splitStack _ (Slot Nothing) = (Slot Nothing,Slot Nothing)
+splitStack c s@(Slot (Just (SlotData i _))) = (firstStack,secondStack)
+  where
+    firstStack = if amtFirstStack == 0 then Slot Nothing else Slot . Just $ SlotData i amtFirstStack
+    (amtFirstStack,secondStack) = removeCount c s
+
+instance Show SlotData where
+  show (SlotData (SuchThat (Identity (i :: it))) count) = show count ++ " of [" ++ show (itemId @it) ++ ":" ++ show (itemMeta i) ++ "]" ++ n (itemNBT i)
+    where
+      -- Only display the NBT if it is actually there
+      n Nothing = ""
+      n (Just nbt) = " with tags: " ++ show nbt
+
+instance Serial Slot where
+  serialize (Slot Nothing) = serialize (-1 :: Short)
+  serialize (Slot (Just sd)) = serialize @SlotData sd
+  deserialize = deserialize @Short >>= \case
+    (-1) -> return $ Slot Nothing
+    _itemId -> error "Unimplemented: Deserialization of general Slots. May be unimplementable in general :/"
+
+instance Serial SlotData where
+  serialize (SlotData (SuchThat (Identity (i :: it))) count) = serialize (itemId @it) >> serialize count >> serialize (itemMeta i) >> (case itemNBT i of {Just nbt -> putByteString $ Cereal.encode (NBT "" nbt);Nothing -> putWord8 0x00})
+  deserialize = error "Unimplemented: deserialize @SlotData"
 
 -- The state of a block in the world (Block id, damage)
 data BlockState = BlockState Short Word8 deriving Eq
@@ -639,56 +732,47 @@ data World a where
   AllPlayers :: World [PlayerData]
   BroadcastPacket :: ForAny OutboundPacket -> World ()
 
--- Things that can be serialized into a BS for the network
-class Serialize s where
-  serialize :: s -> BS.ByteString
-
 -- Combinator for serializing Maybes in a Minecrafty way
-serOpt :: Serialize s => Maybe s -> BS.ByteString
-serOpt (Just a) = serialize True <> serialize a
+serOpt :: (MonadPut m,Serial s) => Maybe s -> m ()
+serOpt (Just a) = serialize True >> serialize a
 serOpt Nothing = serialize False
 
--- Instances for haskell and library types
-instance Serialize NBT where
-  serialize = Ser.encode
+deserOpt :: forall s m. (MonadGet m,Serial s) => m (Maybe s)
+deserOpt = deserialize @Bool >>= \case
+  False -> return Nothing
+  True -> Just <$> deserialize @s
 
-instance Serialize Word8 where
-  serialize = BS.singleton
+newtype ProtocolString = ProtocolString {unProtocolString :: String} deriving IsString
 
-instance Serialize [Char] where
-  serialize str = serialize ((fromIntegral $ BS.length encoded) :: VarInt) `BS.append` encoded
+instance Serial ProtocolString where
+  serialize (ProtocolString str) = serialize ((fromIntegral $ BS.length encoded) :: VarInt) >> putByteString encoded
     where
       encoded = Data.ByteString.UTF8.fromString str
+  deserialize = deserialize @VarInt >>= \len -> ProtocolString . Data.ByteString.UTF8.toString <$> getBytes (fromIntegral len)
 
-instance Serialize Bool where
-  serialize True = BS.singleton 0x01
-  serialize False = BS.singleton 0x00
+data ProtocolList i a = ProtocolList {unProtocolList :: [a]}
 
-instance Serialize Int16 where
-  serialize i = BS.pack $ map ((unsafeCoerce :: Int16 -> Word8) . shiftR i) [8,0]
+instance Exts.IsList (ProtocolList i a) where
+  type Item (ProtocolList i a) = a
+  fromList = ProtocolList
+  toList = unProtocolList
 
-instance Serialize Int32 where
-  serialize i = BS.pack $ map ((unsafeCoerce :: Int32 -> Word8) . shiftR i) [24,16..0]
+instance (Integral i,Serial i,Serial a) => Serial (ProtocolList i a) where
+  serialize (ProtocolList xs) = serialize ((fromIntegral $ length xs) :: i) >> traverse serialize xs >> pure ()
+  deserialize = deserialize @i >>= \len -> ProtocolList <$> replicateM (fromIntegral len) deserialize
 
-instance Serialize Float where
-  serialize = serialize . (unsafeCoerce :: Float -> Int32)
-
-instance Serialize Int64 where
-  serialize i = BS.pack $ map ((unsafeCoerce :: Int64 -> Word8) . shiftR i) [56,48..0]
-
-instance Serialize Word64 where
-  serialize = serialize . (unsafeCoerce :: Word64 -> Int64)
-
-instance Serialize Double where
-  serialize = serialize . (unsafeCoerce :: Double -> Int64)
+-- TODO: ensure the generics instance is correct here
+--instance Serial Bool where
+  --serialize True = BS.singleton 0x01
+  --serialize False = BS.singleton 0x00
 
 -- Annotate a BS with its length as a VarInt
-withLength :: BS.ByteString -> BS.ByteString
-withLength bs = serialize ((fromIntegral $ BS.length bs) :: VarInt) <> bs
+withLength :: MonadPut m => BS.ByteString -> m ()
+withLength bs = serialize ((fromIntegral $ BS.length bs) :: VarInt) >> putByteString bs
 
 -- Annotate a list of serializable things with the length of the list
-withListLength :: Serialize s => [s] -> BS.ByteString
-withListLength ls = serialize ((fromIntegral $ length ls) :: VarInt) <> BS.concat (map serialize ls)
+withListLength :: (MonadPut m,Serial s) => [s] -> m ()
+withListLength ls = serialize ((fromIntegral $ length ls) :: VarInt) >> traverse_ serialize ls
 
 -- NOTE: Ambiguous type on packetName, parsePacket, and packetId
 -- With TypeApplications we can do for example `packetId @Server.UseEntity`
@@ -725,8 +809,8 @@ class (Packet p,PacketSide p ~ 'Server) => HandledPacket p where
 class (HandledPacket p,PacketState p ~ s) => HP s p where {}
 instance (HandledPacket p,PacketState p ~ s) => HP s p where {}
 
-class (Packet p,PacketSide p ~ 'Client,s ~ PacketState p,Serialize p) => ClientPacket s p | p -> s where {}
-instance (Packet p,PacketSide p ~ 'Client,s ~ PacketState p,Serialize p) => ClientPacket s p where {}
+class (Packet p,PacketSide p ~ 'Client,s ~ PacketState p,Serial p) => ClientPacket s p | p -> s where {}
+instance (Packet p,PacketSide p ~ 'Client,s ~ PacketState p,Serial p) => ClientPacket s p where {}
 
 -- We can't make this an actual `Show` instance without icky extentions
 showPacket :: forall p. Packet p => p -> String
@@ -747,7 +831,6 @@ class Entity m where
   entityVelocity :: m -> EntityVelocity
   entityMeta :: m -> [EntityMetadata]
 
--- Some entities are Mobs
 class Entity m => Mob m where {}
 
 -- Some entities are Objects, which can haev special, different properties
@@ -762,59 +845,98 @@ class Entity m => Object m where
   objectLocation = entityLocation
   objectData :: m -> (Int32,Maybe EntityVelocity)
 
+{-
+defaultObject :: Entity m -> String -> Word8 -> (m -> (Int32,Maybe EntityVelocity)) -> Object m
+defaultObject e name oId oDat = MkObject
+  {entityData = e
+  ,objectName = name
+  ,objectId = oId
+  ,objectSize = entitySize e
+  ,objectLocation = entityLocation e
+  ,objectData = oDat
+  }
+-}
+
 -- EntityMeta is just a normal value with special type properties
 newtype EntityMeta p = EntityMeta p
 
 -- Those special properties are that the type has an instance for `EntityMetaType`
 type EntityMetadata = SuchThat '[EntityMetaType] EntityMeta
 
+newtype EntityPropertySet = EntityPropertySet [Maybe EntityMetadata]
+
 -- Helper data structures to reduce reptition
 data EntityLocation = EntityLocation (Double,Double,Double) (Word8,Word8) 
 data EntityVelocity = EntityVelocity (Short,Short,Short)
 
--- EntityMeta can be Serialized in a special way, involving the `entityMetaFlag`
-class Serialize (EntityMeta p) => EntityMetaType p where entityMetaFlag :: Word8
+-- EntityMeta can be Seriald in a special way, involving the `entityMetaFlag`
+class Serial (EntityMeta p) => EntityMetaType p where entityMetaFlag :: Word8
 
 -- Serializing a bunch of EntityMetadatas involves indexing, so Nothing means that is absent, but it still increments the index counter
-instance Serialize [Maybe EntityMetadata] where
-  serialize = go 0
+instance Serial EntityPropertySet where
+  serialize (EntityPropertySet list) = go 0 list
     where
-      go :: Word8 -> [Maybe EntityMetadata] -> BS.ByteString
-      go ix (Just (SuchThat (EntityMeta (m::p))):xs) = serialize ix <> serialize (entityMetaFlag @p) <> serialize (EntityMeta m) <> go (succ ix) xs
+      go :: MonadPut m => Word8 -> [Maybe EntityMetadata] -> m ()
+      go ix (Just (SuchThat (EntityMeta (m::p))):xs) = putWord8 ix >> serialize (entityMetaFlag @p) >> serialize (EntityMeta m) >> go (succ ix) xs
       go ix (Nothing : xs) = go (succ ix) xs
-      go _ [] = serialize (0xff :: Word8)
+      go _ [] = putWord8 0xff
+  deserialize = error "Undefined: EntityPropertySet deserialize"
 
 -- NYI: (4,Chat) (7,Rotation 3xFloat) (8,Position)
 
 instance EntityMetaType Word8 where entityMetaFlag = 0x00
-instance Serialize (EntityMeta Word8) where serialize (EntityMeta a) = serialize a
+instance Serial (EntityMeta Word8) where 
+  serialize (EntityMeta a) = serialize a
+  deserialize = EntityMeta <$> deserialize
 
 instance EntityMetaType VarInt where entityMetaFlag = 0x01
-instance Serialize (EntityMeta VarInt) where serialize (EntityMeta a) = serialize a
+instance Serial (EntityMeta VarInt) where
+  serialize (EntityMeta a) = serialize a
+  deserialize = EntityMeta <$> deserialize
 
 instance EntityMetaType Float where entityMetaFlag = 0x02
-instance Serialize (EntityMeta Float) where serialize (EntityMeta a) = serialize a
+instance Serial (EntityMeta Float) where 
+  serialize (EntityMeta a) = serialize a
+  deserialize = EntityMeta <$> deserialize
 
 instance EntityMetaType String where entityMetaFlag = 0x03
-instance Serialize (EntityMeta String) where serialize (EntityMeta a) = serialize a
+instance Serial (EntityMeta String) where
+  serialize (EntityMeta a) = serialize a
+  deserialize = EntityMeta <$> deserialize
 
-instance EntityMetaType (Maybe Slot) where entityMetaFlag = 0x05
-instance Serialize (EntityMeta (Maybe Slot)) where serialize (EntityMeta a) = serialize a
+instance EntityMetaType SlotData where entityMetaFlag = 0x05
+instance Serial (EntityMeta SlotData) where 
+  serialize (EntityMeta a) = serialize a
+  deserialize = EntityMeta <$> deserialize @SlotData
 
 instance EntityMetaType Bool where entityMetaFlag = 0x06
-instance Serialize (EntityMeta Bool) where serialize (EntityMeta a) = serialize a
+instance Serial (EntityMeta Bool) where 
+  serialize (EntityMeta a) = serialize a
+  deserialize = EntityMeta <$> deserialize
 
 instance EntityMetaType (Maybe BlockCoord) where entityMetaFlag = 0x09
-instance Serialize (EntityMeta (Maybe BlockCoord)) where serialize (EntityMeta m) = serOpt m
+instance Serial (EntityMeta (Maybe BlockCoord)) where 
+  serialize (EntityMeta m) = serOpt m
+  deserialize = EntityMeta <$> deserOpt
 
 instance EntityMetaType BlockFace where entityMetaFlag = 0x0A
-instance Serialize (EntityMeta BlockFace) where serialize (EntityMeta f) = serialize @VarInt $ fromIntegral (fromEnum f)
+instance Serial (EntityMeta BlockFace) where 
+  serialize (EntityMeta f) = serialize @VarInt $ fromIntegral (fromEnum f)
+  deserialize = EntityMeta . toEnum . fromIntegral <$> deserialize @VarInt
 
 instance EntityMetaType (Maybe UUID) where entityMetaFlag = 0x0B
-instance Serialize (EntityMeta (Maybe UUID)) where serialize (EntityMeta m) = serOpt m
+instance Serial (EntityMeta (Maybe UUID)) where 
+  serialize (EntityMeta m) = serOpt m
+  deserialize = deserialize @Bool >>= \case
+    False -> return $ EntityMeta Nothing
+    True -> EntityMeta . Just <$> deserialize @UUID
 
 instance EntityMetaType (Maybe BlockState) where entityMetaFlag = 0x0C
-instance Serialize (EntityMeta (Maybe BlockState)) where serialize (EntityMeta m) = serialize @VarInt $ case m of {Nothing -> 0;Just (BlockState bid dmg) -> unsafeCoerce $ shiftL bid 4 .|. unsafeCoerce dmg}
+instance Serial (EntityMeta (Maybe BlockState)) where 
+  serialize (EntityMeta m) = serialize @VarInt $ case m of {Nothing -> 0;Just (BlockState bid dmg) -> unsafeCoerce $ shiftL bid 4 .|. unsafeCoerce dmg}
+  deserialize = deserialize @VarInt >>= \case
+    0 -> return (EntityMeta Nothing)
+    x -> return $ EntityMeta $ Just $ BlockState (unsafeCoerce $ shiftR x 4) (unsafeCoerce $ x .&. 0xf)
 
 -- Having access to low-level networking operations is an effect
 type Networks r = Member Networking r

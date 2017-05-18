@@ -1,34 +1,10 @@
 {-# LANGUAGE DataKinds #-}
 -- import qualified Ciskell.Entity.Mob as Mob
-module Civskell.Entity.Mob where
+module Civskell.Entity.Object where
 
 import Civskell.Entity.Base
 import Civskell.Data.Types hiding (Item)
 import Data.Word (Word8)
-
-data Item = Item BaseEntity Slot
-instance Object Item where
-  objectName = "Item Stack (Slot)"
-  objectId = 2
-  objectData (Item e _) = (1,Just (baseEntityVelocity e))
-  -- TODO: store xyz vel xyz in data Item = ...
-instance Entity Item where
-  entityName = "Item"
-  entityType = 1
-  entitySize _ = (0.25,0.25,0.25)
-  entityLocation (Item e _) = baseEntityLocation e
-  entityVelocity (Item e _) = baseEntityVelocity e
-  entityMeta (Item e slotData) = baseEntityMeta e ++ [mm (Just slotData)]
-
-data Creeper = Creeper Insentient VarInt Bool Bool
-instance Mob Creeper where {}
-instance Entity Creeper where
-  entityName = "Creeper"
-  entityType = 50
-  entitySize _ = (0.6,1.7,0.6)
-  entityLocation (Creeper i _ _ _) = insentientLocation i
-  entityVelocity (Creeper i _ _ _) = insentientVelocity i
-  entityMeta (Creeper i fuse charge ignite) = insentientMeta i ++ [mm fuse,mm charge,mm ignite]
 
 data Skeleton = Skeleton Insentient Bool
 instance Mob Skeleton where {}

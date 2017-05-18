@@ -1,8 +1,10 @@
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE ExistentialQuantification #-}
 module Civskell.Packet.Serverbound where
 
 import Data.Int
@@ -13,6 +15,8 @@ import Data.List (intercalate)
 import Data.Functor.Identity
 import Data.Word
 import Data.Bits
+import Data.Bytes.Put
+import Data.Bytes.Serial
 import qualified Data.Map as Map
 import qualified Data.ByteString as BS
 import Crypto.Hash (hash,Digest,SHA1)
@@ -27,8 +31,7 @@ import Civskell.Data.Types hiding (Player)
 import Civskell.Tech.Parse
 import Civskell.Tech.Network
 import Civskell.Tech.Encrypt
-import qualified Civskell.Entity.Base as Entity
-import qualified Civskell.Entity.Mob as Mob
+import qualified Civskell.Entity as Entity
 import qualified Civskell.Window as Window
 --import qualified Civskell.Tile as Tile
 import qualified Civskell.Item as Item
@@ -116,7 +119,7 @@ instance Packet LegacyHandshake where
   packetPretty LegacyHandshake = []
 instance HandledPacket LegacyHandshake where
   -- Legacy response
-  onPacket LegacyHandshake = iSolemnlySwearIHaveNoIdeaWhatImDoing . serialize $ Client.LegacyHandshakePong
+  onPacket LegacyHandshake = iSolemnlySwearIHaveNoIdeaWhatImDoing . runPutS . serialize $ Client.LegacyHandshakePong
   parsePacket = do
     _ <- word8 0xFE
     _ <- takeByteString
@@ -146,7 +149,7 @@ instance Packet TabComplete where
   type PacketState TabComplete = 'Playing
   packetName = "TabComplete"
   packetId = 0x01
-  packetPretty (TabComplete) = []
+  packetPretty TabComplete = []
 
 data ChatMessage = ChatMessage String
 instance Packet ChatMessage  where
@@ -160,7 +163,7 @@ instance HandledPacket ChatMessage where
     "/gamemode 1" -> setGamemode Creative
     "/gamemode 0" -> setGamemode Survival
     "chunks" -> forM_ [0..48] $ \x -> sendPacket =<< colPacket ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
-    "creeper" -> summonMob (Mob.Creeper Entity.defaultInsentient 0 False False)
+    "creeper" -> summonMob (Entity.Creeper Entity.defaultInsentient 0 False False)
     "/testchest" -> do
       let items = Map.fromList [(5,slot Item.Stick 3)]
       i <- send (WorldSTM $ newTVar items)
@@ -256,7 +259,7 @@ instance Packet EnchantItem where
   --parsePacket = error "No parser for packet"
 
 -- Slot Number
-data ClickWindow = ClickWindow WindowId Short TransactionId InventoryClickMode (Maybe Slot)
+data ClickWindow = ClickWindow WindowId Short TransactionId InventoryClickMode Slot
 instance Packet ClickWindow where
   type PacketSide ClickWindow = 'Server
   type PacketState ClickWindow = 'Playing
@@ -495,7 +498,7 @@ instance HandledPacket PlayerDigging where
       logp $ "Dropping: " ++ show dropped
       setInventorySlot heldSlot newHeld
       plaLoc <- playerPosition <$> getPlayer
-      summonObject (Mob.Item (Entity.BaseEntity (EntityLocation plaLoc (0,0)) (EntityVelocity (0,0,0)) 0x00 300 "" False False False) ((\(Just x) -> x) dropped))
+      summonObject (Entity.Item (Entity.BaseEntity (EntityLocation plaLoc (0,0)) (EntityVelocity (0,0,0)) 0x00 300 "" False False False) ((\(Slot (Just x)) -> x) dropped))
     _ -> loge $ "Unhandled Player Dig Action: " ++ showPacket p
 
   parsePacket = do
@@ -584,7 +587,7 @@ instance HandledPacket HeldItemChange where
     specificVarInt 0x17 <?> "Packet Id 0x17"
     HeldItemChange <$> parseShort
 
-data CreativeInventoryAction = CreativeInventoryAction Short (Maybe Slot)
+data CreativeInventoryAction = CreativeInventoryAction Short Slot
 instance Packet CreativeInventoryAction where
   type PacketSide CreativeInventoryAction = 'Server
   type PacketState CreativeInventoryAction = 'Playing
@@ -608,7 +611,7 @@ instance Packet UpdateSign where
   type PacketState UpdateSign = 'Playing
   packetName = "UpdateSign"
   packetId = 0x19
-  packetPretty (UpdateSign) = []
+  packetPretty UpdateSign = []
 --instance HandledPacket UpdateSign where
   --parsePacket = error "No parser for packet"
 
@@ -632,7 +635,7 @@ instance Packet Spectate where
   type PacketState Spectate = 'Playing
   packetName = "Spectate"
   packetId = 0x1B
-  packetPretty (Spectate) = []
+  packetPretty Spectate = []
 --instance HandledPacket Spectate where
   --parsePacket = error "No parser for packet"
 
@@ -654,8 +657,8 @@ instance HandledPacket PlayerBlockPlacement where
         heldSlot <- if hand == MainHand then holdingSlot <$> getPlayer else pure 45
         msl <- getInventorySlot (heldSlot + 36)
         case msl of
-          Nothing -> logp "No item to use"
-          Just (Slot (SuchThat (Identity (i :: it))) _cnt) -> case onItemUse @it of
+          Slot Nothing -> logp "No item to use"
+          Slot (Just (SlotData (SuchThat (Identity (i :: it))) _cnt)) -> case onItemUse @it of
             -- If they right click on a block with an empty hand, this will happen
             Nothing -> logp "No onItemUse for item"
             Just oiu -> oiu i block side hand cursorCoord
@@ -772,7 +775,7 @@ instance HandledPacket EncryptionResponse where
             -- Also sends player abilities
             setGamemode (defaultGamemode c)
             -- Tell them we aren't vanilla so no one gets mad at mojang for our fuck ups
-            sendPacket (Client.PluginMessage "MC|Brand" (serialize "Civskell"))
+            sendPacket (Client.PluginMessage "MC|Brand" (runPutS $ serialize @ProtocolString "Civskell"))
             -- Difficulty to peaceful
             sendPacket (Client.ServerDifficulty (defaultDifficulty c))
             -- World Spawn/Compass Direction, not where they will spawn initially
@@ -780,9 +783,9 @@ instance HandledPacket EncryptionResponse where
             -- Send initial world. Need a 7x7 grid or the client gets angry with us
             forM_ [0..48] $ \x -> sendPacket =<< colPacket ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
             -- Send an initial blank inventory
-            sendPacket (Client.WindowItems 0 Map.empty 0)
+            sendPacket (Client.WindowItems 0 (ProtocolList []))
             -- Give them some stone (for testing)
-            setInventorySlot 4 (Just $ Slot (some Item.Stone) 32)
+            setInventorySlot 4 (Slot . Just $ SlotData (some Item.Stone) 32)
             ps <- allPlayers
             sendPacket (Client.PlayerListItem (map (\p -> (clientUUID p,PlayerListAdd (clientUsername p) authProps Survival 0 Nothing)) ps))
   parsePacket = do

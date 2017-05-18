@@ -54,7 +54,7 @@ setPlayerViewAngle u = overPlayer $ \p -> p {viewAngle = u}
 setPlayerState :: HasPlayer r => ServerState -> Eff r ()
 setPlayerState u = overPlayer $ \p -> p {playerState = u}
 
-openNewWindow :: (SendsPackets r,HasPlayer r,Window w) => w -> String -> Eff r WindowId
+openNewWindow :: (SendsPackets r,HasPlayer r,Window w) => w -> ProtocolString -> Eff r WindowId
 openNewWindow winType title = do
   wid <- usingPlayer $ \t -> do
     p <- readTVar t
@@ -63,13 +63,14 @@ openNewWindow winType title = do
   sendPacket (Client.OpenWindow wid (some winType) title Nothing)
   return wid
 
-openWindowWithItems :: (HasWorld r,SendsPackets r,HasPlayer r,Logs r,Window w) => w -> String -> TVar Inventory -> Eff r WindowId
+openWindowWithItems :: (HasWorld r,SendsPackets r,HasPlayer r,Logs r,Window w) => w -> ProtocolString -> TVar Inventory -> Eff r WindowId
 openWindowWithItems (ty :: tyT) name tI = do
   wid <- openNewWindow ty name
   playerInv <- Map.mapKeysMonotonic (+(27 - 9)) . playerInventory <$> getPlayer
   items <- Map.union playerInv <$> (send . WorldSTM $ readTVar tI)
   logp $ "Sending window " ++ show wid ++ " of type " ++ windowIdentifier @tyT ++ " with items " ++ show items
-  sendPacket (Client.WindowItems wid items (slotCount @tyT))
+  -- This is wrong because it doesn't pad between items
+  sendPacket (Client.WindowItems wid (ProtocolList $ Map.elems items) {-(slotCount @tyT)-})
   return wid
 
 -- Add a new tid to the que
@@ -98,7 +99,7 @@ setGamemode g = do
     Creative -> sendPacket (Client.PlayerAbilities (AbilityFlags True False True True) 0 1)
 
 -- TODO: Semantic slot descriptors
-setInventorySlot :: (SendsPackets r,Logs r, HasPlayer r) => Short -> Maybe Slot -> Eff r ()
+setInventorySlot :: (SendsPackets r,Logs r, HasPlayer r) => Short -> Slot -> Eff r ()
 setInventorySlot slotNum slotData = do
   overPlayer $ \p -> p {playerInventory = setSlot slotNum slotData (playerInventory p)}
   sendPacket (Client.SetSlot 0 slotNum slotData)
@@ -111,8 +112,11 @@ setInventorySlot slotNum slotData = do
 --flushInbox = send FlushInbox
 
 {-# INLINE getInventorySlot #-}
-getInventorySlot :: (HasPlayer r) => Short -> Eff r (Maybe Slot)
-getInventorySlot slotNum = Map.lookup slotNum . playerInventory <$> getPlayer
+getInventorySlot :: (HasPlayer r) => Short -> Eff r Slot
+getInventorySlot slotNum = renormalize . Map.lookup slotNum . playerInventory <$> getPlayer
+  where
+    renormalize (Just s) = s
+    renormalize Nothing = Slot Nothing
 
 {-# INLINE registerPlayer #-}
 registerPlayer :: HasPlayer r => Eff r PlayerId
