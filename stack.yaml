@@ -38,11 +38,11 @@ resolver: lts-8.2
 packages:
 - '.'
 - location: 
-    git: git@github.com:Lazersmoke/ghost-buster.git
+    git: https://github.com/Lazersmoke/ghost-buster.git
     commit: ca4a4b379aab7a6a389e8f14e645e6e9b6858d67
   extra-dep: true
 - location: 
-    git: git@github.com:Lazersmoke/reee-monads.git
+    git: https://github.com/Lazersmoke/reee-monads.git
     commit: 1fb57be23dfc6c61a7050c352d6800161601a7aa
   extra-dep: true
 # Dependency packages to be pulled from upstream that are not in the resolver

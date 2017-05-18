@@ -36,34 +36,8 @@ instance Packet LegacyHandshakePong where
   packetId = 0xFF
   packetPretty _ = []
 instance Serial LegacyHandshakePong where
-  deserialize = error "Undefined: deserialize @LegacyHandshakePong"
-  serialize LegacyHandshakePong = putByteString $ BS.pack [0xFF,0x00,0x1b,0x00,0xa7
-    ,0x00,0x31 -- 1
-    ,0x00,0x00 -- Seperator
-    ,0x00,0x33 -- 3
-    ,0x00,0x31 -- 1
-    ,0x00,0x36 -- 6
-    ,0x00,0x00 -- Seperator
-    ,0x00,0x31 -- 1
-    ,0x00,0x2e -- .
-    ,0x00,0x31 -- 1
-    ,0x00,0x31 -- 1
-    ,0x00,0x2e -- .
-    ,0x00,0x32 -- 2
-    ,0x00,0x00 -- Seperator
-    ,0x00,0x43 -- C
-    ,0x00,0x69 -- i
-    ,0x00,0x76 -- v
-    ,0x00,0x73 -- s
-    ,0x00,0x6b -- k
-    ,0x00,0x65 -- e
-    ,0x00,0x6c -- l
-    ,0x00,0x6c -- l
-    ,0x00,0x00 -- Seperator
-    ,0x00,0x00 -- 0
-    ,0x00,0x00 -- Seperator
-    ,0x00,0x00 -- 0
-    ]
+  serialize LegacyHandshakePong = putByteString legacyHandshakePongConstant
+  deserialize = getByteString (BS.length legacyHandshakePacketConstant) >>= \b -> if b /= legacyHandshakePacketConstant then fail "Failed: deserialize @LegacyHandshakePong" else pure LegacyHandshake
 
 data Disconnect = Disconnect ProtocolString deriving (Generic,Serial)
 instance Packet Disconnect where

@@ -1,5 +1,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TypeApplications #-}
@@ -80,7 +82,7 @@ parsePlayPacket = choice
 
 -- TODO: Re-specify parsers for different server states
 
-data Handshake = Handshake VarInt String Word16 VarInt
+data Handshake = Handshake VarInt ProtocolString Word16 VarInt deriving (Generic,Serial)
 instance Packet Handshake where
   type PacketSide Handshake = 'Server
   type PacketState Handshake = 'Handshaking
@@ -102,15 +104,8 @@ instance HandledPacket Handshake where
       _ -> logp "Invalid newstate"
     -- They are using the incorrect protocol version. Disconnect packet will probably work even if they have a different version.
     else sendPacket (Client.Disconnect (jsonyText $ "Unsupported protocol version. Please use " ++ show protocolVersion))
-  parsePacket = do
-    specificVarInt 0x00
-    Handshake
-      <$> parseVarInt
-      <*> parseVarString
-      <*> parseUnsignedShort
-      <*> parseVarInt
 
-data LegacyHandshake = LegacyHandshake
+data LegacyHandshake = LegacyHandshake Word8 LegacyString Int32
 instance Packet LegacyHandshake where
   type PacketSide LegacyHandshake = 'Server
   type PacketState LegacyHandshake = 'Handshaking
@@ -124,6 +119,15 @@ instance HandledPacket LegacyHandshake where
     _ <- word8 0xFE
     _ <- takeByteString
     return LegacyHandshake
+  onPacket LegacyHandshake = iSolemnlySwearIHaveNoIdeaWhatImDoing . serialize $ Client.LegacyHandshakePong
+
+instance Serial LegacyHandshake where
+  serialize (LegacyHandshake proto hostname port) = putByteString legacyHandshakePingConstant *> putInt16 (fromIntegral $ 7 + length hostname) *> putWord8 proto *> serialize hostname *> putInt32 port
+  deserialize = do
+    getByteString (BS.length legacyHandshakePingConstant) 
+    len <- getInt16
+    _ <- lookAhead (ensure len)
+    LegacyHandshake <$> getWord8 <*> (LegacyString <$> getByteString (len - 7)) <*> getInt32
 
 data TPConfirm = TPConfirm VarInt
 instance Packet TPConfirm where
