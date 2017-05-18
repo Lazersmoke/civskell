@@ -53,7 +53,7 @@ module Civskell.Data.Types
   -- World
   ,HasWorld,WorldData(..),World(..)
   -- Logging
-  ,Logs,Logging(..),LogLevel(..)
+  ,Logs,Logging(..),LogLevel(..),LogQueue(..),freshLogQueue
   -- Network
   ,Networks,Networking(..)
   -- Packeting
@@ -71,7 +71,6 @@ module Civskell.Data.Types
   ,EntityVelocity(..)
   ,Mob
   ,Object(..)
-  ,Serialize(..)
   ) where
 
 import Control.Concurrent.STM
@@ -104,6 +103,7 @@ import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.UTF8
 import qualified Data.Map.Lazy as Map
 import qualified Data.Serialize as Ser
+import Data.Bytes.Serial
 import qualified Data.Set as Set
 import qualified Data.Text as Text
 
@@ -757,13 +757,20 @@ type Logs r = Member Logging r
 
 data Logging a where
   -- Log a string at a given Log Level
-  LogString :: LogLevel -> String -> Logging ()
+  LogString :: LogLevel -> Text -> Logging ()
   -- Commute a Logging effect out of a stack
   ForkLogger :: (Configured r,PerformsIO r) => Eff (Logging ': r) a -> Logging (Eff r a)
 
 -- TODO: replace this with a `data LogSpec = LogSpec {spec :: String -> String,level :: Int}`?
 -- Level of verbosity to log at
 data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | VerboseLog | TaggedLog String | NormalLog deriving Eq
+
+-- A thing that shuffles log messages off of running threads and logs that whenever on a dedicated one.
+newtype LogQueue = LogQueue (TQueue Text)
+
+-- Make a new, empty LogQueue
+freshLogQueue :: PerformsIO r => Eff r LogQueue
+freshLogQueue = send $ newTQueueIO 
 
 -- All the information about a mineman world. Notably, players is a Map of PId's to TVars of player data, not actual player data
 data WorldData = WorldData {chunks :: Map ChunkCoord ChunkSection, entities :: Map EntityId (Some Entity), players :: Map PlayerId (TVar PlayerData), nextEID :: EntityId, nextUUID :: UUID}

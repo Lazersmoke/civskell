@@ -88,11 +88,11 @@ runPacketing (Eff u q) = case u of
 forkNetwork :: (Networks q,PerformsIO r) => Eff (Networking ': r) a -> Eff q (Eff r a)
 forkNetwork = send . ForkNetwork
 
-runNetworking :: PerformsIO r => MVar () -> TVar (Maybe EncryptionCouplet) -> TVar (Maybe VarInt) -> Handle -> Eff (Networking ': r) a -> Eff r a
-runNetworking _ _ _ _ (Pure x) = Pure x
-runNetworking netLock mEnc mThresh hdl (Eff u q) = case u of
-  Weaken restOfU -> Eff restOfU (Singleton (runNetworking netLock mEnc mThresh hdl . runTCQ q))
-  Inject (ForkNetwork e) -> runNetworking netLock mEnc mThresh hdl (runTCQ q (runNetworking netLock mEnc mThresh hdl e))
+runNetworking :: PerformsIO r => TVar (Maybe EncryptionCouplet) -> TVar (Maybe VarInt) -> Handle -> Eff (Networking ': r) a -> Eff r a
+runNetworking _ _ _ (Pure x) = Pure x
+runNetworking mEnc mThresh hdl (Eff u q) = case u of
+  Weaken restOfU -> Eff restOfU (Singleton (runNetworking mEnc mThresh hdl . runTCQ q))
+  Inject (ForkNetwork e) -> runNetworking mEnc mThresh hdl (runTCQ q (runNetworking mEnc mThresh hdl e))
   Inject (GetFromNetwork len) -> do
     -- We don't want exclusive access here because we will block
     dat <- send $ BS.hGet hdl len
@@ -104,7 +104,7 @@ runNetworking netLock mEnc mThresh hdl (Eff u q) = case u of
         let (bs',d') = cfb8Decrypt c d dat
         writeTVar mEnc (Just (c,e,d'))
         return bs'
-    runNetworking netLock mEnc mThresh hdl (runTCQ q clear)
+    runNetworking mEnc mThresh hdl (runTCQ q clear)
   Inject (PutIntoNetwork bs) -> do
     -- Encrypt the data or don't based on the encryption value
     enc <- send . atomically $ readTVar mEnc >>= \case
@@ -114,14 +114,8 @@ runNetworking netLock mEnc mThresh hdl (Eff u q) = case u of
         let (bs',e') = cfb8Encrypt c e bs
         writeTVar mEnc (Just (c,e',d))
         return bs'
-    -- Use the netLock to ensure we have exclusive access to the handle
-    -- Aquire
-    --send $ takeMVar netLock
-    -- Write
     send $ BS.hPut hdl enc
-    -- Release
-    --send $ putMVar netLock ()
-    runNetworking netLock mEnc mThresh hdl (runTCQ q ())
+    runNetworking mEnc mThresh hdl (runTCQ q ())
   Inject (SetCompressionLevel thresh) -> do
     send . atomically $ readTVar mThresh >>= \case
       -- If there is no pre-existing threshold, set one
@@ -129,17 +123,17 @@ runNetworking netLock mEnc mThresh hdl (Eff u q) = case u of
       -- If there is already compression, don't change it (only one setCompression is allowed)
       -- Should we throw an error instead of silently failing here?
       Just _ -> pure ()
-    runNetworking netLock mEnc mThresh hdl (runTCQ q ())
+    runNetworking mEnc mThresh hdl (runTCQ q ())
   Inject (SetupEncryption sharedSecret) -> do
     send . atomically $ readTVar mThresh >>= \case
       -- If there is no encryption setup yet, set it up
       Nothing -> writeTVar mEnc (Just (makeEncrypter sharedSecret,sharedSecret,sharedSecret))
       -- If it is already encrypted, don't do anything
       Just _ -> pure ()
-    runNetworking netLock mEnc mThresh hdl (runTCQ q ())
+    runNetworking mEnc mThresh hdl (runTCQ q ())
   Inject (AddCompression bs) -> send (readTVarIO mThresh) >>= \case
     -- Do not compress; annotate with length only
-    Nothing -> runNetworking netLock mEnc mThresh hdl (runTCQ q (withLength bs))
+    Nothing -> runNetworking mEnc mThresh hdl (runTCQ q (withLength bs))
     -- Compress with the threshold `t`
     Just t -> if BS.length bs >= fromIntegral t
       -- Compress data and annotate to match
@@ -149,24 +143,24 @@ runNetworking netLock mEnc mThresh hdl (Eff u q) = case u of
         -- Add the original size annotation
         let origSize = serialize $ ((fromIntegral (BS.length bs)) :: VarInt)
         let ann = withLength (origSize <> compIdAndData)
-        runNetworking netLock mEnc mThresh hdl (runTCQ q ann)
+        runNetworking mEnc mThresh hdl (runTCQ q ann)
       -- Do not compress; annotate with length only
       else do
         -- 0x00 indicates it is not compressed
         let ann = withLength (BS.singleton 0x00 <> bs)
-        runNetworking netLock mEnc mThresh hdl (runTCQ q ann)
+        runNetworking mEnc mThresh hdl (runTCQ q ann)
   Inject (RemoveCompression bs) -> send (readTVarIO mThresh) >>= \case
     -- Parse an uncompressed packet
     Nothing -> case parseOnly parseUncompPkt bs of
       -- TODO: fix this completely ignoring a parse error
-      Left _ -> runNetworking netLock mEnc mThresh hdl (runTCQ q bs)
-      Right pktData -> runNetworking netLock mEnc mThresh hdl (runTCQ q pktData)
+      Left _ -> runNetworking mEnc mThresh hdl (runTCQ q bs)
+      Right pktData -> runNetworking mEnc mThresh hdl (runTCQ q pktData)
     -- Parse a compressed packet (compressed packets have extra metadata)
     Just _ -> case parseOnly parseCompPkt bs of
       -- TODO: fix this completely ignoring a parse error
-      Left _ -> runNetworking netLock mEnc mThresh hdl (runTCQ q bs)
+      Left _ -> runNetworking mEnc mThresh hdl (runTCQ q bs)
       Right (dataLen,compressedData) -> if dataLen == 0
         -- dataLen of 0 means that the packet is actually uncompressed
-        then runNetworking netLock mEnc mThresh hdl (runTCQ q compressedData)
+        then runNetworking mEnc mThresh hdl (runTCQ q compressedData)
         -- If it is indeed compressed, uncompress it
-        else runNetworking netLock mEnc mThresh hdl (runTCQ q (LBS.toStrict . Z.decompress . LBS.fromStrict $ compressedData))
+        else runNetworking mEnc mThresh hdl (runTCQ q (LBS.toStrict . Z.decompress . LBS.fromStrict $ compressedData))
