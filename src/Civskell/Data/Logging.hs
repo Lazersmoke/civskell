@@ -1,4 +1,5 @@
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
@@ -15,6 +16,8 @@ import Control.Eff
 import Control.Eff.Reader
 import Control.Monad (when)
 import Control.Concurrent.STM
+import Data.Text (Text)
+import Data.Semigroup ((<>))
 
 import Civskell.Data.Types
 
@@ -49,13 +52,13 @@ runLogger s@(LogQueue l) (Eff u q) = case u of
     -- Apply the configured loggin predicate to see if this message should be logged
     p <- ($ level) . shouldLog <$> ask 
     -- Select the prefix, then send off the log message
-    when p $ send . atomically . writeTQueue l . (++str) $ case level of
+    when p $ send . atomically . writeTQueue l . (<>str) $ case level of
       HexDump -> ""
       ClientboundPacket -> "[\x1b[32mSent\x1b[0m] "
       ServerboundPacket -> "[\x1b[32mRecv\x1b[0m] "
       ErrorLog -> "[\x1b[31m\x1b[1mError\x1b[0m] "
       VerboseLog -> "[\x1b[36mCivSkell/Verbose\x1b[0m] "
-      (TaggedLog tag) -> "[\x1b[36m" ++ tag ++ "\x1b[0m] "
+      (TaggedLog tag) -> "[\x1b[36m" <> tag <> "\x1b[0m] "
       NormalLog -> "[\x1b[36mCivSkell\x1b[0m] "
     -- Return regardless of log level
     runLogger s (runTCQ q ())

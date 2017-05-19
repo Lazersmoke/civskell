@@ -10,11 +10,11 @@ module Civskell.Data.Networking where
 
 import Control.Eff
 import Control.Concurrent.STM
-import Control.Concurrent.MVar
 import Data.SuchThat
 import Data.Functor.Identity
 import Data.Bytes.Serial
 import Data.Bytes.Put
+import qualified Data.Text as T
 import System.IO
 import Data.Attoparsec.ByteString
 import qualified Codec.Compression.Zlib as Z
@@ -50,7 +50,7 @@ addCompression = send . AddCompression
 removeCompression :: Networks n => BS.ByteString -> Eff n BS.ByteString
 removeCompression = send . RemoveCompression
 
-sendPacket :: (SendsPackets r,Serialize p,Packet p) => p -> Eff r ()
+sendPacket :: (SendsPackets r,Serial p,Packet p) => p -> Eff r ()
 sendPacket = sendAnyPacket . ambiguate . OutboundPacket . ambiguate . Identity
 
 sendAnyPacket :: SendsPackets r => ForAny OutboundPacket -> Eff r ()
@@ -73,8 +73,8 @@ runPacketing (Eff u q) = case u of
   -- Unpack from the existentials to get the type information into a skolem, scoped tyvar
   Inject (SendPacket (SuchThat (OutboundPacket (SuchThat (Identity (s :: a)))))) -> do
     -- Log its hex dump
-    logLevel ClientboundPacket $ showPacket s
-    logLevel HexDump $ indentedHex (runPutS . serialize $ s)
+    logLevel ClientboundPacket . T.pack $ showPacket s
+    logLevel HexDump . T.pack $ indentedHex (runPutS . serialize $ s)
     -- Send it
     rPut =<< addCompression (BS.append (runPutS . serialize $ packetId @a) . runPutS . serialize $ s)
     runPacketing (runTCQ q ())
@@ -133,7 +133,7 @@ runNetworking mEnc mThresh hdl (Eff u q) = case u of
     runNetworking mEnc mThresh hdl (runTCQ q ())
   Inject (AddCompression bs) -> send (readTVarIO mThresh) >>= \case
     -- Do not compress; annotate with length only
-    Nothing -> runNetworking netLock mEnc mThresh hdl (runTCQ q (runPutS . withLength . runPutS . serialize $ bs))
+    Nothing -> runNetworking mEnc mThresh hdl (runTCQ q (runPutS . withLength . runPutS . serialize $ bs))
     -- Compress with the threshold `t`
     Just t -> if BS.length bs >= fromIntegral t
       -- Compress data and annotate to match
@@ -143,12 +143,12 @@ runNetworking mEnc mThresh hdl (Eff u q) = case u of
         -- Add the original size annotation
         let origSize = serialize $ ((fromIntegral (BS.length bs)) :: VarInt)
         let ann = withLength (runPutS $ origSize >> compIdAndData)
-        runNetworking netLock mEnc mThresh hdl (runTCQ q (runPutS ann))
+        runNetworking mEnc mThresh hdl (runTCQ q (runPutS ann))
       -- Do not compress; annotate with length only
       else do
         -- 0x00 indicates it is not compressed
         let ann = withLength (runPutS $ putWord8 0x00 >> putByteString bs)
-        runNetworking netLock mEnc mThresh hdl (runTCQ q (runPutS ann))
+        runNetworking mEnc mThresh hdl (runTCQ q (runPutS ann))
   Inject (RemoveCompression bs) -> send (readTVarIO mThresh) >>= \case
     -- Parse an uncompressed packet
     Nothing -> case parseOnly parseUncompPkt bs of

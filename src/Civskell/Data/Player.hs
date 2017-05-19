@@ -1,4 +1,5 @@
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE LambdaCase #-}
@@ -14,6 +15,9 @@ import Control.Concurrent.STM
 import Data.Word (Word8)
 import qualified Data.Set as Set
 import qualified Data.Map.Lazy as Map
+import Data.Text (Text)
+import qualified Data.Text as T
+import Data.Semigroup ((<>))
 
 import Civskell.Data.Types
 import qualified Civskell.Packet.Clientbound as Client
@@ -68,7 +72,7 @@ openWindowWithItems (ty :: tyT) name tI = do
   wid <- openNewWindow ty name
   playerInv <- Map.mapKeysMonotonic (+(27 - 9)) . playerInventory <$> getPlayer
   items <- Map.union playerInv <$> (send . WorldSTM $ readTVar tI)
-  logp $ "Sending window " ++ show wid ++ " of type " ++ windowIdentifier @tyT ++ " with items " ++ show items
+  logp $ "Sending window " <> T.pack (show wid) <> " of type " <> T.pack (windowIdentifier @tyT) <> " with items " <> T.pack (show items)
   -- This is wrong because it doesn't pad between items
   sendPacket (Client.WindowItems wid (ProtocolList $ Map.elems items) {-(slotCount @tyT)-})
   return wid
@@ -123,8 +127,8 @@ registerPlayer :: HasPlayer r => Eff r PlayerId
 registerPlayer = send RegisterPlayer
 
 {-# INLINE logp #-}
-logp :: (Logs r,HasPlayer r) => String -> Eff r ()
-logp msg = flip logt msg =<< clientUsername <$> getPlayer
+logp :: (Logs r,HasPlayer r) => Text -> Eff r ()
+logp msg = flip logt msg =<< T.pack . clientUsername <$> getPlayer
 
 forkPlayer :: (HasPlayer q,PerformsIO r,SendsPackets r,HasWorld r,Logs r) => Eff (Player ': r) a -> Eff q (Eff r a)
 forkPlayer = send . ForkPlayer

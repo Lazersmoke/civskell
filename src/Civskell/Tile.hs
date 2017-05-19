@@ -30,6 +30,7 @@ instance Block Stone where
     Diorite True -> "Polished Diorite"
     Andesite False -> "Andesite"
     Andesite True -> "Polished Andesite"
+  droppedItem = some Item.Stone
 
 data Grass = Grass
 instance Block Grass where

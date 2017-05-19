@@ -1,4 +1,5 @@
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -10,6 +11,8 @@ import Control.Concurrent.STM
 import Data.SuchThat
 import Data.Functor.Identity
 import Control.Eff
+import qualified Data.Text as T
+import Data.Semigroup ((<>))
 
 import Civskell.Data.Types hiding (Player)
 import Civskell.Data.Logging
@@ -30,9 +33,9 @@ defaultInventoryClick gs ss wid slotNum transId = \case
     -- If everything is in order
     Just (newSlot,newHand) -> do
       -- Set the slots to their new values
-      logp $ "Setting slot -1 to " ++ show newHand
+      logp $ "Setting slot -1 to " <> T.pack (show newHand)
       ss (-1) newHand
-      logp $ "Setting slot " ++ show slotNum ++ " to " ++ show newSlot
+      logp $ "Setting slot " <> T.pack (show slotNum) <> " to " <> T.pack (show newSlot)
       ss slotNum newSlot
       -- Confirm the transaction was successful
       return True --sendPacket (Client.ConfirmTransaction wid transId True)

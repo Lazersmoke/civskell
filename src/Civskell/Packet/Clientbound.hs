@@ -30,18 +30,16 @@ import Civskell.Data.Types
 
 data LegacyHandshakePong = LegacyHandshakePong
 instance Packet LegacyHandshakePong where
-  type PacketSide LegacyHandshakePong = 'Client
   type PacketState LegacyHandshakePong = 'Handshaking
   packetName = "LegacyHandshakePong"
   packetId = 0xFF
   packetPretty _ = []
 instance Serial LegacyHandshakePong where
   serialize LegacyHandshakePong = putByteString legacyHandshakePongConstant
-  deserialize = getByteString (BS.length legacyHandshakePacketConstant) >>= \b -> if b /= legacyHandshakePacketConstant then fail "Failed: deserialize @LegacyHandshakePong" else pure LegacyHandshake
+  deserialize = getByteString (BS.length legacyHandshakePongConstant) >>= \b -> if b /= legacyHandshakePongConstant then fail "Failed: deserialize @LegacyHandshakePong" else pure LegacyHandshakePong
 
 data Disconnect = Disconnect ProtocolString deriving (Generic,Serial)
 instance Packet Disconnect where
-  type PacketSide Disconnect = 'Client
   type PacketState Disconnect = 'LoggingIn
   packetName = "Disconnect"
   packetId = 0x00
@@ -50,7 +48,6 @@ instance Packet Disconnect where
 -- Server ID, Pub Key, Verify Token
 data EncryptionRequest = EncryptionRequest String BS.ByteString BS.ByteString deriving (Generic,Serial)
 instance Packet EncryptionRequest where
-  type PacketSide EncryptionRequest = 'Client
   type PacketState EncryptionRequest = 'LoggingIn
   packetName = "EncryptionRequest"
   packetId = 0x01
@@ -59,7 +56,6 @@ instance Packet EncryptionRequest where
 -- UUID (with hyphens), Username
 data LoginSuccess = LoginSuccess String String deriving (Generic,Serial)
 instance Packet LoginSuccess where
-  type PacketSide LoginSuccess = 'Client
   type PacketState LoginSuccess = 'LoggingIn
   packetName = "LoginSuccess"
   packetId = 0x02
@@ -68,7 +64,6 @@ instance Packet LoginSuccess where
 -- Size threshold for compression
 data SetCompression = SetCompression VarInt deriving (Generic,Serial)
 instance Packet SetCompression where
-  type PacketSide SetCompression = 'Client
   type PacketState SetCompression = 'LoggingIn
   packetName = "SetCompression"
   packetId = 0x03
@@ -77,7 +72,6 @@ instance Packet SetCompression where
 -- JSON String (for now)
 data StatusResponse = StatusResponse String deriving (Generic,Serial)
 instance Packet StatusResponse where
-  type PacketSide StatusResponse = 'Client
   type PacketState StatusResponse = 'Status
   packetName = "StatusResponse"
   packetId = 0x00
@@ -87,7 +81,6 @@ instance Packet StatusResponse where
 -- Payload (unique number obtained from client)
 data StatusPong = StatusPong Int64 deriving (Generic,Serial)
 instance Packet StatusPong where
-  type PacketSide StatusPong = 'Client
   type PacketState StatusPong = 'Status
   packetName = "StatusPong"
   packetId = 0x01
@@ -96,7 +89,6 @@ instance Packet StatusPong where
 -- EID, UUID, Type of Object, x, y, z, pitch, yaw, Object Data, velx, vely, velz
 data SpawnObject = SpawnObject EntityId UUID (Some Object)
 instance Packet SpawnObject where
-  type PacketSide SpawnObject = 'Client
   type PacketState SpawnObject = 'Playing
   packetName = "SpawnObject"
   packetId = 0x00
@@ -118,7 +110,6 @@ instance Serial SpawnObject where
 -- EID, x, y, z, count
 data SpawnExpOrb = SpawnExpOrb EntityId (Double,Double,Double) Short deriving (Generic,Serial)
 instance Packet SpawnExpOrb where
-  type PacketSide SpawnExpOrb = 'Client
   type PacketState SpawnExpOrb = 'Playing
   packetName = "SpawnExpOrb"
   packetId = 0x01
@@ -127,7 +118,6 @@ instance Packet SpawnExpOrb where
 -- EID, Type (always 1 for thunderbolt), x, y, z
 data SpawnGlobalEntity = SpawnGlobalEntity EntityId Word8 (Double,Double,Double) deriving (Generic,Serial)
 instance Packet SpawnGlobalEntity where
-  type PacketSide SpawnGlobalEntity = 'Client
   type PacketState SpawnGlobalEntity = 'Playing
   packetName = "SpawnGlobalEntity"
   packetId = 0x02
@@ -137,7 +127,6 @@ instance Packet SpawnGlobalEntity where
 --data SpawnMob = SpawnMob EntityId UUID (Some Entity) Word8 EntityPropertySet deriving (Generic,Serial)
 data SpawnMob = SpawnMob EntityId UUID VarInt (Double,Double,Double) (Word8,Word8,Word8) (Short,Short,Short) EntityPropertySet deriving (Generic,Serial)
 instance Packet SpawnMob where
-  type PacketSide SpawnMob = 'Client
   type PacketState SpawnMob = 'Playing
   packetName = "SpawnMob"
   packetId = 0x03
@@ -157,7 +146,6 @@ makeSpawnMob eid uuid headPitch (SuchThat (Identity (e :: m))) = SpawnMob eid uu
 -- EID, UUID, Title, Location,
 data SpawnPainting = SpawnPainting EntityId UUID String BlockCoord Word8 deriving (Generic,Serial)
 instance Packet SpawnPainting where
-  type PacketSide SpawnPainting = 'Client
   type PacketState SpawnPainting = 'Playing
   packetName = "SpawnPainting"
   packetId = 0x04
@@ -166,7 +154,6 @@ instance Packet SpawnPainting where
 -- EID, UUID, x, y, z, yaw, pitch, metadata
 data SpawnPlayer = SpawnPlayer EntityId UUID (Double,Double,Double) Word8 Word8 EntityPropertySet deriving (Generic,Serial)
 instance Packet SpawnPlayer where
-  type PacketSide SpawnPlayer = 'Client
   type PacketState SpawnPlayer = 'Playing
   packetName = "SpawnPlayer"
   packetId = 0x05
@@ -175,7 +162,6 @@ instance Packet SpawnPlayer where
 -- EID, Animation ID (from table)
 data Animation = Animation EntityId Word8 deriving (Generic,Serial)
 instance Packet Animation where
-  type PacketSide Animation = 'Client
   type PacketState Animation = 'Playing
   packetName = "Animation"
   packetId = 0x06
@@ -184,7 +170,6 @@ instance Packet Animation where
 -- List of all stats
 data Statistics = Statistics (ProtocolList VarInt (ProtocolString,VarInt)) deriving (Generic,Serial)
 instance Packet Statistics where
-  type PacketSide Statistics = 'Client
   type PacketState Statistics = 'Playing
   packetName = "Statistics"
   packetId = 0x07
@@ -193,7 +178,6 @@ instance Packet Statistics where
 -- EID, Block coord, stage (0-9)
 data BlockBreakAnimation = BlockBreakAnimation EntityId BlockCoord Word8 deriving (Generic,Serial)
 instance Packet BlockBreakAnimation where
-  type PacketSide BlockBreakAnimation = 'Client
   type PacketState BlockBreakAnimation = 'Playing
   packetName = "BlockBreakAnimation"
   packetId = 0x08
@@ -201,7 +185,6 @@ instance Packet BlockBreakAnimation where
 
 data UpdateBlockEntity = UpdateBlockEntity BlockCoord Word8 ProtocolNBT deriving (Generic,Serial)
 instance Packet UpdateBlockEntity where
-  type PacketSide UpdateBlockEntity = 'Client
   type PacketState UpdateBlockEntity = 'Playing
   packetName = "UpdateBlockEntity"
   packetId = 0x09
@@ -210,7 +193,6 @@ instance Packet UpdateBlockEntity where
 -- Block coord, Action Id (enum), Action Param, Block Type ; http://wiki.vg/Block_Actions
 data BlockAction = BlockAction BlockCoord (Word8,Word8) VarInt deriving (Generic,Serial)
 instance Packet BlockAction where
-  type PacketSide BlockAction = 'Client
   type PacketState BlockAction = 'Playing
   packetName = "BlockAction"
   packetId = 0x0A
@@ -219,7 +201,6 @@ instance Packet BlockAction where
 -- Block coord, Block ID (from global palette)
 data BlockChange = BlockChange BlockCoord (Some Block)
 instance Packet BlockChange where
-  type PacketSide BlockChange = 'Client
   type PacketState BlockChange = 'Playing
   packetName = "BlockChange"
   packetId = 0x0B
@@ -231,7 +212,6 @@ instance Serial BlockChange where
 -- UUID, Action (from enum)
 data BossBar = BossBar String {- BossBarAction NYI -}
 instance Packet BossBar where
-  type PacketSide BossBar = 'Client
   type PacketState BossBar = 'Playing
   packetName = "BossBar"
   packetId = 0x0C
@@ -243,7 +223,6 @@ instance Serial BossBar where
 -- Difficulty (0-3)
 data ServerDifficulty = ServerDifficulty Difficulty deriving (Generic,Serial)
 instance Packet ServerDifficulty where
-  type PacketSide ServerDifficulty = 'Client
   type PacketState ServerDifficulty = 'Playing
   packetName = "ServerDifficulty"
   packetId = 0x0D
@@ -252,7 +231,6 @@ instance Packet ServerDifficulty where
 -- List of matches for tab completion. Prefixed with length when sent
 data TabComplete = TabComplete (ProtocolList VarInt ProtocolString)
 instance Packet TabComplete where
-  type PacketSide TabComplete = 'Client
   type PacketState TabComplete = 'Playing
   packetName = "TabComplete"
   packetId = 0x0E
@@ -261,7 +239,6 @@ instance Packet TabComplete where
 -- JSON chat string, place to appear in (0:chatbox,1:sys msg. chatbox,2:hotbar)
 data ChatMessage = ChatMessage ProtocolString Word8 deriving (Generic,Serial)
 instance Packet ChatMessage where
-  type PacketSide ChatMessage = 'Client
   type PacketState ChatMessage = 'Playing
   packetName = "ChatMessage"
   packetId = 0x0F
@@ -270,7 +247,6 @@ instance Packet ChatMessage where
 -- Chunk x, Chunk z, List of (chunk relative coords in special format, Block Id (global palette))
 data MultiBlockChange = MultiBlockChange (Int32,Int32) (ProtocolList VarInt ((Word8,Word8),VarInt)) deriving (Generic,Serial)
 instance Packet MultiBlockChange where
-  type PacketSide MultiBlockChange = 'Client
   type PacketState MultiBlockChange = 'Playing
   packetName = "MultiBlockChange"
   packetId = 0x10
@@ -279,7 +255,6 @@ instance Packet MultiBlockChange where
 -- Window Id, Transaction Id, Accepted
 data ConfirmTransaction = ConfirmTransaction WindowId TransactionId Bool deriving (Generic,Serial)
 instance Packet ConfirmTransaction where
-  type PacketSide ConfirmTransaction = 'Client
   type PacketState ConfirmTransaction = 'Playing
   packetName = "ConfirmTransaction"
   packetId = 0x11
@@ -287,7 +262,6 @@ instance Packet ConfirmTransaction where
 
 data CloseWindow = CloseWindow WindowId deriving (Generic,Serial)
 instance Packet CloseWindow where
-  type PacketSide CloseWindow = 'Client
   type PacketState CloseWindow = 'Playing
   packetName = "CloseWindow"
   packetId = 0x12
@@ -296,7 +270,6 @@ instance Packet CloseWindow where
 -- Window Id, Window Type (Enum), JSON chat string of Window Title, Num of Slots, optionally: EID of horse
 data OpenWindow = OpenWindow WindowId (Some Window) ProtocolString (Maybe EntityId)
 instance Packet OpenWindow where
-  type PacketSide OpenWindow = 'Client
   type PacketState OpenWindow = 'Playing
   packetName = "OpenWindow"
   packetId = 0x13
@@ -308,7 +281,6 @@ instance Serial OpenWindow where
 -- Window Id, Slots
 data WindowItems = WindowItems WindowId (ProtocolList Short Slot) deriving (Generic,Serial)
 instance Packet WindowItems where
-  type PacketSide WindowItems = 'Client
   type PacketState WindowItems = 'Playing
   packetName = "WindowItems"
   packetId = 0x14
@@ -326,7 +298,6 @@ instance Serial WindowItems where
 -- Window Id, Property (enum), Value (enum)
 data WindowProperty = WindowProperty WindowId Short Short deriving (Generic,Serial)
 instance Packet WindowProperty where
-  type PacketSide WindowProperty = 'Client
   type PacketState WindowProperty = 'Playing
   packetName = "WindowProperty"
   packetId = 0x15
@@ -335,7 +306,6 @@ instance Packet WindowProperty where
 -- Window Id, Slot num, <Slot>
 data SetSlot = SetSlot WindowId Short Slot deriving (Generic,Serial)
 instance Packet SetSlot where
-  type PacketSide SetSlot = 'Client
   type PacketState SetSlot = 'Playing
   packetName = "SetSlot"
   packetId = 0x16
@@ -344,7 +314,6 @@ instance Packet SetSlot where
 -- Item Id (applies to all instances), Cooldown Ticks
 data SetCooldown = SetCooldown VarInt VarInt deriving (Generic,Serial)
 instance Packet SetCooldown where
-  type PacketSide SetCooldown = 'Client
   type PacketState SetCooldown = 'Playing
   packetName = "SetCooldown"
   packetId = 0x17
@@ -353,7 +322,6 @@ instance Packet SetCooldown where
 -- Plugin Channel, Data
 data PluginMessage = PluginMessage ProtocolString BS.ByteString
 instance Packet PluginMessage where
-  type PacketSide PluginMessage = 'Client
   type PacketState PluginMessage = 'Playing
   packetName = "PluginMessage"
   packetId = 0x18
@@ -369,7 +337,6 @@ instance Serial PluginMessage where
 -- Sound Name (Enum), Sound Category (Enum), weird encoding for: x,y,z, Volume, Pitch
 data NamedSoundEffect = NamedSoundEffect ProtocolString VarInt (Int32,Int32,Int32) Float Float deriving (Generic,Serial)
 instance Packet NamedSoundEffect where
-  type PacketSide NamedSoundEffect = 'Client
   type PacketState NamedSoundEffect = 'Playing
   packetName = "NamedSoundEffect"
   packetId = 0x19
@@ -378,7 +345,6 @@ instance Packet NamedSoundEffect where
 -- Reason (JSON chat string)
 data DisconnectPlay = DisconnectPlay ProtocolString deriving (Generic,Serial)
 instance Packet DisconnectPlay where
-  type PacketSide DisconnectPlay = 'Client
   type PacketState DisconnectPlay = 'Playing
   packetName = "DisconnectPlay"
   packetId = 0x1A
@@ -387,7 +353,6 @@ instance Packet DisconnectPlay where
 -- EID, Status (Enum)
 data EntityStatus = EntityStatus EntityId Word8 deriving (Generic,Serial)
 instance Packet EntityStatus where
-  type PacketSide EntityStatus = 'Client
   type PacketState EntityStatus = 'Playing
   packetName = "EntityStatus"
   packetId = 0x1B
@@ -396,7 +361,6 @@ instance Packet EntityStatus where
 -- x,y,z, radius, affected block offsets, velocity of pushed player
 data Explosion = Explosion (Float,Float,Float) Float [(Word8,Word8,Word8)] (Float,Float,Float) deriving (Generic,Serial)
 instance Packet Explosion where
-  type PacketSide Explosion = 'Client
   type PacketState Explosion = 'Playing
   packetName = "Explosion"
   packetId = 0x1C
@@ -405,7 +369,6 @@ instance Packet Explosion where
 -- Chunk X, Chunk Z
 data UnloadChunk = UnloadChunk (Int32,Int32) deriving (Generic,Serial)
 instance Packet UnloadChunk where
-  type PacketSide UnloadChunk = 'Client
   type PacketState UnloadChunk = 'Playing
   packetName = "UnloadChunk"
   packetId = 0x1D
@@ -414,7 +377,6 @@ instance Packet UnloadChunk where
 -- Reason (Enum), Value (from Enum)
 data ChangeGameState = ChangeGameState GameStateChange
 instance Packet ChangeGameState where
-  type PacketSide ChangeGameState = 'Client
   type PacketState ChangeGameState = 'Playing
   packetName = "ChangeGameState"
   packetId = 0x1E
@@ -452,7 +414,6 @@ instance Serial ChangeGameState where
 -- Random Id <-- Prevents Timeout
 data KeepAlive = KeepAlive KeepAliveId deriving (Generic,Serial)
 instance Packet KeepAlive where
-  type PacketSide KeepAlive = 'Client
   type PacketState KeepAlive = 'Playing
   packetName = "KeepAlive"
   packetId = 0x1F
@@ -461,7 +422,6 @@ instance Packet KeepAlive where
 -- Chunk X, Chunk Z, Full Chunk?, Bitmask of slices present, [Chunk Section], optional: 256 byte array of biome data, [Block entity NBT tag]
 data ChunkData = ChunkData (Int32,Int32) Bool VarInt [ChunkSection] (Maybe BS.ByteString) (ProtocolList VarInt ProtocolNBT)
 instance Packet ChunkData where
-  type PacketSide ChunkData = 'Client
   type PacketState ChunkData = 'Playing
   packetName = "ChunkData"
   packetId = 0x20
@@ -473,7 +433,6 @@ instance Serial ChunkData where
 -- Effect Id (Enum), block coord, extra data (from Enum), disable relative?
 data Effect = Effect Int32 BlockCoord Int32 Bool deriving (Generic,Serial)
 instance Packet Effect where
-  type PacketSide Effect = 'Client
   type PacketState Effect = 'Playing
   packetName = "Effect"
   packetId = 0x21
@@ -481,7 +440,6 @@ instance Packet Effect where
 
 data JoinGame = JoinGame EntityId Gamemode Dimension Difficulty Word8 String Bool
 instance Packet JoinGame where
-  type PacketSide JoinGame = 'Client
   type PacketState JoinGame = 'Playing
   packetName = "JoinGame"
   packetId = 0x23
@@ -494,7 +452,6 @@ instance Serial JoinGame where
 -- Flags bitfield, fly speed, fov modifier
 data PlayerAbilities = PlayerAbilities AbilityFlags Float Float deriving (Generic,Serial)
 instance Packet PlayerAbilities where
-  type PacketSide PlayerAbilities = 'Client
   type PacketState PlayerAbilities = 'Playing
   packetName = "PlayerAbilities"
   packetId = 0x2B
@@ -510,7 +467,6 @@ instance Serial PlayerAbilities where
 -- x,y,z, yaw,pitch, relativity flags, TPconfirm Id
 data PlayerListItem a = PlayerListItem [(UUID,PlayerListAction a)]
 instance Packet (PlayerListItem a) where
-  type PacketSide (PlayerListItem a) = 'Client
   type PacketState (PlayerListItem a) = 'Playing
   packetName = "PlayerListItem"
   packetId = 0x2D
@@ -522,7 +478,6 @@ instance PlayerListActionEnum a => Serial (PlayerListItem a) where
 
 data PlayerPositionAndLook = PlayerPositionAndLook (Double,Double,Double) (Float,Float) Word8 TPConfirmId
 instance Packet PlayerPositionAndLook where
-  type PacketSide PlayerPositionAndLook = 'Client
   type PacketState PlayerPositionAndLook = 'Playing
   packetName = "PlayerPositionAndLook"
   packetId = 0x2E
@@ -543,7 +498,6 @@ instance Serial PlayerPositionAndLook where
 -- Block pos of player spawn
 data UpdateMetadata = UpdateMetadata EntityId EntityPropertySet
 instance Packet UpdateMetadata where
-  type PacketSide UpdateMetadata = 'Client
   type PacketState UpdateMetadata = 'Playing
   packetName = "UpdateMetadata"
   packetId = 0x39
@@ -556,7 +510,6 @@ instance Serial UpdateMetadata where
 -- Block pos of player spawn
 data SpawnPosition = SpawnPosition BlockCoord
 instance Packet SpawnPosition where
-  type PacketSide SpawnPosition = 'Client
   type PacketState SpawnPosition = 'Playing
   packetName = "SpawnPosition"
   packetId = 0x43

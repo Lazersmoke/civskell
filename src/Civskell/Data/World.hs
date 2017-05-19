@@ -1,5 +1,4 @@
 {-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -91,7 +90,7 @@ allPlayers :: HasWorld r => Eff r [PlayerData]
 allPlayers = send AllPlayers
 
 {-# INLINE broadcastPacket #-}
-broadcastPacket :: (HasWorld r,Packet p, PacketSide p ~ 'Client,Serial p) => p -> Eff r ()
+broadcastPacket :: (HasWorld r,Packet p,Serial p) => p -> Eff r ()
 broadcastPacket = send . BroadcastPacket . ambiguate . OutboundPacket . ambiguate . Identity
 
 {-# INLINE getEntity #-}
@@ -158,14 +157,14 @@ runWorld w' (Eff u q) = case u of
   Inject (DeleteEntity e) -> send (modifyMVar_ w' $ \w -> return w {entities = Map.delete e . entities $ w}) >> runWorld w' (runTCQ q ())
   -- Pattern match on SuchThat to reinfer the constrain `Mob` into the contraint `Entity` for storage in the entities map
   Inject (SummonMob (SuchThat m)) -> do
-    (eid,uuid) <- send . modifyMVar w' $ \w -> do
+    (eid,uuid) <- send . modifyMVar w' $ \w ->
       return (w {entities = Map.insert (nextEID w) (SuchThat m) (entities w),nextEID = succ (nextEID w),nextUUID = incUUID (nextUUID w)},(nextEID w,nextUUID w))
     runWorld w' $ broadcastPacket $ Client.makeSpawnMob eid uuid 0 (SuchThat m)
     runWorld w' (runTCQ q ())
     where
       incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
   Inject (SummonObject (SuchThat m)) -> do
-    (eid,uuid) <- send . modifyMVar w' $ \w -> do
+    (eid,uuid) <- send . modifyMVar w' $ \w ->
       return (w {entities = Map.insert (nextEID w) (SuchThat m) (entities w),nextEID = succ (nextEID w),nextUUID = incUUID (nextUUID w)},(nextEID w,nextUUID w))
     runWorld w' $ broadcastPacket $ Client.SpawnObject eid uuid (SuchThat m)
     runWorld w' $ broadcastPacket $ Client.UpdateMetadata eid (EntityPropertySet $ map Just $ entityMeta (runIdentity m))

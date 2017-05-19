@@ -24,11 +24,11 @@
 -- TODO: This export list is pretty scary. We should make tiered modules or something
 module Civskell.Data.Types
   -- Constants
-  (airChunk,allCoords,protocolVersion,legacyHandshakePacketConstant
+  (airChunk,allCoords,protocolVersion,legacyHandshakePingConstant,legacyHandshakePongConstant
   -- Helper functions
   ,blockInChunk,blockToChunk,blockToRelative,blockOnSide,showPacket,jsonyText,withLength,withListLength,indentedHex,serOpt,comb
   -- Type synonyms
-  ,EncryptionCouplet,PerformsIO,Short
+  ,EncryptionCouplet,PerformsIO,Short,LegacyString
   -- Blocks
   ,BlockBreak(..),BlockLocation(..),BlockCoord,BlockOffset,BlockFace(..),CardinalDirection(..),BlockState(..)
   -- Block class
@@ -49,7 +49,7 @@ module Civskell.Data.Types
   ,Slot(..),SlotData(..),slotAmount,removeCount,splitStack,slot
   ,Inventory,getSlot,setSlot
   -- Aux Enums
-  ,Difficulty(..),Dimension(..),Gamemode(..),Hand(..),MoveMode(..),AbilityFlags(..),ServerState(..),Side(..),Window(..)
+  ,Difficulty(..),Dimension(..),Gamemode(..),Hand(..),MoveMode(..),AbilityFlags(..),ServerState(..),Window(..)
   -- Player
   ,HasPlayer,Player(..)
   -- World
@@ -61,7 +61,7 @@ module Civskell.Data.Types
   -- Packeting
   ,SendsPackets,Packeting(..)
   -- Packet
-  ,Packet(..),ClientPacket,HandledPacket(..),OutboundPacket(..),InboundPacket(..)
+  ,Packet(..),HandledPacket(..),OutboundPacket(..),InboundPacket(..)
   -- Configuration
   ,Configured,Configuration(..),defaultConfiguration,forkConfig
   -- Entity
@@ -83,7 +83,8 @@ import Control.Eff
 import Control.Eff.Reader
 import Control.Monad
 import Crypto.Cipher.AES (AES128)
-import qualified Data.Aeson
+import Data.Aeson ((.:),(.:?))
+import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types
 import Data.Attoparsec.ByteString (Parser)
 import Data.Bits
@@ -94,7 +95,8 @@ import Data.Maybe (fromMaybe)
 import Data.NBT
 import Data.SuchThat
 import Data.String
-import qualified Data.Text as Text
+import Data.Text (Text)
+import qualified Data.Text as T
 import qualified GHC.Exts as Exts
 import Data.Word (Word64,Word8)
 import Hexdump (prettyHex)
@@ -110,7 +112,6 @@ import Data.Bytes.Put
 import Data.Bytes.Get
 import qualified Data.Serialize as Cereal
 import qualified Data.Set as Set
-import qualified Data.Text as Text
 
 -- The current Minecraft Protocol Version number. This should be replaced with a
 -- configuration option, or even multiversion support in the future, but right
@@ -326,15 +327,18 @@ instance Serial VarInt where
 -- TODO: Investigate GND for Serial here: it has to do with some role nonsense
 -- EntityId's are distinguished VarInt's. Note that the `Serial` instance here is
 -- GND, not Generics. (although it could be, and it would work the same)
-newtype EntityId = EntityId {unEID :: VarInt} deriving (Serial,Bits,Enum,Eq,Integral,Num,Ord,Real)
+newtype EntityId = EntityId {unEID :: VarInt} deriving (Bits,Enum,Eq,Integral,Num,Ord,Real)
 instance Show EntityId where show = (\p -> "Entity Id {" ++ p ++ "}") . show . unEID
 instance Serial EntityId where
   serialize = serialize . unEID
   deserialize = EntityId <$> deserialize
 
 -- WindowId's are distinguished Word8's. `Serial` is GND, not Generics.
-newtype WindowId = WindowId {unWID :: Word8} deriving (Serial,Bits,Enum,Eq,Integral,Num,Ord,Real)
+newtype WindowId = WindowId {unWID :: Word8} deriving (Bits,Enum,Eq,Integral,Num,Ord,Real)
 instance Show WindowId where show = (\p -> "Window Id {" ++ p ++ "}") . show . unWID
+instance Serial WindowId where
+  serialize = serialize . unWID
+  deserialize = WindowId <$> deserialize
 
 -- PlayerId's are *undistinguished* EntityId's because they are not different in
 -- any way except the probably represent players instead of mobs. This is made
@@ -424,19 +428,19 @@ data AuthPacket = AuthPacket UUID String [AuthProperty]
 
 -- FromJSON instances parse JSON into AuthPackets
 instance Data.Aeson.Types.FromJSON AuthPacket where
-  parseJSON (Data.Aeson.Object o) = AuthPacket <$> o .: "id" <*> o .: "name" <*> (o .: "properties")
-  parseJSON x = typeMismatch "AuthPacket" x
+  parseJSON (Aeson.Object o) = AuthPacket <$> o .: "id" <*> o .: "name" <*> (o .: "properties")
+  parseJSON x = Data.Aeson.Types.typeMismatch "AuthPacket" x
 
 instance Data.Aeson.Types.FromJSON UUID where
-  parseJSON (Data.Aeson.String s) = return $ (\i -> UUID (fromInteger $ i .&. 0xFFFFFFFFFFFFFFFF,fromInteger $ shiftR i 8)) . fst . head . readHex . Text.unpack $ s
-  parseJSON x = typeMismatch "UUID" x
+  parseJSON (Aeson.String s) = return $ (\i -> UUID (fromInteger $ i .&. 0xFFFFFFFFFFFFFFFF,fromInteger $ shiftR i 8)) . fst . head . readHex . T.unpack $ s
+  parseJSON x = Data.Aeson.Types.typeMismatch "UUID" x
 
 -- Helper type to support the arbitrary properties in auth packets
 data AuthProperty = AuthProperty String String (Maybe String)
 
 instance Data.Aeson.Types.FromJSON AuthProperty where
-  parseJSON (Data.Aeson.Object o) = AuthProperty <$> o .: "name" <*> o .: "value" <*> o .:? "signature"
-  parseJSON x = typeMismatch "AuthProperty" x
+  parseJSON (Aeson.Object o) = AuthProperty <$> o .: "name" <*> o .: "value" <*> o .:? "signature"
+  parseJSON x = Data.Aeson.Types.typeMismatch "AuthProperty" x
 
 -- Packets are ambiguous in the Notchian spec, so we need to carry around a
 -- "State" that tells us how to parse the packets. This should eventually be
@@ -689,6 +693,7 @@ instance Block Air where
   blockIdentifier = "minecraft:air"
   blockName _ = "Air"
   blockId = 0
+  droppedItem = Nothing
 
 --class Block t => TileEntity t where
   --tileEntityNBT :: t -> NBT
@@ -841,20 +846,20 @@ type Logs r = Member Logging r
 
 data Logging a where
   -- Log a string at a given Log Level
-  LogString :: LogLevel -> Text.Text -> Logging ()
+  LogText :: LogLevel -> Text -> Logging ()
   -- Commute a Logging effect out of a stack
   ForkLogger :: (Configured r,PerformsIO r) => Eff (Logging ': r) a -> Logging (Eff r a)
 
 -- TODO: replace this with a `data LogSpec = LogSpec {spec :: String -> String,level :: Int}`?
 -- Level of verbosity to log at
-data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | VerboseLog | TaggedLog String | NormalLog deriving Eq
+data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | VerboseLog | TaggedLog Text | NormalLog deriving Eq
 
 -- A thing that shuffles log messages off of running threads and logs that whenever on a dedicated one.
-newtype LogQueue = LogQueue (TQueue Text.Text)
+newtype LogQueue = LogQueue (TQueue Text)
 
 -- Make a new, empty LogQueue
 freshLogQueue :: PerformsIO r => Eff r LogQueue
-freshLogQueue = send $ newTQueueIO 
+freshLogQueue = LogQueue <$> send newTQueueIO 
 
 -- All the information about a mineman world. Notably, players is a Map of PId's to TVars of player data, not actual player data
 data WorldData = WorldData {chunks :: Map ChunkCoord ChunkSection, entities :: Map EntityId (Some Entity), players :: Map PlayerId (TVar PlayerData), nextEID :: EntityId, nextUUID :: UUID}
@@ -973,10 +978,10 @@ showPacket :: forall p. Packet p => p -> String
 showPacket pkt = formatPacket (packetName @p) (packetPretty pkt)
 
 -- A `InboundPacket s` is a thing that is a HandledPacket with the given PacketState
-type InboundPacket s = SuchThatStar '[PacketWithState s,HandledPacket]
+newtype InboundPacket s = InboundPacket (SuchThatStar '[PacketWithState s,HandledPacket])
 
--- A `OutboundPacket s` is a thing that is a ClientPacket with the given PacketState
-type OutboundPacket s = SuchThatStar '[PacketWithState s,Serial]
+-- A `OutboundPacket s` is a thing with the given PacketState
+newtype OutboundPacket s = OutboundPacket (SuchThatStar '[PacketWithState s,Serial])
 
 -- Entities are things with properties
 class Entity m where

@@ -6,6 +6,7 @@ module Civskell.Tech.Encrypt
   ,genLoginHash
   ,cfb8Encrypt,cfb8Decrypt
   ,makeEncrypter
+  ,genEncryptionResponse
   ) where
 
 import Control.Eff (Eff,send,runM)
@@ -30,6 +31,7 @@ getAKeypair :: PerformsIO r => Eff r (RSA.PublicKey,RSA.PrivateKey)
 getAKeypair = send (RSA.generate 128 65537 :: IO (RSA.PublicKey,RSA.PrivateKey))
 
 -- unsafePerformIO ourselves a keypair because we can save computation by using the same key for every client
+{-# NOINLINE globalKeypair #-} -- If this is inlined, it is rerun at every call site
 globalKeypair :: (RSA.PublicKey,RSA.PrivateKey)
 globalKeypair = unsafePerformIO $ runM getAKeypair
 
@@ -91,7 +93,7 @@ encodePubKey k = asnSequence <> withLengthAsn (algIdentifier <> pubKeyBitstring)
 
 -- public key, VT, and shared secret to encrypted (shared secret, verify token)
 genEncryptionResponse :: BS.ByteString -> BS.ByteString -> BS.ByteString -> (BS.ByteString,BS.ByteString)
-genEncryptionResponse pubKeyEnc vt ss = error "Not implemented: Civskell.Tech.Encrypt.genEncryptionResponse"
+genEncryptionResponse = error "Not implemented: Civskell.Tech.Encrypt.genEncryptionResponse"
 
 -- intBytesRaw gets the variable-length byte encoding of a number
 intBytesRaw :: Integer -> BS.ByteString
@@ -142,7 +144,7 @@ genLoginHash sId ss pubKey =
 -- Confirm that the given information all jives together, proving that the client got the key correctly
 -- At the end, we get the shared secret if everything was gucci
 checkVTandSS :: RSA.PrivateKey -> BS.ByteString -> BS.ByteString -> BS.ByteString -> Either String BS.ByteString
-checkVTandSS priv vtFromClient ssFromClient actualVT = do
+checkVTandSS priv vtFromClient ssFromClient actualVT =
   -- Try to decrypt their vt response
   case RSA.decrypt Nothing priv vtFromClient of
     -- If it fails, print the error

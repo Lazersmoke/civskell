@@ -4,7 +4,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
 module Civskell.Tech.Network
   (module Civskell.Data.Networking
   ,getGenericPacket,authGetReq --,getPacketFromParser --,sendPacket,getPacket
@@ -23,6 +22,7 @@ import Unsafe.Coerce (unsafeCoerce)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.SuchThat
+import qualified Data.Text as T
 
 import Civskell.Data.Logging
 import Civskell.Data.Networking
@@ -40,15 +40,15 @@ getGenericPacket ep = do
     -- If it parsed ok, then
     Right serverPkt -> do
       -- Return it
-      logLevel ServerboundPacket $ ambiguously (\(InboundPacket x) -> ambiguously (showPacket . runIdentity) x) serverPkt
-      logLevel HexDump $ indentedHex $ pkt
+      logLevel ServerboundPacket . T.pack $ ambiguously (\(InboundPacket x) -> ambiguously (showPacket . runIdentity) x) serverPkt
+      logLevel HexDump . T.pack . indentedHex $ pkt
       return $ Just serverPkt
     -- If it didn't parse correctly, print the error and return Nothing
     Left e -> do
       logLevel ErrorLog "Failed to parse incoming packet"
-      logLevel ErrorLog (show e)
+      logLevel ErrorLog . T.pack $ show e
       -- Hex dump is an error
-      logLevel ErrorLog $ indentedHex $ pkt
+      logLevel ErrorLog . T.pack . indentedHex $ pkt
       return Nothing
 
 -- Get an unparsed packet from the network
@@ -93,11 +93,11 @@ authGetReq name hash = do
   case parseOnly parseAuthJSON (LBS.toStrict . responseBody $ resp) of
     Left e -> do
       logLevel ErrorLog "Failed to parse Auth JSON"
-      logLevel ErrorLog $ show e
+      logLevel ErrorLog . T.pack $ show e
       return $ Left $ show (req,resp)
     Right (Error e) -> do
       logLevel ErrorLog "Parsed bad JSON"
-      logLevel ErrorLog $ show e
+      logLevel ErrorLog . T.pack $ show e
       return $ Left $ show (req,resp)
     Right (Success a) -> return (Right a)
 
