@@ -1,6 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 module Civskell.Tile where
 
+{-
 import Control.Concurrent.STM
 
 import Civskell.Data.Types
@@ -8,30 +9,6 @@ import Civskell.Data.Player
 import Civskell.Tech.Network
 import qualified Civskell.Window as Window
 import qualified Civskell.Packet.Clientbound as Client
-
--- Bool isPolished
-data Stone = Stone | Granite Bool | Diorite Bool | Andesite Bool
-instance Block Stone where
-  blockId = 1
-  blockIdentifier = "minecraft:stone"
-  blockMeta = \case
-    Stone -> 0
-    Granite False -> 1
-    Granite True -> 2
-    Diorite False -> 3
-    Diorite True -> 4
-    Andesite False -> 5
-    Andesite True -> 6
-  blockName = \case
-    Stone -> "Stone"
-    Granite False -> "Granite"
-    Granite True -> "Polished Granite"
-    Diorite False -> "Diorite"
-    Diorite True -> "Polished Diorite"
-    Andesite False -> "Andesite"
-    Andesite True -> "Polished Andesite"
-  droppedItem = some Item.Stone
-
 data Grass = Grass
 instance Block Grass where
   blockId = 2
@@ -50,7 +27,6 @@ instance Block Dirt where
     Dirt -> "Dirt"
     CoarseDirt -> "Coarse Dirt"
     Podzol -> "Podzol"
-
 data Chest = Chest CardinalDirection (TVar Inventory)
 instance Block Chest where
   blockId = 0x36
@@ -62,3 +38,5 @@ instance Block Chest where
     _wid <- openWindowWithItems (Window.Chest items) (jsonyText "Satisfied Chest") items
     return ()
     -- TODO: callback for changing items in chest
+
+-}

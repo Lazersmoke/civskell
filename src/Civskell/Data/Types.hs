@@ -37,7 +37,7 @@ module Civskell.Data.Types
   -- Chunks
   ,ChunkCoord(..),ChunkSection(..)
   -- Packet Information
-  ,AnimationAction(..),PlayerListAction(..),PlayerListActionType(..),PlayerListActionEnum(..),EntityInteraction(..)
+  ,AnimationAction(..),PlayerListAction(..),PlayerListActionType(..),PlayerListActionEnum(..),EntityInteraction(..),AsType(..)
   ,ClientStatusAction(..),GameStateChange(..),InventoryClickMode(..),PlayerDigAction(..)
   ,PlayerEntityAction(..),AuthPacket(..),AuthProperty(..)
   -- Id's and newtypes
@@ -551,6 +551,8 @@ instance Serial AnimationAction where
 -- Used in Server.UseEntity
 data EntityInteraction = Attack | Interact Hand | InteractAt (Float,Float,Float) Hand deriving Show
 
+data AsType = AsBlock | AsItem
+
 -- Helper kind for PlayerListAction
 data PlayerListActionType = AddPlayer | UpdateGamemode | UpdateLatency | UpdateName | RemovePlayer
 
@@ -664,7 +666,7 @@ class Block b where
   -- Some blocks do something when clicked
   onClick :: forall r. (HasWorld r,HasPlayer r,SendsPackets r,Logs r) => Maybe (b -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Eff r ())
   onClick = Nothing
-  droppedItem :: Maybe (Some Item)
+  droppedItem :: Maybe (b -> Some Item)
 
 {-
 block :: Short -> String -> String -> b -> Block b
