@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -9,6 +10,9 @@ module Civskell (module Civskell.Data.Types, runServer) where
 
 import Control.Concurrent (forkIO,threadDelay)
 import Data.Functor.Identity
+import qualified Data.Text as T
+import qualified Data.Text.IO as T
+import Data.Semigroup
 import qualified Data.Set as Set
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
@@ -25,7 +29,7 @@ import Civskell.Data.Player
 import Civskell.Data.Types
 import Civskell.Data.World
 import Civskell.Tech.Network
-import qualified Civskell.Tile as Tile
+import qualified Civskell.Block.Stone as Stone
 import qualified Civskell.Window as Window
 import qualified Civskell.Packet.Clientbound as Client
 import qualified Civskell.Packet.Serverbound as Server
@@ -48,7 +52,7 @@ testInitWorld :: WorldData
 testInitWorld = initWorld {chunks = Map.fromList [(ChunkCoord (cx,cy,cz),exampleChunk) | cx <- [-3..3], cz <- [-3..3], cy <- [0..7]]}
   where
     -- A chunk section full of stone
-    exampleChunk = ChunkSection $ Map.fromList [(BlockLocation (x,y,z),some Tile.Stone) | x <- [0..15], y <- [0..15], z <- [0..15]]
+    exampleChunk = ChunkSection $ Map.fromList [(BlockLocation (x,y,z),some (Stone.Stone :: Stone.Stone 'AsBlock)) | x <- [0..15], y <- [0..15], z <- [0..15]]
 
 -- Create a new player and jump into their player thread. Default player information is given here
 -- We need the TQueue here to be the same one that is running in the sending thread
@@ -83,7 +87,7 @@ initPlayer pq e = do
 
 -- Note for testing: Use virtualbox port forwarding to test locally
 -- Start up the server
-startListening :: (Configured r,PerformsIO r) => Eff r ()
+startListening :: (Logs r,Configured r,PerformsIO r) => Eff r ()
 startListening = do
   -- Make a new MVar for the World, starting with the test world
   -- TODO: Add config option for world-gen vs set world
@@ -91,7 +95,7 @@ startListening = do
   -- bad fork
   (c :: Configuration) <- ask
   -- Fork a new thread to wait for incoming connections, and send the Socket from each new connection to `connLoop`.
-  _ <- send . forkIO . runM . runReader' c =<< (forkLogger . runWorld wor . connLoop =<< send (Net.listenOn (Net.PortNumber 25565))_
+  _ <- send . forkIO . runM . runReader' c =<< (forkLogger . runWorld wor . connLoop =<< send (Net.listenOn (Net.PortNumber 25565)))
   -- Fork a thread to periodically send keep alives to everyone
   _ <- send . forkIO . runM =<< (forkConfig =<< (forkLogger . runWorld wor $ keepAliveThread 0))
   -- Listen for the console to say to quit. The main thread is retired to terminal duty
@@ -110,7 +114,7 @@ keepAliveThread i = do
 
 -- Send every log message in the TQueue to putStrLn until the thread is killed
 loggingThread :: LogQueue -> IO ()
-loggingThread (LogQueue l) = atomically (readTQueue l) >>= putStrLn >> loggingThread l
+loggingThread (LogQueue l) = atomically (readTQueue l) >>= T.putStrLn >> loggingThread (LogQueue l)
 
 -- This is a hack; make something better in the future
 terminal :: IO ()
@@ -125,7 +129,7 @@ connLoop sock = do
   -- TODO: Timeout handlers or something here
   (handle, cliHost, cliPort) <- send $ Net.accept sock
   -- Log that we got a connection
-  logg $ "Got Client connection: " ++ show cliHost ++ ":" ++ show cliPort
+  logg $ "Got Client connection: " <> T.pack (show cliHost) <> ":" <> T.pack (show cliPort)
   -- Don't line buffer the network
   send $ hSetBuffering handle NoBuffering
   -- Make new networking TVars for this client
@@ -155,9 +159,9 @@ packetLoop = do
     -- You can't substitute `onPacket q` for `op` except using the let binding as shown below. The type gods
     -- will become angry and smite you where you stand. TODO: investigate appeasing the type gods by enabling/
     -- disabling the monomorphism restriction
-    Just (SuchThat (InboundPacket (SuchThat (Identity q)))) -> if canPokePacketState q
+    Just (SuchThat (InboundPacket (SuchThat (Identity (q :: qt))))) -> if canPokePacketState @qt
       -- Serial mode
-      then onPacket q
+      then runPacketing $ onPacket q
       -- Parallel mode
       else do
         let op = onPacket q
@@ -168,7 +172,7 @@ packetLoop = do
     -- the player could change states *while we are waiting* for the next packet to arrive.
     -- This design ensures that the correct parser is always used.
     getParser = flip fmap (playerState <$> getPlayer) $ \case
-      Handshaking -> ambiguate <$> Server.parseHandshakePacket
-      LoggingIn -> ambiguate <$> Server.parseLoginPacket
-      Status -> ambiguate <$> Server.parseStatusPacket
-      Playing -> ambiguate <$> Server.parsePlayPacket
+      Handshaking -> Server.parseHandshakePacket
+      LoggingIn -> Server.parseLoginPacket
+      Status -> Server.parseStatusPacket
+      Playing -> Server.parsePlayPacket

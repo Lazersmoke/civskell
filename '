@@ -16,6 +16,7 @@ import Control.Concurrent.STM
 import Data.List (intercalate)
 import Data.Functor.Identity
 import Data.Word
+import Data.Bits
 import Data.Bytes.Put
 import Data.Bytes.Get
 import Data.Bytes.Serial
@@ -27,15 +28,19 @@ import qualified Data.ByteString as BS
 import Crypto.Hash (hash,Digest,SHA1)
 import Numeric (showHex)
 import Control.Monad
+import Data.Attoparsec.ByteString hiding (take)
+import qualified Data.Attoparsec.ByteString as P
 import Data.SuchThat
 import qualified Data.Set as Set
 
 import Civskell.Data.Types hiding (Player)
+import Civskell.Tech.Parse
 import Civskell.Tech.Network
 import Civskell.Tech.Encrypt
 import qualified Civskell.Entity as Entity
 import qualified Civskell.Window as Window
 --import qualified Civskell.Tile as Tile
+import qualified Civskell.Item as Item
 import qualified Civskell.Block.Stone as Stone
 import Civskell.Data.Player
 import Civskell.Data.Logging
@@ -44,50 +49,41 @@ import qualified Civskell.Packet.Clientbound as Client
 
   -- Protocol Version, Server Address, Server Port, Next State
 
-parseHandshakePacket :: MonadGet m => ParseSet m
-parseHandshakePacket = Map.fromList 
-  [(packetId @Handshake,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @Handshake)
-  ,(packetId @LegacyHandshake,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @LegacyHandshake)
-  ]
+parseHandshakePacket :: Parser (InboundPacket 'Handshaking) --(Packet p, PacketSide p ~ 'Server, PacketState p ~ 'Handshaking) => Parser p
+parseHandshakePacket = choice [InboundPacket . ambiguate . Identity <$> parsePacket @Handshake, InboundPacket . ambiguate . Identity <$> parsePacket @LegacyHandshake] <?> "Handshake Packet"
 
-parseLoginPacket :: MonadGet m => ParseSet m
-parseLoginPacket = Map.fromList 
-  [(packetId @LoginStart,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @LoginStart)
-  ,(packetId @EncryptionResponse,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @EncryptionResponse)
-  ]
+parseLoginPacket :: Parser (InboundPacket 'LoggingIn)
+parseLoginPacket = choice [InboundPacket . ambiguate . Identity <$> parsePacket @LoginStart, InboundPacket . ambiguate . Identity <$> parsePacket @EncryptionResponse] <?> "Login Packet"
 
-parseStatusPacket :: MonadGet m => ParseSet m
-parseStatusPacket = Map.fromList 
-  [(packetId @StatusRequest,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @StatusRequest)
-  ,(packetId @StatusPing,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @StatusPing)
-  ]
+parseStatusPacket :: Parser (InboundPacket 'Status)
+parseStatusPacket = choice [InboundPacket . ambiguate . Identity <$> parsePacket @StatusRequest, InboundPacket . ambiguate . Identity <$> parsePacket @StatusPing] <?> "Status Packet"
 
 -- TODO: SuchThat '[SP 'Playing] Parser
-parsePlayPacket :: MonadGet m => ParseSet m
-parsePlayPacket = Map.fromList
-  [(packetId @TPConfirm,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @TPConfirm)
-  ,(packetId @ChatMessage,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @ChatMessage)
-  ,(packetId @ClientStatus,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @ClientStatus)
-  ,(packetId @ClientSettings,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @ClientSettings)
-  ,(packetId @ConfirmTransaction,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @ConfirmTransaction)
-  ,(packetId @ClickWindow,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @ClickWindow)
-  ,(packetId @CloseWindow,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @CloseWindow)
-  ,(packetId @PluginMessage,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @PluginMessage)
-  ,(packetId @UseEntity,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @UseEntity)
-  ,(packetId @KeepAlive,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @KeepAlive)
-  ,(packetId @PlayerPosition,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @PlayerPosition)
-  ,(packetId @PlayerPositionAndLook,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @PlayerPositionAndLook)
-  ,(packetId @PlayerLook,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @PlayerLook)
-  ,(packetId @Player,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @Player)
-  ,(packetId @PlayerAbilities,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @PlayerAbilities)
-  ,(packetId @PlayerDigging,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @PlayerDigging)
-  ,(packetId @EntityAction,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @EntityAction)
-  ,(packetId @HeldItemChange,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @HeldItemChange)
-  ,(packetId @CreativeInventoryAction,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @CreativeInventoryAction)
-  ,(packetId @Animation,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @Animation)
-  ,(packetId @PlayerBlockPlacement,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @PlayerBlockPlacement)
-  ,(packetId @UseItem,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @UseItem)
-  ]
+parsePlayPacket :: Parser (InboundPacket 'Playing)
+parsePlayPacket = choice
+  [InboundPacket . ambiguate . Identity <$> parsePacket @TPConfirm
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @ChatMessage
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @ClientStatus
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @ClientSettings
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @ConfirmTransaction
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @ClickWindow
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @CloseWindow
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @PluginMessage
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @UseEntity
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @KeepAlive
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @PlayerPosition
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @PlayerPositionAndLook
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @PlayerLook
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @Player
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @PlayerAbilities
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @PlayerDigging
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @EntityAction
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @HeldItemChange
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @CreativeInventoryAction
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @Animation
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @PlayerBlockPlacement
+  ,InboundPacket . ambiguate . Identity <$> parsePacket @UseItem
+  ] <?> "Play Packet"
 
 -- TODO: Re-specify parsers for different server states
 
@@ -98,7 +94,7 @@ instance Packet Handshake where
   packetId = 0x00
   packetPretty (Handshake protocol addr port newstate) =
     [("Protocol Version",show protocol)
-    ,("Server Address",unProtocolString addr ++ ":" ++ show port)
+    ,("Server Address",addr ++ ":" ++ show port)
     ,("Requesting change to",case newstate of {1 -> "Status"; 2 -> "Login"; _ -> "Invalid"})
     ]
 instance HandledPacket Handshake where
@@ -118,21 +114,24 @@ instance Packet LegacyHandshake where
   type PacketState LegacyHandshake = 'Handshaking
   packetName = "LegacyHandshake"
   packetId = 0xFE
-  packetPretty (LegacyHandshake _ _ _) = []
+  packetPretty LegacyHandshake = []
 instance HandledPacket LegacyHandshake where
   -- Legacy response
-  onPacket (LegacyHandshake _ _ _) = iSolemnlySwearIHaveNoIdeaWhatImDoing . runPutS . serialize $ Client.LegacyHandshakePong
+  onPacket LegacyHandshake = iSolemnlySwearIHaveNoIdeaWhatImDoing . runPutS . serialize $ Client.LegacyHandshakePong
+  parsePacket = do
+    _ <- word8 0xFE
+    _ <- takeByteString
+    return LegacyHandshake
 
 instance Serial LegacyHandshake where
-  serialize (LegacyHandshake proto hostname port) = putByteString legacyHandshakePingConstant *> serialize @Int16 (fromIntegral $ 7 + BS.length hostname) *> putWord8 proto *> serialize hostname *> serialize @Int32 port
+  serialize (LegacyHandshake proto hostname port) = putByteString legacyHandshakePingConstant *> putInt16 (fromIntegral $ 7 + length hostname) *> putWord8 proto *> serialize hostname *> putInt32 port
   deserialize = do
-    {-guard . (==legacyHandshakePingConstant) =<<-} 
-    _ <- getByteString (BS.length legacyHandshakePingConstant) 
-    len <- deserialize @Int16
-    _ <- lookAhead (ensure $ fromIntegral len)
-    LegacyHandshake <$> getWord8 <*> getByteString (fromIntegral $ len - 7) <*> deserialize @Int32
+    getByteString (BS.length legacyHandshakePingConstant) 
+    len <- getInt16
+    _ <- lookAhead (ensure len)
+    LegacyHandshake <$> getWord8 <*> (LegacyString <$> getByteString (len - 7)) <*> getInt32
 
-data TPConfirm = TPConfirm VarInt deriving (Generic,Serial)
+data TPConfirm = TPConfirm VarInt
 instance Packet TPConfirm where
   type PacketState TPConfirm = 'Playing
   packetName = "TPConfirm"
@@ -142,9 +141,12 @@ instance HandledPacket TPConfirm where
   -- Check the tid presented against all the tid's we have stored
   onPacket (TPConfirm tid) = clearTeleport tid >>= \case
     -- If it's valid, say so
-    True -> logp $ "Client confirms teleport with id: " <> T.pack (show tid)
+    True -> logp $ "Client confirms teleport with id: " ++ show tid
     -- If it's not, complain
-    False -> loge $ "Client provided bad teleport id: " <> T.pack (show tid)
+    False -> loge $ "Client provided bad teleport id: " ++ show tid
+  parsePacket = do
+    specificVarInt 0x00 <?> "Packet Id 0x00"
+    TPConfirm <$> parseVarInt
 {-
 data TabComplete = TabComplete
 instance Packet TabComplete where
@@ -154,14 +156,14 @@ instance Packet TabComplete where
   packetPretty TabComplete = []
 -}
 
-data ChatMessage = ChatMessage ProtocolString deriving (Generic,Serial)
+data ChatMessage = ChatMessage String
 instance Packet ChatMessage  where
   type PacketState ChatMessage = 'Playing
   packetName = "ChatMessage "
   packetId = 0x02
-  packetPretty (ChatMessage msg) = [("Message",unProtocolString msg)]
+  packetPretty (ChatMessage msg) = [("Message",msg)]
 instance HandledPacket ChatMessage where
-  onPacket (ChatMessage (ProtocolString msg)) = case msg of
+  onPacket (ChatMessage msg) = case msg of
     "/gamemode 1" -> setGamemode Creative
     "/gamemode 0" -> setGamemode Survival
     "chunks" -> forM_ [0..48] $ \x -> sendPacket =<< colPacket ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
@@ -174,7 +176,11 @@ instance HandledPacket ChatMessage where
     _ -> do
       broadcastPacket (Client.ChatMessage (jsonyText msg) 0)
       name <- clientUsername <$> getPlayer
-      logt (T.pack name) (T.pack msg)
+      logt name (T.pack msg)
+
+  parsePacket = do
+    specificVarInt 0x02 <?> "Packet Id 0x02"
+    ChatMessage <$> parseVarString
 
 data ClientStatus = ClientStatus ClientStatusAction deriving (Generic,Serial)
 instance Packet ClientStatus where
@@ -187,6 +193,13 @@ instance HandledPacket ClientStatus where
     PerformRespawn -> logp "Client wants to perform respawn"
     RequestStats -> logp "Client requests stats"
     OpenInventory -> logp "Client is opening their inventory"
+  parsePacket = do
+    specificVarInt 0x03 <?> "Packet Id 0x03"
+    ClientStatus <$> choice
+      [specificVarInt 0x00 *> pure PerformRespawn
+      ,specificVarInt 0x01 *> pure RequestStats
+      ,specificVarInt 0x02 *> pure OpenInventory
+      ]
 
 -- TODO: type synonyms or newtypes or whatever
 data ClientSettings = ClientSettings String Word8 VarInt Bool Word8 VarInt deriving (Generic,Serial)
@@ -206,6 +219,15 @@ instance HandledPacket ClientSettings where
   -- Teleport the client when they send this packet because reasons
   -- 0x00 means all absolute (It's a relativity flag bitfield)
   onPacket (ClientSettings _loc _viewDist _chatMode _chatColors _skin _hand) = pendTeleport (1.0,130.0,1.0) (0.0,0.0) 0x00
+  parsePacket = do
+    specificVarInt 0x04 <?> "Packet Id 0x04"
+    ClientSettings
+      <$> parseVarString
+      <*> anyWord8
+      <*> parseVarInt
+      <*> parseBool
+      <*> anyWord8
+      <*> parseVarInt
 
 data ConfirmTransaction = ConfirmTransaction WindowId TransactionId Bool deriving (Generic,Serial)
 instance Packet ConfirmTransaction where
@@ -221,6 +243,12 @@ instance HandledPacket ConfirmTransaction where
         logg "Client apologized for bad transaction"
         overPlayer $ \p -> p {failedTransactions = Set.delete (wid,transId) $ failedTransactions p}
       else loge "Client apologized for non-existant transaction"
+  parsePacket = do
+    specificVarInt 0x05 <?> "Packet Id 0x05"
+    ConfirmTransaction
+      <$> parseWID
+      <*> parseShort
+      <*> parseBool
 
 data EnchantItem = EnchantItem WindowId Word8 deriving (Generic,Serial)
 instance Packet EnchantItem where
@@ -229,6 +257,7 @@ instance Packet EnchantItem where
   packetId = 0x06
   packetPretty (EnchantItem _ _) = []
 --instance HandledPacket EnchantItem where
+  --parsePacket = error "No parser for packet"
 
 -- Slot Number
 -- THIS SERIAL INSTANCE IS INCORRECT:
@@ -249,7 +278,7 @@ instance HandledPacket ClickWindow where
     failing <- not . Set.null . failedTransactions <$> getPlayer
     (SuchThat (Identity (w :: wt))) <- flip (Map.!) wid . windows <$> getPlayer
     if failing then loge "Failed, but client is still sending clicks" else onWindowClick @wt w wid slotNum transId mode >>= sendPacket . Client.ConfirmTransaction wid transId
-  {-parsePacket = do
+  parsePacket = do
     specificVarInt 0x07 <?> "Packet Id 0x07"
     wid <- parseWID
     slotNum <- parseShort
@@ -266,7 +295,6 @@ instance HandledPacket ClickWindow where
       ]
     sl <- Item.parseSlot
     return $ ClickWindow wid slotNum transId mode sl
-  -}
 
 data CloseWindow = CloseWindow WindowId deriving (Generic,Serial)
 instance Packet CloseWindow where
@@ -280,6 +308,9 @@ instance HandledPacket CloseWindow where
     case w of
       0 -> pure ()
       wid -> overPlayer $ \p -> p {windows = Map.delete wid (windows p)}
+  parsePacket = do
+    specificVarInt 0x08 <?> "Packet Id 0x08"
+    CloseWindow <$> parseWID
 
 data PluginMessage = PluginMessage ProtocolString BS.ByteString
 instance Packet PluginMessage where
@@ -292,7 +323,12 @@ instance HandledPacket PluginMessage where
   -- BS.tail removes the length prefixing
   onPacket (PluginMessage "MC|Brand" cliBrand) = setBrand $ show (BS.tail cliBrand)
   onPacket p = logp $ "Unsupported Plugin Message: " <> T.pack (showPacket p)
-
+  {-parsePacket = do
+    specificVarInt 0x09 <?> "Packet Id 0x09"
+    PluginMessage
+      <$> parseVarString
+      <*> takeByteString
+      -}
 instance Serial PluginMessage where
   serialize (PluginMessage ch dat) = serialize ch *> putByteString dat
   deserialize = PluginMessage <$> deserialize @ProtocolString <*> (getByteString . fromIntegral =<< remaining)
@@ -307,6 +343,15 @@ instance HandledPacket UseEntity where
   onPacket (UseEntity targetEID action) = do
     (SuchThat (Identity (_ :: m))) <- getEntity targetEID
     logg $ T.pack (entityName @m) <> " was " <> T.pack (show action) <> "(ed)"
+  parsePacket = do
+    specificVarInt 0x0A <?> "Packet Id 0x0A"
+    UseEntity
+      <$> parseEID
+      <*> choice
+        [specificVarInt 0x00 *> (Interact <$> parseHand)
+        ,specificVarInt 0x01 *> pure Attack
+        ,specificVarInt 0x02 *> (InteractAt <$> ((,,) <$> parseFloat <*> parseFloat <*> parseFloat) <*> parseHand)
+        ]
 
 data KeepAlive = KeepAlive KeepAliveId deriving (Generic,Serial)
 instance Packet KeepAlive where
@@ -316,6 +361,9 @@ instance Packet KeepAlive where
   packetPretty (KeepAlive i) = [("Keep Alive Id",show i)]
 instance HandledPacket KeepAlive where
   onPacket (KeepAlive kid) = logp $ "Player sent keep alive pong with id: " <> T.pack (show kid)
+  parsePacket  = do
+    specificVarInt 0x0B <?> "Packet Id 0x0B"
+    KeepAlive <$> parseVarInt
 
 data PlayerPosition = PlayerPosition (Double,Double,Double) Bool deriving (Generic,Serial)
 instance Packet PlayerPosition where
@@ -325,6 +373,11 @@ instance Packet PlayerPosition where
   packetPretty (PlayerPosition (x,y,z) grounded) = [("Positon",show (x,y,z)),("On Ground",show grounded)]
 instance HandledPacket PlayerPosition where
   onPacket (PlayerPosition (x,y,z) _grounded) = setPlayerPos (x,y,z)
+  parsePacket = do
+    specificVarInt 0x0C <?> "Packet Id 0x0C"
+    PlayerPosition
+      <$> ((,,) <$> parseDouble <*> parseDouble <*> parseDouble)
+      <*> parseBool
 
 data PlayerPositionAndLook = PlayerPositionAndLook (Double,Double,Double) (Float,Float) Bool deriving (Generic,Serial)
 instance Packet PlayerPositionAndLook where
@@ -336,6 +389,12 @@ instance HandledPacket PlayerPositionAndLook where
   onPacket (PlayerPositionAndLook (x,y,z) (yaw,pitch) _grounded) = do
     setPlayerPos (x,y,z)
     setPlayerViewAngle (yaw,pitch)
+  parsePacket = do
+    specificVarInt 0x0D <?> "Packet Id 0x0D"
+    PlayerPositionAndLook
+      <$> ((,,) <$> parseDouble <*> parseDouble <*> parseDouble)
+      <*> ((,) <$> parseFloat <*> parseFloat)
+      <*> parseBool
 
 data PlayerLook = PlayerLook (Float,Float) Bool deriving (Generic,Serial)
 instance Packet PlayerLook where
@@ -345,6 +404,11 @@ instance Packet PlayerLook where
   packetPretty (PlayerLook  (yaw,pitch) grounded) = [("Looking",show (yaw,pitch)),("On Ground",show grounded)]
 instance HandledPacket PlayerLook where
   onPacket (PlayerLook (y,p) _grounded) = setPlayerViewAngle (y,p)
+  parsePacket = do
+    specificVarInt 0x0E <?> "Packet Id 0x0E"
+    PlayerLook
+      <$> ((,) <$> parseFloat <*> parseFloat)
+      <*> parseBool
 
 data Player = Player Bool deriving (Generic,Serial)
 instance Packet Player where
@@ -354,6 +418,9 @@ instance Packet Player where
   packetPretty (Player grounded) = [("On Ground",show grounded)]
 instance HandledPacket Player where
   onPacket (Player _grounded) = pure ()
+  parsePacket = do
+    specificVarInt 0x0F <?> "Packet Id 0x0F"
+    Player <$> parseBool
 
 data VehicleMove = VehicleMove (Double,Double,Double) (Float,Float) deriving (Generic,Serial)
 instance Packet VehicleMove where
@@ -362,6 +429,7 @@ instance Packet VehicleMove where
   packetId = 0x10
   packetPretty (VehicleMove _ _) = []
 --instance HandledPacket VehicleMove where
+  --parsePacket = error "No parser for packet"
 
 data SteerBoat = SteerBoat Bool Bool deriving (Generic,Serial)
 instance Packet SteerBoat where
@@ -370,6 +438,7 @@ instance Packet SteerBoat where
   packetId = 0x11
   packetPretty (SteerBoat _ _) = []
 --instance HandledPacket SteerBoat where
+  --parsePacket = error "No parser for packet"
 
 data PlayerAbilities = PlayerAbilities AbilityFlags Float Float deriving (Generic,Serial)
 instance Packet PlayerAbilities where
@@ -382,6 +451,13 @@ instance Packet PlayerAbilities where
 instance HandledPacket PlayerAbilities where
   -- Only sent when flight is toggled
   onPacket (PlayerAbilities (AbilityFlags _i f _af _c) _flySpeed _fovMod) = if f then setMoveMode Flying else setMoveMode Walking
+  parsePacket = do
+    specificVarInt 0x12 <?> "Packet Id 0x12"
+    PlayerAbilities <$> parseFlags <*> parseFloat <*> parseFloat
+    where
+      parseFlags = do
+        flags <- anyWord8
+        pure (AbilityFlags (testBit flags 0) (testBit flags 1) (testBit flags 2) (testBit flags 3))
 
 data PlayerDigging = PlayerDigging PlayerDigAction deriving (Generic,Serial)
 instance Packet PlayerDigging where
@@ -422,6 +498,20 @@ instance HandledPacket PlayerDigging where
       summonObject (Entity.Item (Entity.BaseEntity (EntityLocation plaLoc (0,0)) (EntityVelocity (0,0,0)) 0x00 300 "" False False False) ((\(Slot (Just x)) -> x) dropped))
     _ -> loge $ "Unhandled Player Dig Action: " <> T.pack (showPacket p)
 
+  parsePacket = do
+    specificVarInt 0x13 <?> "Packet Id 0x13"
+    PlayerDigging <$> choice
+      [specificVarInt 0x00 *> (StartDig <$> parseBlockCoord <*> parseBlockFace)
+      ,specificVarInt 0x01 *> (StopDig <$> parseBlockCoord <*> parseBlockFace)
+      ,specificVarInt 0x02 *> (EndDig <$> parseBlockCoord <*> parseBlockFace)
+      ,specificVarInt 0x03 *> trashExtra (pure (DropItem True))
+      ,specificVarInt 0x04 *> trashExtra (pure (DropItem False))
+      ,specificVarInt 0x05 *> trashExtra (pure ShootArrowOrFinishEating)
+      ,specificVarInt 0x06 *> trashExtra (pure SwapHands)
+      ]
+    where
+      trashExtra = (<*(parseBlockCoord <* parseBlockFace))
+
 data EntityAction = EntityAction PlayerId PlayerEntityAction deriving (Generic,Serial)
 instance Packet EntityAction where
   type PacketState EntityAction = 'Playing
@@ -447,6 +537,19 @@ instance HandledPacket EntityAction where
     LeaveBed -> pure ()
     HorseInventory -> pure () -- Open window here?
     ElytraFly -> pure () -- ?
+  parsePacket = do
+    specificVarInt 0x14 <?> "Packet Id 0x14"
+    EntityAction <$> parseEID <*> choice
+      [specificVarInt 0x00 *> pure (Sneak True)
+      ,specificVarInt 0x01 *> pure (Sneak False)
+      ,specificVarInt 0x02 *> pure LeaveBed
+      ,specificVarInt 0x03 *> pure (Sprint True)
+      ,specificVarInt 0x04 *> pure (Sprint False)
+      --,specificVarInt 0x05 *> (HorseJump True <$> parseVarInt)
+      --,specificVarInt 0x06 *> (HorseJump False <$> parseVarInt)
+      ,specificVarInt 0x07 *> pure HorseInventory
+      ,specificVarInt 0x08 *> pure ElytraFly
+      ]
 
 data SteerVehicle = SteerVehicle Float Float Word8 deriving (Generic,Serial)
 instance Packet SteerVehicle where
@@ -455,6 +558,7 @@ instance Packet SteerVehicle where
   packetId = 0x15
   packetPretty (SteerVehicle _ _ _) = []
 --instance HandledPacket SteerVehicle where
+  --parsePacket = error "No parser for packet"
 
 data ResourcePackStatus = ResourcePackStatus VarInt deriving (Generic,Serial)
 instance Packet ResourcePackStatus where
@@ -463,6 +567,7 @@ instance Packet ResourcePackStatus where
   packetId = 0x16
   packetPretty (ResourcePackStatus _) = []
 --instance HandledPacket ResourcePackStatus where
+  --parsePacket = error "No parser for packet"
 
 data HeldItemChange = HeldItemChange Short deriving (Generic,Serial)
 instance Packet HeldItemChange where
@@ -473,6 +578,9 @@ instance Packet HeldItemChange where
 instance HandledPacket HeldItemChange where
   -- Update the slot they are holding in the player data
   onPacket (HeldItemChange slotNum) = setHolding slotNum
+  parsePacket = do
+    specificVarInt 0x17 <?> "Packet Id 0x17"
+    HeldItemChange <$> parseShort
 
 data CreativeInventoryAction = CreativeInventoryAction Short Slot deriving (Generic,Serial)
 instance Packet CreativeInventoryAction where
@@ -487,6 +595,9 @@ instance HandledPacket CreativeInventoryAction where
     -- TODO: This will echo back a SetSlot packet, add another way to access the effect inventory
     -- Maybe that is ok? idk requires further testing to be sure
     setInventorySlot slotNum slotDat
+  parsePacket = do
+    specificVarInt 0x18 <?> "Packet Id 0x18"
+    CreativeInventoryAction <$> parseShort <*> Item.parseSlot
 
 data UpdateSign = UpdateSign BlockCoord (ProtocolString,ProtocolString,ProtocolString,ProtocolString) deriving (Generic,Serial)
 instance Packet UpdateSign where
@@ -495,6 +606,7 @@ instance Packet UpdateSign where
   packetId = 0x19
   packetPretty (UpdateSign _ _) = []
 --instance HandledPacket UpdateSign where
+  --parsePacket = error "No parser for packet"
 
 data Animation = Animation Hand deriving (Generic,Serial)
 instance Packet Animation where
@@ -505,6 +617,9 @@ instance Packet Animation where
 instance HandledPacket Animation where
   -- Don't do anything about the spammy animation packets
   onPacket (Animation _anim) = return ()
+  parsePacket = do
+    specificVarInt 0x1A <?> "Packet Id 0x1A"
+    Animation <$> parseHand
 
 data Spectate = Spectate UUID deriving (Generic,Serial)
 instance Packet Spectate where
@@ -513,6 +628,7 @@ instance Packet Spectate where
   packetId = 0x1B
   packetPretty (Spectate _uuid) = []
 --instance HandledPacket Spectate where
+  --parsePacket = error "No parser for packet"
 
 data PlayerBlockPlacement = PlayerBlockPlacement BlockCoord BlockFace Hand (Float,Float,Float) deriving (Generic,Serial)
 instance Packet PlayerBlockPlacement where
@@ -541,6 +657,13 @@ instance HandledPacket PlayerBlockPlacement where
             --setInventorySlot heldSlot newSlot
             -- TODO: map item damage to block damage somehow
             --setBlock (Tile.Chest North []) (blockOnSide block side)
+  parsePacket = do
+    specificVarInt 0x1C <?> "Packet Id 0x1C"
+    PlayerBlockPlacement
+      <$> parseBlockCoord
+      <*> parseBlockFace
+      <*> parseHand
+      <*> ((,,) <$> parseFloat <*> parseFloat <*> parseFloat)
 
 data UseItem = UseItem Hand deriving (Generic,Serial)
 instance Packet UseItem where
@@ -553,6 +676,9 @@ instance HandledPacket UseItem where
     -- Decide which slot they are using, and find the item in that hand
     held <- getInventorySlot =<< (case hand of {MainHand -> holdingSlot <$> getPlayer; OffHand -> pure 45})
     logp $ "Used: " <> T.pack (show held)
+  parsePacket = do
+    specificVarInt 0x1D <?> "Packet Id 0x1D"
+    UseItem <$> parseHand
 
 data LoginStart = LoginStart ProtocolString deriving (Generic,Serial)
 instance Packet LoginStart where
@@ -654,6 +780,13 @@ instance HandledPacket EncryptionResponse where
             setInventorySlot 4 (Slot . Just $ SlotData (some (Stone.Stone :: Stone.Stone 'AsItem)) 32)
             ps <- allPlayers
             sendPacket (Client.PlayerListItem (map (\p -> (clientUUID p,PlayerListAdd (clientUsername p) authProps Survival 0 Nothing)) ps))
+  parsePacket = do
+    specificVarInt 0x01
+    ssLen <- fromEnum <$> parseVarInt
+    ss <- P.take ssLen
+    vtLen <- fromEnum <$> parseVarInt
+    vt <- P.take vtLen
+    return $ EncryptionResponse ss vt
 
 data StatusRequest = StatusRequest deriving (Generic,Serial)
 instance Packet StatusRequest where
@@ -671,6 +804,7 @@ instance HandledPacket StatusRequest where
     sendPacket (Client.StatusResponse resp)
     -- TODO
     -- setPlayerState WaitingForStatusPing
+  parsePacket = try (specificVarInt 0x00 >> endOfInput) >> return StatusRequest
 
 data StatusPing = StatusPing Int64 deriving (Generic,Serial)
 instance Packet StatusPing where
@@ -681,6 +815,9 @@ instance Packet StatusPing where
 instance HandledPacket StatusPing where
   -- Send a pong with the same ping token right away
   onPacket (StatusPing l) = sendPacket (Client.StatusPong l)
+  parsePacket = do
+    specificVarInt 0x01
+    StatusPing <$> parseLong
 
 -- TODO: make this not cancer
 image :: String

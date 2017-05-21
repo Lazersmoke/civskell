@@ -229,7 +229,7 @@ instance Packet ServerDifficulty where
   packetPretty (ServerDifficulty dif) = [("Difficulty",show dif)]
 
 -- List of matches for tab completion. Prefixed with length when sent
-data TabComplete = TabComplete (ProtocolList VarInt ProtocolString)
+data TabComplete = TabComplete (ProtocolList VarInt ProtocolString) deriving (Generic,Serial)
 instance Packet TabComplete where
   type PacketState TabComplete = 'Playing
   packetName = "TabComplete"
@@ -466,7 +466,7 @@ instance Serial PlayerAbilities where
 
 -- x,y,z, yaw,pitch, relativity flags, TPconfirm Id
 data PlayerListItem a = PlayerListItem [(UUID,PlayerListAction a)]
-instance Packet (PlayerListItem a) where
+instance PlayerListActionEnum a => Packet (PlayerListItem a) where
   type PacketState (PlayerListItem a) = 'Playing
   packetName = "PlayerListItem"
   packetId = 0x2D

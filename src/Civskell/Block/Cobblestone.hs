@@ -18,3 +18,4 @@ instance Item (Cobblestone 'AsItem) where
   itemId = 4
   itemIdentifier = "minecraft:cobblestone"
   onItemUse = Just $ \Cobblestone -> placeBlock (Cobblestone :: Cobblestone 'AsBlock)
+  parseItem = standardParser (Cobblestone :: Cobblestone 'AsItem)

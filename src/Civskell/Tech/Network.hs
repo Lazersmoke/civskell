@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}
@@ -12,7 +13,10 @@ module Civskell.Tech.Network
 import Control.Eff (Eff,send)
 import Data.Functor.Identity
 import Data.Bits
+import Data.Bytes.Get
+import Data.Bytes.Serial
 import Data.Semigroup ((<>))
+import qualified Data.Map as Map
 import Data.Word (Word8)
 import Data.Aeson (fromJSON,json,Result(..))
 import Network.HTTP.Client
@@ -23,20 +27,26 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.SuchThat
 import qualified Data.Text as T
+import qualified Data.Serialize.Get as Ser
 
 import Civskell.Data.Logging
 import Civskell.Data.Networking
 import Civskell.Data.Types
 
+parseFromSet :: MonadGet m => ParseSet m -> m (ForAny InboundPacket)
+parseFromSet s = deserialize @VarInt >>= \pktId -> case Map.lookup pktId s of
+  Just cont -> cont
+  Nothing -> error "No parser for that packet"
+
 -- Takes an effect to decide which parser to use once the packet arrives, and returns the parsed packet when it arrives
-getGenericPacket :: (Logs r,Networks r) => Eff r (Parser (ForAny InboundPacket)) -> Eff r (Maybe (ForAny InboundPacket))
+getGenericPacket :: (Logs r,Networks r) => Eff r (ParseSet Ser.Get) -> Eff r (Maybe (ForAny InboundPacket))
 getGenericPacket ep = do
   -- Get the raw data (sans length)
   pkt <- removeCompression =<< getRawPacket
   -- TODO: Take advantage of incremental parsing maybe
   -- Parse it
   p <- ep
-  case parseOnly p pkt of
+  case runGetS (parseFromSet p) pkt of
     -- If it parsed ok, then
     Right serverPkt -> do
       -- Return it

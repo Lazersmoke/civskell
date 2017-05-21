@@ -62,6 +62,7 @@ module Civskell.Data.Types
   ,SendsPackets,Packeting(..)
   -- Packet
   ,Packet(..),HandledPacket(..),OutboundPacket(..),InboundPacket(..)
+  ,ParseSet
   -- Configuration
   ,Configured,Configuration(..),defaultConfiguration,forkConfig
   -- Entity
@@ -493,7 +494,19 @@ instance Serial Dimension where
 
 data Hand = MainHand | OffHand deriving (Show,Eq)
 
+instance Serial Hand where
+  serialize MainHand = serialize @VarInt 0
+  serialize OffHand = serialize @VarInt 1
+  deserialize = flip fmap (deserialize @VarInt) $ \case
+    0 -> MainHand
+    1 -> OffHand
+    _ -> undefined
+
 data BlockFace = Bottom | Top | SideFace CardinalDirection deriving Show
+
+instance Serial BlockFace where
+  serialize = serialize @VarInt . fromIntegral . fromEnum
+  deserialize = toEnum . fromIntegral <$> deserialize @VarInt
 
 instance Enum BlockFace where
   toEnum = \case
@@ -551,6 +564,17 @@ instance Serial AnimationAction where
 -- Used in Server.UseEntity
 data EntityInteraction = Attack | Interact Hand | InteractAt (Float,Float,Float) Hand deriving Show
 
+instance Serial EntityInteraction where
+  serialize = \case
+    Interact hand -> serialize @VarInt 0 *> serialize @Hand hand
+    Attack -> serialize @VarInt 1
+    InteractAt loc hand -> serialize @VarInt 2 *> serialize loc *> serialize @Hand hand
+  deserialize = deserialize @VarInt >>= \case
+    0 -> Interact <$> deserialize @Hand
+    1 -> pure Attack
+    2 -> InteractAt <$> deserialize @(Float,Float,Float) <*> deserialize @Hand
+    _ -> undefined
+
 data AsType = AsBlock | AsItem
 
 -- Helper kind for PlayerListAction
@@ -601,8 +625,50 @@ instance Serial (PlayerListAction 'RemovePlayer) where
 -- Used in Server.PlayerDigging
 data PlayerDigAction = StartDig BlockCoord BlockFace | StopDig BlockCoord BlockFace | EndDig BlockCoord BlockFace | DropItem Bool | ShootArrowOrFinishEating | SwapHands
 
+instance Serial PlayerDigAction where
+  serialize = \case
+    StartDig bc bf -> serialize @VarInt 0 *> serialize bc *> serialize bf
+    StopDig bc bf -> serialize @VarInt 1 *> serialize bc *> serialize bf
+    EndDig bc bf -> serialize @VarInt 2 *> serialize bc *> serialize bf
+    DropItem True -> serialize @VarInt 3
+    DropItem False -> serialize @VarInt 4
+    ShootArrowOrFinishEating -> serialize @VarInt 5
+    SwapHands -> serialize @VarInt 6
+  deserialize = deserialize @VarInt >>= \case
+    0 -> StartDig <$> deserialize @BlockCoord <*> deserialize @BlockFace
+    1 -> StopDig <$> deserialize @BlockCoord <*> deserialize @BlockFace
+    2 -> EndDig <$> deserialize @BlockCoord <*> deserialize @BlockFace
+    3 -> pure (DropItem True)
+    4 -> pure (DropItem False)
+    5 -> pure ShootArrowOrFinishEating
+    6 -> pure SwapHands
+    _ -> undefined
+
 -- Used in Server.EntityAction
-data PlayerEntityAction = Sneak Bool | Sprint Bool | HorseJump Bool VarInt | LeaveBed | ElytraFly | HorseInventory
+data PlayerEntityAction = Sneak Bool | Sprint Bool | HorseJumpStart VarInt | HorseJumpStop | LeaveBed | ElytraFly | HorseInventory
+
+instance Serial PlayerEntityAction where
+  serialize = \case
+    Sneak True -> serialize @VarInt 0
+    Sneak False -> serialize @VarInt 1
+    LeaveBed -> serialize @VarInt 2
+    Sprint True -> serialize @VarInt 3
+    Sprint False -> serialize @VarInt 4
+    HorseJumpStart jmp -> serialize @VarInt 5 >> serialize @VarInt jmp
+    HorseJumpStop -> serialize @VarInt 6
+    HorseInventory -> serialize @VarInt 7
+    ElytraFly -> serialize @VarInt 8
+  deserialize = deserialize @VarInt >>= \case
+    0 -> pure (Sneak True)
+    1 -> pure (Sneak False)
+    2 -> pure LeaveBed
+    3 -> pure (Sprint True)
+    4 -> pure (Sprint False)
+    5 -> HorseJumpStart <$> deserialize @VarInt
+    6 -> pure HorseJumpStop
+    7 -> pure HorseInventory
+    8 -> pure ElytraFly
+    _ -> undefined
 
 -- Used in Server.ClickWindow
 data InventoryClickMode = NormalClick Bool | ShiftClick Bool | NumberKey Word8 | MiddleClick | ItemDropOut Bool | PaintingMode Word8 | DoubleClick deriving Show
@@ -621,7 +687,11 @@ instance Serial AbilityFlags where
 data GameStateChange = InvalidBed | Raining Bool | ChangeGamemode Gamemode | ExitTheEnd Bool | DemoMessage | ArrowHitOtherPlayer | FadeValue Float | FadeTime Float | ElderGuardian
 
 -- Used in Server.ClientAction
-data ClientStatusAction = PerformRespawn | RequestStats | OpenInventory deriving Show
+data ClientStatusAction = PerformRespawn | RequestStats | OpenInventory deriving (Show,Enum)
+
+instance Serial ClientStatusAction where
+  serialize = serialize @VarInt . fromIntegral . fromEnum
+  deserialize = toEnum . fromIntegral <$> (deserialize @VarInt)
 
 -- Block Coord helper functions
 -- Get the chunk an absolute coord is in
@@ -902,7 +972,7 @@ deserOpt = deserialize @Bool >>= \case
   False -> return Nothing
   True -> Just <$> deserialize @s
 
-newtype ProtocolString = ProtocolString {unProtocolString :: String} deriving IsString
+newtype ProtocolString = ProtocolString {unProtocolString :: String} deriving (IsString,Show,Eq)
 
 instance Serial ProtocolString where
   serialize (ProtocolString str) = serialize ((fromIntegral $ BS.length encoded) :: VarInt) >> putByteString encoded
@@ -945,7 +1015,7 @@ withListLength ls = serialize ((fromIntegral $ length ls) :: VarInt) >> traverse
 
 -- Class of types that are packets
 -- TODO: Split into Client/Server subclasses so we don't have lots of `undefined` parsePacket and onPacket everywhere
-class Packet p where
+class Serial p => Packet p where
   -- State this packet is expected in
   type PacketState p :: ServerState
   -- Extract name-value pairs to pretty print a packet
@@ -954,6 +1024,8 @@ class Packet p where
   packetName :: String
   -- Packet Id -- Put this in the type level? Fundep: `packetstate, packetId -> p`
   packetId :: VarInt
+
+type ParseSet m = Map.Map VarInt (m (ForAny InboundPacket))
 
 -- Helper classes for using Data.SuchThat with TypeFamilies, which would otherwise be partially applied
 class Packet p => HandledPacket p where
@@ -964,7 +1036,7 @@ class Packet p => HandledPacket p where
   --onPacket p = send (LogString ErrorLog $ "Unsupported packet: " ++ showPacket p)
   -- Parse a packet
   --parsePacket :: Parser p
-  -- Deprecated for Serial
+  -- ^ Deprecated for Serial
   -- Can `onPacket` possibly poke the packet state, so we need to wait for it to
   -- finish in serial, not parallel?
   canPokePacketState :: Bool

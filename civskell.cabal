@@ -15,13 +15,20 @@ cabal-version:       >=1.10
 
 library
   hs-source-dirs:      src
-  exposed-modules:     Civskell, Civskell.Data.Types, Civskell.Data.World,Civskell.Data.Player, Civskell.Tech.Network, Civskell.Tech.Encrypt,Civskell.Tech.Parse, Civskell.Packet.Serverbound, Civskell.Packet.Clientbound,Civskell.Data.Logging, Civskell.Data.Networking, Civskell.Entity,Civskell.Entity.Object, Civskell.Tile, Civskell.Item, Civskell.Entity.Base,Civskell.Window, Civskell.Block
+  exposed-modules:     Piskell,Civskell, Civskell.Data.Types, Civskell.Data.World,Civskell.Data.Player, Civskell.Tech.Network, Civskell.Tech.Encrypt,Civskell.Tech.Parse, Civskell.Packet.Serverbound, Civskell.Packet.Clientbound,Civskell.Data.Logging, Civskell.Data.Networking, Civskell.Entity,Civskell.Entity.Object, Civskell.Tile, Civskell.Item, Civskell.Entity.Base,Civskell.Window, Civskell.Block
   other-modules:       Civskell.Entity.Item, Civskell.Entity.Creeper, Civskell.Block.Stone
   build-depends:       base >= 4.7 && < 5, network, bytestring, utf8-string, random, cryptonite, pretty-hex, time, http-client, http-client-tls, AES, reee-monads, zlib, bytes, cereal, nbt, containers, binary-strict, attoparsec, ghost-buster, aeson, unordered-containers, text, stm, vector
   default-language:    Haskell2010
 
 executable civskell-exe
   hs-source-dirs:      app
+  main-is:             Main.hs
+  ghc-options:         -threaded -fprof-auto
+  build-depends:       base, HsOpenSSL, civskell
+  default-language:    Haskell2010
+
+executable piskell-exe
+  hs-source-dirs:      app-pi
   main-is:             Main.hs
   ghc-options:         -threaded -fprof-auto
   build-depends:       base, HsOpenSSL, civskell

@@ -1,4 +1,6 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE PolyKinds #-}
@@ -6,10 +8,21 @@ module Civskell.Block.Stone where
 
 import Civskell.Data.Types
 import Civskell.Block
-import Civskell.Block.Cobblestone
+--import Civskell.Block.Cobblestone
 
 -- Bool isPolished
 data Stone (t :: AsType) = Stone | Granite Bool | Diorite Bool | Andesite Bool
+
+convStone :: forall b a. Stone a -> Stone b
+convStone = \case
+    Stone -> Stone :: Stone b
+    Granite False -> Granite False :: Stone b
+    Granite True -> Granite True :: Stone b
+    Diorite False -> Diorite False :: Stone b
+    Diorite True -> Diorite True :: Stone b
+    Andesite False -> Andesite False :: Stone b
+    Andesite True -> Andesite True :: Stone b
+
 instance Block (Stone 'AsBlock) where
   blockId = 1
   blockIdentifier = "minecraft:stone"
@@ -29,16 +42,10 @@ instance Block (Stone 'AsBlock) where
     Diorite True -> "Polished Diorite"
     Andesite False -> "Andesite"
     Andesite True -> "Polished Andesite"
-  droppedItem = some . \case
-    Stone -> Cobblestone :: Cobblestone 'AsItem
-    Granite False -> Granite False :: Stone 'AsItem
-    Granite True -> Granite True :: Stone 'AsItem
-    Diorite False -> Diorite False :: Stone 'AsItem
-    Diorite True -> Diorite True :: Stone 'AsItem
-    Andesite False -> Andesite False :: Stone 'AsItem
-    Andesite True -> Andesite True :: Stone 'AsItem
+  droppedItem = Just $ some . convStone @'AsItem
 
 instance Item (Stone 'AsItem) where
   itemId = 0x1
   itemIdentifier = "minecraft:stone"
-  onItemUse = Just placeBlock
+  onItemUse = Just (placeBlock . convStone @'AsBlock)
+  parseItem = standardParser (Stone @'AsItem)

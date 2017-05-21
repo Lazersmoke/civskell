@@ -1,9 +1,24 @@
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE FlexibleContexts #-}
 module Piskell where
 
 import qualified Network as Net
+import Data.Functor.Identity
+import Data.SuchThat
+import Control.Eff
+import qualified Data.ByteString as BS
+import Control.Concurrent.STM
+import Control.Concurrent (forkIO,threadDelay)
+import System.IO
 
 import Civskell.Data.Types
+import Civskell.Data.Player
+import Civskell.Data.Logging
+import Civskell.Data.World
+import Civskell.Tech.Network
 import qualified Civskell.Packet.Serverbound as Server
+import qualified Civskell.Packet.Clientbound as Client
 
 runClient :: (Configured r,PerformsIO r) => Eff r ()
 runClient = do
@@ -12,7 +27,7 @@ runClient = do
   -- Fork a thread to continuously log every log message
   _ <- send $ forkIO (loggingThread logger)
   -- Retire main thread to connection duty
-  send . runM =<< (forkConfig . runLogger logger . login =<< send (Net.connectTo "localhost" (Net.PortNumber 25565))
+  send . runM =<< (forkConfig . runLogger logger . login =<< send (Net.connectTo "localhost" (Net.PortNumber 25565)))
 
 -- Spawns a new thread to deal with each new client
 login :: (Logs r,Configured r,PerformsIO r) => Handle -> Eff r ()
@@ -60,7 +75,16 @@ packetLoop = do
   -- Block until a packet arrives, then deal with it
   getGenericPacket getParser >>= \case
     Nothing -> loge "Failed to parse incoming packet"
-    Just (SuchThat (SuchThat (Identity q))) -> do
+    Just (SuchThat (InboundPacket (SuchThat (Identity q)))) -> do
       let op = onPacket q
       send . (>> pure ()) . forkIO =<< (runM <$>) . forkConfig =<< forkLogger =<< forkNetwork =<< forkWorld =<< (runPacketing <$> forkPlayer op)
   packetLoop
+  where
+    -- This is an *action* to decide what parser to use. It needs to be like this because
+    -- the player could change states *while we are waiting* for the next packet to arrive.
+    -- This design ensures that the correct parser is always used.
+    getParser = flip fmap (playerState <$> getPlayer) $ \case
+      Handshaking -> Server.parseHandshakePacket
+      LoggingIn -> Server.parseLoginPacket
+      Status -> Server.parseStatusPacket
+      Playing -> Server.parsePlayPacket
