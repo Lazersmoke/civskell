@@ -153,13 +153,13 @@ packetLoop :: (Configured r,PerformsIO r,HasPlayer r,Logs r,Networks r,HasWorld 
 packetLoop = do
   -- TODO: Fork new thread on every packet
   -- Block until a packet arrives, then deal with it
-  getGenericPacket getParser >>= \case
+  getGenericPacket @HandledPacket getParser >>= \case
     Nothing -> loge "Failed to parse incoming packet"
     -- If you are chasing a bug and you think it may be caused by the one-liner below, you are probably right.
     -- You can't substitute `onPacket q` for `op` except using the let binding as shown below. The type gods
     -- will become angry and smite you where you stand. TODO: investigate appeasing the type gods by enabling/
     -- disabling the monomorphism restriction
-    Just (SuchThat (InboundPacket (SuchThat (Identity (q :: qt))))) -> if canPokePacketState @qt
+    Just (SuchThat (Identity (q :: qt))) -> if canPokePacketState @qt
       -- Serial mode
       then runPacketing $ onPacket q
       -- Parallel mode

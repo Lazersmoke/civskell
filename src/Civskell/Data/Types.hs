@@ -308,16 +308,15 @@ instance Show VarInt where show = show . unVarInt
 -- Where when `i` is set, there is still another byte to be read. All the `d`s
 -- from all the bytes are concatenated without spacing to form the actual number.
 instance Serial VarInt where
-  serialize n = if moreAfter
+  serialize n = if n' /= 0
     -- If there are more, set the msb and recurse
-    then putWord8 (0b10000000 .|. writeNow) >> serialize (shiftR n 7)
+    then putWord8 (0b10000000 .|. writeNow) >> serialize n'
     -- Otherwise, just use this one
     else putWord8 writeNow
     where
       -- Write first seven bits
       writeNow = (unsafeCoerce :: VarInt -> Word8) $ n .&. 0b01111111
-      -- Are there more bytes to add?
-      moreAfter = testBit n 7
+      n' = shiftR n 7
   -- untested
   deserialize = do
     b <- getWord8
@@ -1025,7 +1024,7 @@ class Serial p => Packet p where
   -- Packet Id -- Put this in the type level? Fundep: `packetstate, packetId -> p`
   packetId :: VarInt
 
-type ParseSet m = Map.Map VarInt (m (ForAny InboundPacket))
+type ParseSet m k vc = Map.Map k (m (SuchThatStar vc))
 
 -- Helper classes for using Data.SuchThat with TypeFamilies, which would otherwise be partially applied
 class Packet p => HandledPacket p where

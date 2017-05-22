@@ -133,7 +133,7 @@ runNetworking mEnc mThresh hdl (Eff u q) = case u of
     runNetworking mEnc mThresh hdl (runTCQ q ())
   Inject (AddCompression bs) -> send (readTVarIO mThresh) >>= \case
     -- Do not compress; annotate with length only
-    Nothing -> runNetworking mEnc mThresh hdl (runTCQ q (runPutS . withLength . runPutS . serialize $ bs))
+    Nothing -> runNetworking mEnc mThresh hdl (runTCQ q (runPutS . withLength $ bs))
     -- Compress with the threshold `t`
     Just t -> if BS.length bs >= fromIntegral t
       -- Compress data and annotate to match

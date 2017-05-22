@@ -33,13 +33,13 @@ import Civskell.Data.Logging
 import Civskell.Data.Networking
 import Civskell.Data.Types
 
-parseFromSet :: MonadGet m => ParseSet m -> m (ForAny InboundPacket)
+parseFromSet :: MonadGet m => ParseSet m VarInt vc -> m (SuchThatStar vc)
 parseFromSet s = deserialize @VarInt >>= \pktId -> case Map.lookup pktId s of
   Just cont -> cont
   Nothing -> error "No parser for that packet"
 
 -- Takes an effect to decide which parser to use once the packet arrives, and returns the parsed packet when it arrives
-getGenericPacket :: (Logs r,Networks r) => Eff r (ParseSet Ser.Get) -> Eff r (Maybe (ForAny InboundPacket))
+getGenericPacket :: forall c r. (Logs r,Networks r) => Eff r (ParseSet Ser.Get VarInt '[Packet,c]) -> Eff r (Maybe (SuchThatStar '[Packet,c]))
 getGenericPacket ep = do
   -- Get the raw data (sans length)
   pkt <- removeCompression =<< getRawPacket
@@ -50,7 +50,7 @@ getGenericPacket ep = do
     -- If it parsed ok, then
     Right serverPkt -> do
       -- Return it
-      logLevel ServerboundPacket . T.pack $ ambiguously (\(InboundPacket x) -> ambiguously (showPacket . runIdentity) x) serverPkt
+      logLevel ServerboundPacket . T.pack $ ambiguously (showPacket . runIdentity) serverPkt
       logLevel HexDump . T.pack . indentedHex $ pkt
       return $ Just serverPkt
     -- If it didn't parse correctly, print the error and return Nothing

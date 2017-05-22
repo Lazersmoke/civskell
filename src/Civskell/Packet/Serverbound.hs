@@ -44,49 +44,49 @@ import qualified Civskell.Packet.Clientbound as Client
 
   -- Protocol Version, Server Address, Server Port, Next State
 
-parseHandshakePacket :: MonadGet m => ParseSet m
+parseHandshakePacket :: MonadGet m => ParseSet m VarInt '[Packet,HandledPacket]
 parseHandshakePacket = Map.fromList 
-  [(packetId @Handshake,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @Handshake)
-  ,(packetId @LegacyHandshake,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @LegacyHandshake)
+  [(packetId @Handshake,ambiguate . Identity <$> deserialize @Handshake)
+  ,(packetId @LegacyHandshake,ambiguate . Identity <$> deserialize @LegacyHandshake)
   ]
 
-parseLoginPacket :: MonadGet m => ParseSet m
+parseLoginPacket :: MonadGet m => ParseSet m VarInt '[Packet,HandledPacket]
 parseLoginPacket = Map.fromList 
-  [(packetId @LoginStart,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @LoginStart)
-  ,(packetId @EncryptionResponse,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @EncryptionResponse)
+  [(packetId @LoginStart,ambiguate . Identity <$> deserialize @LoginStart)
+  ,(packetId @EncryptionResponse,ambiguate . Identity <$> deserialize @EncryptionResponse)
   ]
 
-parseStatusPacket :: MonadGet m => ParseSet m
+parseStatusPacket :: MonadGet m => ParseSet m VarInt '[Packet,HandledPacket]
 parseStatusPacket = Map.fromList 
-  [(packetId @StatusRequest,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @StatusRequest)
-  ,(packetId @StatusPing,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @StatusPing)
+  [(packetId @StatusRequest,ambiguate . Identity <$> deserialize @StatusRequest)
+  ,(packetId @StatusPing,ambiguate . Identity <$> deserialize @StatusPing)
   ]
 
 -- TODO: SuchThat '[SP 'Playing] Parser
-parsePlayPacket :: MonadGet m => ParseSet m
+parsePlayPacket :: MonadGet m => ParseSet m VarInt '[Packet,HandledPacket]
 parsePlayPacket = Map.fromList
-  [(packetId @TPConfirm,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @TPConfirm)
-  ,(packetId @ChatMessage,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @ChatMessage)
-  ,(packetId @ClientStatus,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @ClientStatus)
-  ,(packetId @ClientSettings,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @ClientSettings)
-  ,(packetId @ConfirmTransaction,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @ConfirmTransaction)
-  ,(packetId @ClickWindow,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @ClickWindow)
-  ,(packetId @CloseWindow,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @CloseWindow)
-  ,(packetId @PluginMessage,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @PluginMessage)
-  ,(packetId @UseEntity,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @UseEntity)
-  ,(packetId @KeepAlive,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @KeepAlive)
-  ,(packetId @PlayerPosition,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @PlayerPosition)
-  ,(packetId @PlayerPositionAndLook,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @PlayerPositionAndLook)
-  ,(packetId @PlayerLook,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @PlayerLook)
-  ,(packetId @Player,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @Player)
-  ,(packetId @PlayerAbilities,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @PlayerAbilities)
-  ,(packetId @PlayerDigging,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @PlayerDigging)
-  ,(packetId @EntityAction,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @EntityAction)
-  ,(packetId @HeldItemChange,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @HeldItemChange)
-  ,(packetId @CreativeInventoryAction,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @CreativeInventoryAction)
-  ,(packetId @Animation,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @Animation)
-  ,(packetId @PlayerBlockPlacement,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @PlayerBlockPlacement)
-  ,(packetId @UseItem,ambiguate . InboundPacket . ambiguate . Identity <$> deserialize @UseItem)
+  [(packetId @TPConfirm,ambiguate . Identity <$> deserialize @TPConfirm)
+  ,(packetId @ChatMessage,ambiguate . Identity <$> deserialize @ChatMessage)
+  ,(packetId @ClientStatus,ambiguate . Identity <$> deserialize @ClientStatus)
+  ,(packetId @ClientSettings,ambiguate . Identity <$> deserialize @ClientSettings)
+  ,(packetId @ConfirmTransaction,ambiguate . Identity <$> deserialize @ConfirmTransaction)
+  ,(packetId @ClickWindow,ambiguate . Identity <$> deserialize @ClickWindow)
+  ,(packetId @CloseWindow,ambiguate . Identity <$> deserialize @CloseWindow)
+  ,(packetId @PluginMessage,ambiguate . Identity <$> deserialize @PluginMessage)
+  ,(packetId @UseEntity,ambiguate . Identity <$> deserialize @UseEntity)
+  ,(packetId @KeepAlive,ambiguate . Identity <$> deserialize @KeepAlive)
+  ,(packetId @PlayerPosition,ambiguate . Identity <$> deserialize @PlayerPosition)
+  ,(packetId @PlayerPositionAndLook,ambiguate . Identity <$> deserialize @PlayerPositionAndLook)
+  ,(packetId @PlayerLook,ambiguate . Identity <$> deserialize @PlayerLook)
+  ,(packetId @Player,ambiguate . Identity <$> deserialize @Player)
+  ,(packetId @PlayerAbilities,ambiguate . Identity <$> deserialize @PlayerAbilities)
+  ,(packetId @PlayerDigging,ambiguate . Identity <$> deserialize @PlayerDigging)
+  ,(packetId @EntityAction,ambiguate . Identity <$> deserialize @EntityAction)
+  ,(packetId @HeldItemChange,ambiguate . Identity <$> deserialize @HeldItemChange)
+  ,(packetId @CreativeInventoryAction,ambiguate . Identity <$> deserialize @CreativeInventoryAction)
+  ,(packetId @Animation,ambiguate . Identity <$> deserialize @Animation)
+  ,(packetId @PlayerBlockPlacement,ambiguate . Identity <$> deserialize @PlayerBlockPlacement)
+  ,(packetId @UseItem,ambiguate . Identity <$> deserialize @UseItem)
   ]
 
 -- TODO: Re-specify parsers for different server states
