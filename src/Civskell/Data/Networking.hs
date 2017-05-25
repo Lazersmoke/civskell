@@ -14,6 +14,7 @@ import Data.SuchThat
 import Data.Functor.Identity
 import Data.Bytes.Serial
 import Data.Bytes.Put
+import Data.Bytes.Get
 import qualified Data.Text as T
 import System.IO
 import Data.Attoparsec.ByteString
@@ -35,7 +36,7 @@ rPut :: Networks n => BS.ByteString -> Eff n ()
 rPut = send . PutIntoNetwork
 
 {-# INLINE setupEncryption #-}
-setupEncryption :: Networks n => BS.ByteString -> Eff n ()
+setupEncryption :: Networks n => EncryptionCouplet -> Eff n ()
 setupEncryption = send . SetupEncryption
 
 {-# INLINE setCompression #-}
@@ -59,7 +60,7 @@ sendAnyPacket = send . SendPacket
 iSolemnlySwearIHaveNoIdeaWhatImDoing :: SendsPackets r => BS.ByteString -> Eff r ()
 iSolemnlySwearIHaveNoIdeaWhatImDoing = send . UnsafeSendBytes
 
-beginEncrypting :: SendsPackets r => BS.ByteString -> Eff r ()
+beginEncrypting :: SendsPackets r => EncryptionCouplet -> Eff r ()
 beginEncrypting = send . BeginEncrypting
 
 beginCompression :: SendsPackets r => VarInt -> Eff r ()
@@ -76,7 +77,7 @@ runPacketing (Eff u q) = case u of
     logLevel ClientboundPacket . T.pack $ showPacket s
     logLevel HexDump . T.pack $ indentedHex (runPutS . serialize $ s)
     -- Send it
-    rPut =<< addCompression (BS.append (runPutS . serialize $ packetId @a) . runPutS . serialize $ s)
+    rPut =<< addCompression (runPutS $ serialize (packetId @a) *> serialize s)
     runPacketing (runTCQ q ())
   -- "Unsafe" means it doesn't come from a legitimate packet (doesn't have packetId) and doesn't get compressed
   Inject (UnsafeSendBytes bytes) -> rPut bytes >> runPacketing (runTCQ q ())
@@ -124,10 +125,10 @@ runNetworking mEnc mThresh hdl (Eff u q) = case u of
       -- Should we throw an error instead of silently failing here?
       Just _ -> pure ()
     runNetworking mEnc mThresh hdl (runTCQ q ())
-  Inject (SetupEncryption sharedSecret) -> do
+  Inject (SetupEncryption coup) -> do
     send . atomically $ readTVar mThresh >>= \case
       -- If there is no encryption setup yet, set it up
-      Nothing -> writeTVar mEnc (Just (makeEncrypter sharedSecret,sharedSecret,sharedSecret))
+      Nothing -> writeTVar mEnc (Just coup)
       -- If it is already encrypted, don't do anything
       Just _ -> pure ()
     runNetworking mEnc mThresh hdl (runTCQ q ())
@@ -151,9 +152,9 @@ runNetworking mEnc mThresh hdl (Eff u q) = case u of
         runNetworking mEnc mThresh hdl (runTCQ q (runPutS ann))
   Inject (RemoveCompression bs) -> send (readTVarIO mThresh) >>= \case
     -- Parse an uncompressed packet
-    Nothing -> case parseOnly parseUncompPkt bs of
+    Nothing -> case runGetS parseUncompPkt bs of
       -- TODO: fix this completely ignoring a parse error
-      Left _ -> runNetworking mEnc mThresh hdl (runTCQ q bs)
+      Left _ -> send (putStrLn "Emergency Parse Error!!!") *> runNetworking mEnc mThresh hdl (runTCQ q bs)
       Right pktData -> runNetworking mEnc mThresh hdl (runTCQ q pktData)
     -- Parse a compressed packet (compressed packets have extra metadata)
     Just _ -> case parseOnly parseCompPkt bs of

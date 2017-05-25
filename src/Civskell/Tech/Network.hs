@@ -7,7 +7,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Civskell.Tech.Network
   (module Civskell.Data.Networking
-  ,getGenericPacket,authGetReq --,getPacketFromParser --,sendPacket,getPacket
+  ,parseFromSet,getGenericPacket,authGetReq --,getPacketFromParser --,sendPacket,getPacket
   ) where
 
 import Control.Eff (Eff,send)
@@ -36,7 +36,7 @@ import Civskell.Data.Types
 parseFromSet :: MonadGet m => ParseSet m VarInt vc -> m (SuchThatStar vc)
 parseFromSet s = deserialize @VarInt >>= \pktId -> case Map.lookup pktId s of
   Just cont -> cont
-  Nothing -> error "No parser for that packet"
+  Nothing -> error $ "No parser for that packet (Id = " <> show pktId <> ")"
 
 -- Takes an effect to decide which parser to use once the packet arrives, and returns the parsed packet when it arrives
 getGenericPacket :: forall c r. (Logs r,Networks r) => Eff r (ParseSet Ser.Get VarInt '[Packet,c]) -> Eff r (Maybe (SuchThatStar '[Packet,c]))

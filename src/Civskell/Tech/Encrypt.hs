@@ -1,4 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE BinaryLiterals #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE LambdaCase #-}
 module Civskell.Tech.Encrypt 
   (globalKeypair
   ,encodedPublicKey
@@ -7,6 +10,7 @@ module Civskell.Tech.Encrypt
   ,cfb8Encrypt,cfb8Decrypt
   ,makeEncrypter
   ,genEncryptionResponse
+  ,MCPubKey(..)
   ) where
 
 import Control.Eff (Eff,send,runM)
@@ -16,6 +20,9 @@ import Crypto.Cipher.Types (ecbEncrypt,cipherInit)
 import Crypto.Error (throwCryptoError)
 import Crypto.Hash (SHA1,Context,hashInit,hashUpdates,hashFinalize)
 import Data.Bits
+import Data.Bytes.Serial
+import Data.Bytes.Put
+import Data.Bytes.Get
 import Data.Semigroup ((<>))
 import Numeric (showHex,readHex)
 import qualified Crypto.PubKey.RSA as RSA
@@ -37,7 +44,41 @@ globalKeypair = unsafePerformIO $ runM getAKeypair
 
 -- Convieniently encoe the public part of it
 encodedPublicKey :: BS.ByteString
-encodedPublicKey = encodePubKey . fst $ globalKeypair
+encodedPublicKey = runPutS . serialize . MCPubKey . fst $ globalKeypair
+
+newtype MCPubKey = MCPubKey {unMCPubKey :: RSA.PublicKey}
+
+instance Serial MCPubKey where
+  serialize = putByteString . encodePubKey . unMCPubKey
+  deserialize = do
+    _asnSeq1 <- getWord8 -- 0x30
+    _restLen <- getASNLen
+    _asnSeq2 <- getWord8 -- 0x30
+    _algIdentLen <- getASNLen
+    _asnOID <- getWord8 -- 0x06
+    _asnOIDLen <- getASNLen
+    _asnOIDForRSAKeys <- getBytes (fromIntegral $ length [0x2a :: Int ,0x86,0x48,0x86,0xf7,0x0d,0x01,0x01,0x01])
+    _algParamsTag <- getWord8 -- 0x05
+    _algParamsNull <- getWord8 -- 0x00
+    _asnBitString <- getWord8 -- 0x03
+    _asnPubKeyLen <- getASNLen
+    _asnRandomNull <- getWord8 -- 0x00
+    _asnSeq3 <- getWord8 -- 0x30
+    _asnPubKeyDataLen <- getASNLen
+    _asnInt <- getWord8 -- 0x02
+    modulusLen <- getASNLen
+    _asnNullWhyNot <- getWord8 -- 0x00
+    modulus <- unIntBytesRaw <$> getBytes (fromIntegral $ modulusLen - 1) -- Minus one for null
+    _asnIntExp <- getWord8 -- 0x02
+    expLen <- getASNLen
+    theExp <- unIntBytesRaw <$> getBytes (fromIntegral expLen)
+    return . MCPubKey $ RSA.PublicKey {RSA.public_size = 128,RSA.public_n = modulus,RSA.public_e = theExp}
+    where
+      getASNLen = do
+        indicator <- getWord8
+        if testBit indicator 7
+          then unIntBytesRaw <$> getBytes (fromIntegral $ indicator .&. 0b01111111)
+          else return (fromIntegral $ indicator .&. 0b01111111)
 
 -- Observe the cancer, but don't touch it or you'll contract it.
 encodePubKey :: RSA.PublicKey -> BS.ByteString
@@ -91,13 +132,20 @@ encodePubKey k = asnSequence <> withLengthAsn (algIdentifier <> pubKeyBitstring)
     bytesOfModulus = intBytesRaw $ RSA.public_n k
     bytesOfExponent = intBytesRaw $ RSA.public_e k
 
--- public key, VT, and shared secret to encrypted (shared secret, verify token)
-genEncryptionResponse :: BS.ByteString -> BS.ByteString -> BS.ByteString -> (BS.ByteString,BS.ByteString)
-genEncryptionResponse = error "Not implemented: Civskell.Tech.Encrypt.genEncryptionResponse"
+-- public key, VT, and shared secret to encrypted (verify token, shared secret)
+genEncryptionResponse :: PerformsIO r => MCPubKey -> BS.ByteString -> BS.ByteString -> Eff r (BS.ByteString,BS.ByteString)
+genEncryptionResponse (MCPubKey pubKey) vt ss = send (RSA.encrypt @IO pubKey vt) >>= \case
+  Left e -> error (show e)
+  Right encVT -> send (RSA.encrypt @IO pubKey ss) >>= \case
+    Left e -> error (show e)
+    Right encSS -> return (encVT,encSS)
 
 -- intBytesRaw gets the variable-length byte encoding of a number
 intBytesRaw :: Integer -> BS.ByteString
 intBytesRaw = BS.reverse . BS.unfoldr (\i -> if i == 0 then Nothing else Just $ (fromIntegral i, shiftR i 8))
+
+unIntBytesRaw :: BS.ByteString -> Integer
+unIntBytesRaw = BS.foldr (\w i -> shiftL i 8 .|. fromIntegral w) 0 . BS.reverse
 
 -- Gets the cipher for a shared secret
 makeEncrypter :: BS.ByteString -> AES128
@@ -152,7 +200,7 @@ checkVTandSS priv vtFromClient ssFromClient actualVT =
     -- If it decrypts properly, make sure it matches the original vt
     Right vtHopefully -> if vtHopefully /= actualVT
       -- If it isn't, error out with a Left
-      then Left "Invalid Verify Token"
+      then Left $ "Invalid Verify Token; was " ++ show vtHopefully ++ ", but should have been " ++ show actualVT
       -- If the verify token was ok, then decrypt the ss
       else case RSA.decrypt Nothing priv ssFromClient of
         -- If it fails to decrypt, error out with a Left

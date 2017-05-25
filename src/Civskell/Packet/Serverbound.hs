@@ -602,11 +602,11 @@ instance HandledPacket EncryptionResponse where
     -- Make sure that the encryption stuff all lines up properly
     case checkVTandSS (snd globalKeypair) vtFromClient ssFromClient vt of
       -- If it doesn't, disconnect
-      Left s -> sendPacket (Client.Disconnect (jsonyText s)) >> loge (T.pack s)
+      Left s -> sendPacket (Client.Disconnect (jsonyText s)) >> loge (T.pack s) >> loge ("Public Key was: " <> T.pack (show (fst globalKeypair)))
       -- If it does, keep going
       Right ss -> do
         -- Start encrypting our packets, now that we have the shared secret
-        beginEncrypting ss
+        beginEncrypting (makeEncrypter ss,ss,ss)
         -- Make the serverId hash for auth
         let loginHash = genLoginHash "" ss encodedPublicKey
         -- Do the Auth stuff with Mojang

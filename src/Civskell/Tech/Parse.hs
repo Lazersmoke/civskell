@@ -1,13 +1,15 @@
 {-# LANGUAGE BinaryLiterals #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE LiberalTypeSynonyms #-}
 {-# LANGUAGE TypeFamilies #-}
 module Civskell.Tech.Parse where
 
 import Control.Monad
 import Control.Applicative
 import Data.Bits
+import Data.Bytes.Get
+import Data.Bytes.Serial
 import Data.Char
 import Data.Int
 import Data.Word
@@ -24,12 +26,8 @@ anyChar = chr . fromIntegral <$> anyWord8
 parseHand :: Parser Hand
 parseHand = (specificVarInt 0x01 *> pure OffHand) <|> (specificVarInt 0x00 *> pure MainHand)
 
-parseUncompPkt :: Parser BS.ByteString
-parseUncompPkt = do
-  pktLen <- parseVarInt
-  bs <- BS.pack <$> replicateM (fromIntegral pktLen) anyWord8
-  endOfInput
-  return bs
+parseUncompPkt :: MonadGet m => m BS.ByteString
+parseUncompPkt = getByteString . fromIntegral =<< deserialize @VarInt
 
 parseBlockFace :: Parser BlockFace
 parseBlockFace = toEnum . unsafeCoerce <$> anyWord8

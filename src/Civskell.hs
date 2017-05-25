@@ -78,7 +78,7 @@ initPlayer pq e = do
       ,moveMode = Walking
       ,playerState = Handshaking
       -- TODO: undefined is bad, don't use it
-      ,clientUsername = undefined
+      ,clientUsername = ""
       ,clientBrand = undefined
       ,clientUUID = undefined
       ,playerId = undefined

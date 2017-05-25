@@ -321,7 +321,7 @@ instance Serial VarInt where
   deserialize = do
     b <- getWord8
     if testBit b 7 
-      then (\rest -> (unsafeCoerce $ b .&. 0b01111111) .&. shiftL rest 8) <$> deserialize @VarInt
+      then (\rest -> (unsafeCoerce $ b .&. 0b01111111) .|. shiftL rest 7) <$> deserialize @VarInt
       else return (unsafeCoerce $ b .&. 0b01111111)
 
 -- TODO: Investigate GND for Serial here: it has to do with some role nonsense
@@ -1184,8 +1184,8 @@ data Networking a where
   AddCompression :: BS.ByteString -> Networking BS.ByteString
   -- Remove compression (if enabled) and strip packet metadata. Packets are left with packetId intact
   RemoveCompression :: BS.ByteString -> Networking BS.ByteString
-  -- Turn encryption on using the given Shared Secret
-  SetupEncryption :: BS.ByteString -> Networking ()
+  -- Turn encryption on using the given Couplet
+  SetupEncryption :: EncryptionCouplet -> Networking ()
   -- Send bytes over the network, encrypting if enabled
   PutIntoNetwork :: BS.ByteString -> Networking ()
   -- Read bytes from the network, decrypting if enabled
@@ -1199,7 +1199,7 @@ data Packeting a where
   SendPacket :: ForAny OutboundPacket -> Packeting ()
   -- Send raw bytes over the network (used in LegacyHandshakePong)
   UnsafeSendBytes :: BS.ByteString -> Packeting ()
-  BeginEncrypting :: BS.ByteString -> Packeting ()
+  BeginEncrypting :: EncryptionCouplet -> Packeting ()
   BeginCompression :: VarInt -> Packeting ()
 
 -- Indent the hexdump; helper function
@@ -1211,6 +1211,7 @@ type Configured r = Member (Reader Configuration) r
 
 data Configuration = Configuration
   {shouldLog :: LogLevel -> Bool
+  ,serverName :: Text
   ,spawnLocation :: BlockCoord
   ,defaultDifficulty :: Difficulty
   ,defaultDimension :: Dimension
@@ -1222,6 +1223,7 @@ data Configuration = Configuration
 defaultConfiguration :: Configuration
 defaultConfiguration = Configuration
   {shouldLog = \case {HexDump -> False; _ -> True}
+  ,serverName = "Civskell"
   ,spawnLocation = BlockLocation (0,64,0)
   ,defaultDifficulty = Peaceful
   ,defaultDimension = Overworld

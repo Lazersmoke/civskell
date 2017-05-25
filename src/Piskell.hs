@@ -65,7 +65,7 @@ login hdl = do
   -- Make new networking TVars for this client
   mEnc <- send $ newTVarIO Nothing
   mThresh <- send $ newTVarIO Nothing
-  let setup = sendPacket (Server.Handshake 316 "localhost" 25565 1) >> sendPacket (Server.LoginStart "piskell-client")
+  let setup = sendPacket (Server.Handshake 316 "localhost" 25565 2) >> sendPacket (Server.LoginStart "piskell-client")
   -- Getting thread
   _ <- send . forkIO . runM =<< forkConfig =<< (forkLogger . runNetworking mEnc mThresh hdl . runPacketing . evalState' Piskell {currentState = LoggingIn} $ setup >> packetLoop)
   runNetworking mEnc mThresh hdl . runPacketing $ terminal
@@ -78,15 +78,23 @@ terminal = send getLine >>= \case
 
 instance PiskellPacket Client.EncryptionRequest where
   reactToPacket (Client.EncryptionRequest _sId pubKeyEnc vt) = do
-    logg $ "Got encryption request"
     let sharedSecret = BS.pack [0x01,0x00,0x03,0x02,0x05,0x04,0x07,0x06,0x09,0x08,0x0B,0x0A,0x0D,0x0C,0x0F,0x0E]
-    let (ssResp,vtResp) = genEncryptionResponse pubKeyEnc vt sharedSecret
-    sendPacket (Server.EncryptionResponse ssResp vtResp)
+    case runGetS (deserialize @MCPubKey) pubKeyEnc of
+      Left e -> send $ print e
+      Right pubKey -> do
+        (vtResp,ssResp) <- genEncryptionResponse pubKey vt sharedSecret
+        sendPacket (Server.EncryptionResponse ssResp vtResp)
+        beginEncrypting (makeEncrypter sharedSecret,sharedSecret,sharedSecret)
 
 instance PiskellPacket Client.LoginSuccess where
   reactToPacket (Client.LoginSuccess _uuid _username) = do
-    logg "Got Login Success"
+    logg "Login Successful. Switching to `Play` mode."
     modify (\x -> x {currentState = Playing})
+
+instance PiskellPacket Client.SetCompression where
+  reactToPacket (Client.SetCompression thresh) = do
+    logg $ "Compression threshold set to " <> T.pack (show thresh)
+    beginCompression thresh
     
   -- get Join Game
   -- get Plugin Message with Brand
@@ -105,6 +113,9 @@ instance PiskellPacket Client.PlayerPositionAndLook where
     sendPacket (Server.TPConfirm tpId)
     sendPacket (Server.PlayerPositionAndLook pos look True)
     sendPacket (Server.ClientStatus PerformRespawn)
+
+instance PiskellPacket Client.Disconnect where
+  reactToPacket (Client.Disconnect (ProtocolString reason)) = logg $ "Disconnect because: " <> T.pack reason
 
 packetLoop :: (Logs r,SendsPackets r,HasPiskell r,Networks r,PerformsIO r) => Eff r ()
 packetLoop = do
@@ -127,6 +138,7 @@ piLogin :: MonadGet m => ParseSet m VarInt '[Packet,PiskellPacket]
 piLogin = Map.fromList 
   [(packetId @Client.LoginSuccess,ambiguate . Identity <$> deserialize @Client.LoginSuccess)
   ,(packetId @Client.EncryptionRequest,ambiguate . Identity <$> deserialize @Client.EncryptionRequest)
+  ,(packetId @Client.Disconnect,ambiguate . Identity <$> deserialize @Client.Disconnect)
   --,(packetId @Client.LegacyHandshake,ambiguate . Identity <$> deserialize @Client.LegacyHandshake)
   ]
 
