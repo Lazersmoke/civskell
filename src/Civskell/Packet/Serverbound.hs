@@ -614,11 +614,11 @@ instance HandledPacket EncryptionResponse where
         name <- clientUsername <$> getPlayer
         authGetReq name loginHash >>= \case
           -- TODO: we just crash if the token is negative :3 pls fix or make it a feature
-          -- If the auth is borked, its probably Mojangs fault tbh
+          -- If the auth is borked, its probably our fault tbh
           Left actualJSON -> do
             loge "Parse error on auth"
-            -- Disclaim guilt
-            sendPacket (Client.Disconnect $ jsonyText "Auth failed (not Lazersmoke's fault, probably!)")
+            -- Claim guilt
+            sendPacket (Client.Disconnect $ jsonyText "Auth failed (Lazersmoke's fault, probably!)")
             loge . T.pack $ actualJSON
           Right (AuthPacket uuid nameFromAuth authProps) -> do
             -- Get the config ready because we need it a lot here
