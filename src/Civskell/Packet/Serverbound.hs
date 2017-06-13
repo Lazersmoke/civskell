@@ -606,21 +606,20 @@ instance HandledPacket EncryptionResponse where
       -- If it does, keep going
       Right ss -> do
         -- Start encrypting our packets, now that we have the shared secret
-        beginEncrypting (makeEncrypter ss,ss,ss)
+        beginEncrypting ss
         -- Make the serverId hash for auth
         let loginHash = genLoginHash "" ss encodedPublicKey
         -- Do the Auth stuff with Mojang
-        -- TODO: This uses arbitrary IO, we should make it into an effect
         name <- clientUsername <$> getPlayer
-        authGetReq name loginHash >>= \case
+        -- TODO: This uses arbitrary IO, we should make it into an effect
+        serverAuthentication name loginHash >>= \case
           -- TODO: we just crash if the token is negative :3 pls fix or make it a feature
           -- If the auth is borked, its probably our fault tbh
-          Left actualJSON -> do
-            loge "Parse error on auth"
+          Nothing -> do
+            loge "Failed to authenticate with Mojang"
             -- Claim guilt
             sendPacket (Client.Disconnect $ jsonyText "Auth failed (Lazersmoke's fault, probably!)")
-            loge . T.pack $ actualJSON
-          Right (AuthPacket uuid nameFromAuth authProps) -> do
+          Just (AuthPacket uuid nameFromAuth authProps) -> do
             -- Get the config ready because we need it a lot here
             c <- ask
             pid <- registerPlayer

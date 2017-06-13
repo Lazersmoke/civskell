@@ -1184,8 +1184,8 @@ data Networking a where
   AddCompression :: BS.ByteString -> Networking BS.ByteString
   -- Remove compression (if enabled) and strip packet metadata. Packets are left with packetId intact
   RemoveCompression :: BS.ByteString -> Networking BS.ByteString
-  -- Turn encryption on using the given Couplet
-  SetupEncryption :: EncryptionCouplet -> Networking ()
+  -- Turn encryption on using the given Shared Secret
+  SetupEncryption :: BS.ByteString -> Networking ()
   -- Send bytes over the network, encrypting if enabled
   PutIntoNetwork :: BS.ByteString -> Networking ()
   -- Read bytes from the network, decrypting if enabled
@@ -1199,7 +1199,9 @@ data Packeting a where
   SendPacket :: ForAny OutboundPacket -> Packeting ()
   -- Send raw bytes over the network (used in LegacyHandshakePong)
   UnsafeSendBytes :: BS.ByteString -> Packeting ()
-  BeginEncrypting :: EncryptionCouplet -> Packeting ()
+  -- Use the given shared secret to enable encryption
+  BeginEncrypting :: BS.ByteString -> Packeting ()
+  -- Use the given threshold to enable compression
   BeginCompression :: VarInt -> Packeting ()
 
 -- Indent the hexdump; helper function

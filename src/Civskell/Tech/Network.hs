@@ -7,7 +7,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Civskell.Tech.Network
   (module Civskell.Data.Networking
-  ,parseFromSet,getGenericPacket,authGetReq --,getPacketFromParser --,sendPacket,getPacket
+  ,parseFromSet,getGenericPacket,serverAuthentication --,getPacketFromParser --,sendPacket,getPacket
   ) where
 
 import Control.Eff (Eff,send)
@@ -91,28 +91,31 @@ getPacketLength = do
     else return (thisPart,BS.singleton l)
 
 -- Get the auth info from the mojang server
-authGetReq :: (Logs r,PerformsIO r) => String -> String -> Eff r (Either String AuthPacket)
-authGetReq name hash = do
+serverAuthentication :: (Logs r,PerformsIO r) => String -> String -> Eff r (Maybe AuthPacket)
+serverAuthentication name hash = do
   -- Use SSL
   manager <- send $ newManager tlsManagerSettings
+  let reqURL = "https://sessionserver.mojang.com/session/minecraft/hasJoined?username=" ++ name ++ "&serverId=" ++ hash
+  logg $ "Sending authentication request to Mojang. Name: \"" <> T.pack name <> "\", Hash: \"" <> T.pack hash <> "\"."
+  logg $ "Request URL is \"" <> T.pack reqURL <> "\""
   -- Create the request, using sId and username from LoginStart
-  req <- send $ (parseRequest :: String -> IO Request) $ "https://sessionserver.mojang.com/session/minecraft/hasJoined?username=" ++ name ++ "&serverId=" ++ hash
+  req <- send $ (parseRequest :: String -> IO Request) reqURL 
   -- Actually make the request and store it
   resp <- send $ httpLbs req manager
+  let respJSON = LBS.toStrict . responseBody $ resp
   -- Parse the response into something useful
-  case parseOnly parseAuthJSON (LBS.toStrict . responseBody $ resp) of
+  case parseOnly json respJSON of
     Left e -> do
-      logLevel ErrorLog "Failed to parse Auth JSON"
-      logLevel ErrorLog . T.pack $ show e
-      return $ Left $ show (req,resp)
-    Right (Error e) -> do
-      logLevel ErrorLog "Parsed bad JSON"
-      logLevel ErrorLog . T.pack $ show e
-      return $ Left $ show (req,resp)
-    Right (Success a) -> return (Right a)
+      loge $ "Failed to parse Auth JSON because " <> T.pack (show e)
+      loge $ "Malformed JSON was: " <> T.pack (show respJSON)
+      loge $ "Full response was: " <> T.pack (show resp)
+      return Nothing
+    Right a -> case fromJSON a of
+      Error e -> do
+        loge $ "Parsed Auth JSON, but it wasn't actual Auth JSON because " <> T.pack e
+        loge $ "Non-Auth JSON was: " <> T.pack (show a)
+        loge $ "Full response was: " <> T.pack (show resp)
+        return Nothing
+      Success authPacket -> return (Just authPacket)
 
--- TODO: Use Aeson here
--- Parse an auth string, just getting the uuid and username
-parseAuthJSON :: Parser (Data.Aeson.Result AuthPacket)
-parseAuthJSON = fromJSON <$> json
-
+--clientAuthentication :: (Logs r,PerformsIO r) => 

@@ -70,21 +70,29 @@ login hdl = do
   _ <- send . forkIO . runM =<< forkConfig =<< (forkLogger . runNetworking mEnc mThresh hdl . runPacketing . evalState' Piskell {currentState = LoggingIn} $ setup >> packetLoop)
   runNetworking mEnc mThresh hdl . runPacketing $ terminal
 
+-- Simple busy work thread that will terminate when the user says to t
 terminal :: (Configured r, Logs r, PerformsIO r, SendsPackets r) => Eff r ()
 terminal = send getLine >>= \case
   "a" -> sendPacket (Server.ChatMessage "Test Chat Message") >> terminal
   "q" -> pure ()
   _ -> terminal
 
+-- When we get an encryption request, respond and enable encryption
 instance PiskellPacket Client.EncryptionRequest where
   reactToPacket (Client.EncryptionRequest _sId pubKeyEnc vt) = do
+    -- TODO: Randomize
     let sharedSecret = BS.pack [0x01,0x00,0x03,0x02,0x05,0x04,0x07,0x06,0x09,0x08,0x0B,0x0A,0x0D,0x0C,0x0F,0x0E]
+    -- Extract the public key from the encryption request
     case runGetS (deserialize @MCPubKey) pubKeyEnc of
+      -- If the public key is malformed, print what went wrong
       Left e -> send $ print e
       Right pubKey -> do
-        (vtResp,ssResp) <- genEncryptionResponse pubKey vt sharedSecret
-        sendPacket (Server.EncryptionResponse ssResp vtResp)
-        beginEncrypting (makeEncrypter sharedSecret,sharedSecret,sharedSecret)
+        -- Generate a response and send it. genEncryptionResponse can't directly
+        -- create a Server.EncryptionResponse because that would require
+        -- cyclical imports between Packet.Server and Tech.Encrypt
+        sendPacket =<< uncurry Server.EncryptionResponse <$> genEncryptionResponse pubKey vt sharedSecret
+        -- Only start encrypting *after* the encryption response is sent
+        beginEncrypting sharedSecret
 
 instance PiskellPacket Client.LoginSuccess where
   reactToPacket (Client.LoginSuccess _uuid _username) = do

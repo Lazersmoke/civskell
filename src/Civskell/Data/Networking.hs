@@ -36,7 +36,7 @@ rPut :: Networks n => BS.ByteString -> Eff n ()
 rPut = send . PutIntoNetwork
 
 {-# INLINE setupEncryption #-}
-setupEncryption :: Networks n => EncryptionCouplet -> Eff n ()
+setupEncryption :: Networks n => BS.ByteString -> Eff n ()
 setupEncryption = send . SetupEncryption
 
 {-# INLINE setCompression #-}
@@ -60,7 +60,7 @@ sendAnyPacket = send . SendPacket
 iSolemnlySwearIHaveNoIdeaWhatImDoing :: SendsPackets r => BS.ByteString -> Eff r ()
 iSolemnlySwearIHaveNoIdeaWhatImDoing = send . UnsafeSendBytes
 
-beginEncrypting :: SendsPackets r => EncryptionCouplet -> Eff r ()
+beginEncrypting :: SendsPackets r => BS.ByteString -> Eff r ()
 beginEncrypting = send . BeginEncrypting
 
 beginCompression :: SendsPackets r => VarInt -> Eff r ()
@@ -125,10 +125,10 @@ runNetworking mEnc mThresh hdl (Eff u q) = case u of
       -- Should we throw an error instead of silently failing here?
       Just _ -> pure ()
     runNetworking mEnc mThresh hdl (runTCQ q ())
-  Inject (SetupEncryption coup) -> do
+  Inject (SetupEncryption ss) -> do
     send . atomically $ readTVar mThresh >>= \case
       -- If there is no encryption setup yet, set it up
-      Nothing -> writeTVar mEnc (Just coup)
+      Nothing -> writeTVar mEnc (Just (makeEncrypter ss,ss,ss))
       -- If it is already encrypted, don't do anything
       Just _ -> pure ()
     runNetworking mEnc mThresh hdl (runTCQ q ())
