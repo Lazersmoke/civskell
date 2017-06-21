@@ -35,7 +35,10 @@ import qualified Civskell.Packet.Clientbound as Client
 type HasPiskell r = Member (State PiskellState) r
 
 data PiskellState = Piskell
-  {currentState :: ServerState}
+  {currentState :: ServerState
+  ,piskellUsername :: String
+  ,piskellPassword :: String
+  }
 
 class Packet p => PiskellPacket p where
   reactToPacket :: (SendsPackets r,HasPiskell r,PerformsIO r,Logs r) => p -> Eff r ()
@@ -44,20 +47,26 @@ class Packet p => PiskellPacket p where
 
 runClient :: Configuration -> IO ()
 runClient c = runM . runReader' c $ do
+  -- Get auth info
+  send $ hSetBuffering stdout NoBuffering
+  theUsername <- send $ putStr "Username:" >> getLine
+  thePassword <- send $ putStr "Password:" >> getLine
   -- Make a TQueue for logging
   logger <- LogQueue <$> send (newTQueueIO :: IO (TQueue T.Text))
   -- Fork a thread to continuously log every log message
   _ <- send $ forkIO (loggingThread logger)
   -- Retire main thread to connection duty
-  runLogger logger . login =<< send (Net.connectTo "localhost" (Net.PortNumber 25565))
+  runLogger logger . login (theUsername,thePassword) =<< send (Net.connectTo "localhost" (Net.PortNumber 25565))
 
 -- Send every log message in the TQueue to putStrLn until the thread is killed
 loggingThread :: LogQueue -> IO ()
 loggingThread (LogQueue l) = atomically (readTQueue l) >>= T.putStrLn >> loggingThread (LogQueue l)
 
 -- Spawns a new thread to deal with each new client
-login :: (Configured r, Logs r,PerformsIO r) => Handle -> Eff r ()
-login hdl = do
+login :: (Configured r, Logs r,PerformsIO r) => (String,String) -> Handle -> Eff r ()
+login authInfo@(theUsername,thePassword) hdl = do
+  mCliAuthResp <- clientAuthentication authInfo
+  logg $ "Auth Response: " <> T.pack (show mCliAuthResp)
   -- Log that we got a connection
   logg $ "Connecting to: localhost:25565"
   -- Don't line buffer the network
@@ -65,9 +74,9 @@ login hdl = do
   -- Make new networking TVars for this client
   mEnc <- send $ newTVarIO Nothing
   mThresh <- send $ newTVarIO Nothing
-  let setup = sendPacket (Server.Handshake 316 "localhost" 25565 2) >> sendPacket (Server.LoginStart "piskell-client")
+  let setup = sendPacket (Server.Handshake 316 "localhost" 25565 2) >> sendPacket (Server.LoginStart $ ProtocolString theUsername)
   -- Getting thread
-  _ <- send . forkIO . runM =<< forkConfig =<< (forkLogger . runNetworking mEnc mThresh hdl . runPacketing . evalState' Piskell {currentState = LoggingIn} $ setup >> packetLoop)
+  _ <- send . forkIO . runM =<< forkConfig =<< (forkLogger . runNetworking mEnc mThresh hdl . runPacketing . evalState' Piskell {piskellUsername = theUsername, piskellPassword = thePassword, currentState = LoggingIn} $ setup >> packetLoop)
   runNetworking mEnc mThresh hdl . runPacketing $ terminal
 
 -- Simple busy work thread that will terminate when the user says to t
@@ -90,7 +99,7 @@ instance PiskellPacket Client.EncryptionRequest where
         -- Generate a response and send it. genEncryptionResponse can't directly
         -- create a Server.EncryptionResponse because that would require
         -- cyclical imports between Packet.Server and Tech.Encrypt
-        sendPacket =<< uncurry Server.EncryptionResponse <$> genEncryptionResponse pubKey vt sharedSecret
+        sendPacket =<< uncurry (flip Server.EncryptionResponse) <$> genEncryptionResponse pubKey vt sharedSecret
         -- Only start encrypting *after* the encryption response is sent
         beginEncrypting sharedSecret
 

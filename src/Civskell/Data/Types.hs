@@ -39,7 +39,7 @@ module Civskell.Data.Types
   -- Packet Information
   ,AnimationAction(..),PlayerListAction(..),PlayerListActionType(..),PlayerListActionEnum(..),EntityInteraction(..),AsType(..)
   ,ClientStatusAction(..),GameStateChange(..),InventoryClickMode(..),PlayerDigAction(..)
-  ,PlayerEntityAction(..),AuthPacket(..),AuthProperty(..)
+  ,PlayerEntityAction(..),AuthPacket(..),AuthProperty(..),ClientAuthResponse(..),ClientAuthProfile(..)
   -- Id's and newtypes
   ,VarInt(..),EntityId(..),PlayerId,WindowId(..),KeepAliveId,TPConfirmId,TransactionId
   ,ProtocolString(..),ProtocolList(..),ProtocolNBT(..)
@@ -84,7 +84,7 @@ import Control.Eff
 import Control.Eff.Reader
 import Control.Monad
 import Crypto.Cipher.AES (AES128)
-import Data.Aeson ((.:),(.:?))
+import Data.Aeson (withObject,(.:),(.:?),(.!=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types
 import Data.Attoparsec.ByteString (Parser)
@@ -428,7 +428,7 @@ data AuthPacket = AuthPacket UUID String [AuthProperty]
 
 -- FromJSON instances parse JSON into AuthPackets
 instance Data.Aeson.Types.FromJSON AuthPacket where
-  parseJSON (Aeson.Object o) = AuthPacket <$> o .: "id" <*> o .: "name" <*> (o .: "properties")
+  parseJSON (Aeson.Object o) = AuthPacket <$> o .: "id" <*> o .: "name" <*> o .: "properties"
   parseJSON x = Data.Aeson.Types.typeMismatch "AuthPacket" x
 
 instance Data.Aeson.Types.FromJSON UUID where
@@ -439,8 +439,17 @@ instance Data.Aeson.Types.FromJSON UUID where
 data AuthProperty = AuthProperty String String (Maybe String)
 
 instance Data.Aeson.Types.FromJSON AuthProperty where
-  parseJSON (Aeson.Object o) = AuthProperty <$> o .: "name" <*> o .: "value" <*> o .:? "signature"
-  parseJSON x = Data.Aeson.Types.typeMismatch "AuthProperty" x
+  parseJSON = withObject "Auth Property" $ \o -> AuthProperty <$> o .: "name" <*> o .: "value" <*> o .:? "signature"
+
+data ClientAuthResponse = ClientAuthResponse {accessToken :: String, clientToken :: String, profileInformation :: (Maybe [ClientAuthProfile],Maybe ClientAuthProfile)} deriving Show
+
+instance Data.Aeson.Types.FromJSON ClientAuthResponse where
+  parseJSON = withObject "Client Auth Response" $ \o -> ClientAuthResponse <$> o .: "accessToken" <*> o .: "clientToken" <*> ((,) <$> o .:? "availableProfiles" <*> o .:? "selectedProfile")
+
+data ClientAuthProfile = ClientAuthProfile {clientAuthProfileId :: String, clientAuthProfileName :: String, clientAuthProfileIsLegacy :: Bool} deriving Show
+
+instance Data.Aeson.Types.FromJSON ClientAuthProfile where
+  parseJSON = withObject "Client Auth Profile" $ \o -> ClientAuthProfile <$> o .: "id" <*> o .: "name" <*> o .:? "legacy" .!= False
 
 -- Packets are ambiguous in the Notchian spec, so we need to carry around a
 -- "State" that tells us how to parse the packets. This should eventually be

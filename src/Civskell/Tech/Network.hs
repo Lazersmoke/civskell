@@ -7,7 +7,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Civskell.Tech.Network
   (module Civskell.Data.Networking
-  ,parseFromSet,getGenericPacket,serverAuthentication --,getPacketFromParser --,sendPacket,getPacket
+  ,parseFromSet,getGenericPacket,serverAuthentication, clientAuthentication--,getPacketFromParser --,sendPacket,getPacket
   ) where
 
 import Control.Eff (Eff,send)
@@ -18,7 +18,8 @@ import Data.Bytes.Serial
 import Data.Semigroup ((<>))
 import qualified Data.Map as Map
 import Data.Word (Word8)
-import Data.Aeson (fromJSON,json,Result(..))
+import Data.Aeson ((.=))
+import qualified Data.Aeson as Aeson
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Data.Attoparsec.ByteString
@@ -104,18 +105,43 @@ serverAuthentication name hash = do
   resp <- send $ httpLbs req manager
   let respJSON = LBS.toStrict . responseBody $ resp
   -- Parse the response into something useful
-  case parseOnly json respJSON of
+  case parseOnly Aeson.json respJSON of
     Left e -> do
-      loge $ "Failed to parse Auth JSON because " <> T.pack (show e)
+      loge $ "Failed to parse serverside Auth JSON because " <> T.pack (show e)
       loge $ "Malformed JSON was: " <> T.pack (show respJSON)
       loge $ "Full response was: " <> T.pack (show resp)
       return Nothing
-    Right a -> case fromJSON a of
-      Error e -> do
-        loge $ "Parsed Auth JSON, but it wasn't actual Auth JSON because " <> T.pack e
+    Right a -> case Aeson.fromJSON a of
+      Aeson.Error e -> do
+        loge $ "Parsed serverside Auth JSON, but it wasn't actual serverside Auth JSON because " <> T.pack e
         loge $ "Non-Auth JSON was: " <> T.pack (show a)
         loge $ "Full response was: " <> T.pack (show resp)
         return Nothing
-      Success authPacket -> return (Just authPacket)
+      Aeson.Success authPacket -> return (Just authPacket)
 
---clientAuthentication :: (Logs r,PerformsIO r) => 
+clientAuthentication :: (Logs r,PerformsIO r) => (String,String) -> Eff r (Maybe ClientAuthResponse)
+clientAuthentication (user,pass) = do
+  -- Use SSL
+  manager <- send $ newManager tlsManagerSettings
+  let reqURL = "https://authserver.mojang.com/authenticate"
+  logg $ "Sending authentication request to Mojang. Name: \"" <> T.pack user <> "\", Password: ********" -- Super secret
+  logg $ "Request URL is \"" <> T.pack reqURL <> "\""
+  let reqJSON = Aeson.object ["agent" .= Aeson.object ["name" .= ("Minecraft" :: T.Text), "version" .= (1 :: Integer)], "username" .= T.pack user, "password" .= T.pack pass, "requestUser" .= True]
+  logg $ "Request JSON is " <> T.pack (show reqJSON)
+  reqSansJSON <- send $ (parseRequest :: String -> IO Request) reqURL
+  let req = reqSansJSON {method = "POST",requestBody = RequestBodyLBS $ Aeson.encode reqJSON}
+  resp <- send $ httpLbs req manager
+  let respJSON = LBS.toStrict . responseBody $ resp
+  case parseOnly Aeson.json respJSON of
+    Left e -> do
+      loge $ "Failed to parse clientside Auth JSON because " <> T.pack (show e)
+      loge $ "Malformed JSON was: " <> T.pack (show respJSON)
+      loge $ "Full response was: " <> T.pack (show resp)
+      return Nothing
+    Right a -> case Aeson.fromJSON a of
+      Aeson.Error e -> do
+        loge $ "Parsed clientside Auth JSON, but it wasn't actual clientside Auth JSON because " <> T.pack e
+        loge $ "Non-Auth JSON was: " <> T.pack (show a)
+        loge $ "Full response was: " <> T.pack (show resp)
+        return Nothing
+      Aeson.Success cliAuthResp -> return (Just cliAuthResp)
