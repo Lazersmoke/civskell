@@ -1,4 +1,6 @@
 {-# LANGUAGE BinaryLiterals #-}
+{-# LANGUAGE TypeInType #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE DataKinds #-}
@@ -12,6 +14,8 @@
 module Civskell.Packet.Clientbound where
 
 import Crypto.Hash (hash,Digest,SHA1)
+import qualified Data.Text as T
+import Data.Semigroup
 import Data.Functor.Identity
 import Data.Bits
 import Data.Bytes.Serial
@@ -29,76 +33,97 @@ import Civskell.Data.Types
 --import qualified Civskell.Window as Window
 
 data LegacyHandshakePong = LegacyHandshakePong
-instance Packet LegacyHandshakePong where
-  type PacketState LegacyHandshakePong = 'Handshaking
-  packetName = "LegacyHandshakePong"
-  packetId = 0xFF
-  packetPretty _ = []
+
+legacyHandshakePong :: PacketDescriptor LegacyHandshakePong
+legacyHandshakePong = PacketDescriptor
+  {packetState = Handshaking
+  ,packetName = "LegacyHandshakePong"
+  ,packetId = 0xFF
+  ,packetPretty = const []
+  }
+
 instance Serial LegacyHandshakePong where
   serialize LegacyHandshakePong = putByteString legacyHandshakePongConstant
   deserialize = getByteString (BS.length legacyHandshakePongConstant) >>= \b -> if b /= legacyHandshakePongConstant then fail "Failed: deserialize @LegacyHandshakePong" else pure LegacyHandshakePong
 
 data Disconnect = Disconnect ProtocolString deriving (Generic,Serial)
-instance Packet Disconnect where
-  type PacketState Disconnect = 'LoggingIn
-  packetName = "Disconnect"
-  packetId = 0x00
-  packetPretty (Disconnect reason) = [("Reason",show . unProtocolString $ reason)]
+
+disconnect :: PacketDescriptor Disconnect
+disconnect = PacketDescriptor
+  {packetState = LoggingIn
+  ,packetName = "Disconnect"
+  ,packetId = 0x00
+  ,packetPretty = \(Disconnect reason) -> [("Reason",showText . unProtocolString $ reason)]
+  }
 
 -- Server ID, Pub Key, Verify Token
 data EncryptionRequest = EncryptionRequest String BS.ByteString BS.ByteString deriving (Generic,Serial)
-instance Packet EncryptionRequest where
-  type PacketState EncryptionRequest = 'LoggingIn
-  packetName = "EncryptionRequest"
-  packetId = 0x01
-  packetPretty (EncryptionRequest sId pubKey vt) = [("Server Id",sId),("Public Key Hash",(take 7 $ show (hash pubKey :: Digest SHA1)) ++ "..."),("Verify Token","0x" ++ (flip showHex "" =<< BS.unpack vt))]
+encryptionRequest :: PacketDescriptor EncryptionRequest
+encryptionRequest = PacketDescriptor
+  {packetState = LoggingIn
+  ,packetName = "EncryptionRequest"
+  ,packetId = 0x01
+  ,packetPretty = \(EncryptionRequest sId pubKey vt) -> [("Server Id",T.pack sId),("Public Key Hash",(T.take 7 $ showText (hash pubKey :: Digest SHA1)) <> "..."),("Verify Token",T.pack $ "0x" ++ (flip showHex "" =<< BS.unpack vt))]
+  }
 
 -- UUID (with hyphens), Username
 data LoginSuccess = LoginSuccess String String deriving (Generic,Serial)
-instance Packet LoginSuccess where
-  type PacketState LoginSuccess = 'LoggingIn
-  packetName = "LoginSuccess"
-  packetId = 0x02
-  packetPretty (LoginSuccess uuid name) = [("UUID",uuid),("Username",name)]
+loginSuccess :: PacketDescriptor LoginSuccess
+loginSuccess = PacketDescriptor
+  {packetState = LoggingIn
+  ,packetName = "LoginSuccess"
+  ,packetId = 0x02
+  ,packetPretty = \(LoginSuccess uuid name) -> [("UUID",T.pack uuid),("Username",T.pack name)]
+  }
 
 -- Size threshold for compression
 data SetCompression = SetCompression VarInt deriving (Generic,Serial)
-instance Packet SetCompression where
-  type PacketState SetCompression = 'LoggingIn
-  packetName = "SetCompression"
-  packetId = 0x03
-  packetPretty (SetCompression thresh) = [("Compression Threshold",show thresh)]
+setCompression :: PacketDescriptor SetCompression
+setCompression = PacketDescriptor
+  {packetState = LoggingIn
+  ,packetName = "SetCompression"
+  ,packetId = 0x03
+  ,packetPretty = \(SetCompression thresh) -> [("Compression Threshold",showText thresh)]
+  }
 
 -- JSON String (for now)
 data StatusResponse = StatusResponse String deriving (Generic,Serial)
-instance Packet StatusResponse where
-  type PacketState StatusResponse = 'Status
-  packetName = "StatusResponse"
-  packetId = 0x00
+statusResponse :: PacketDescriptor StatusResponse
+statusResponse = PacketDescriptor
+  {packetState = Status
+  ,packetName = "StatusResponse"
+  ,packetId = 0x00
   -- Beware: statusJSON includes a base64 encoded png, so it is very very long
-  packetPretty (StatusResponse _statusJSON) = [("Status JSON","")]
+  ,packetPretty = \(StatusResponse _statusJSON) -> [("Status JSON","")]
+  }
 
 -- Payload (unique number obtained from client)
 data StatusPong = StatusPong Int64 deriving (Generic,Serial)
-instance Packet StatusPong where
-  type PacketState StatusPong = 'Status
-  packetName = "StatusPong"
-  packetId = 0x01
-  packetPretty (StatusPong pongTok) = [("Pong Token","0x" ++  showHex pongTok "")]
+statusPong :: PacketDescriptor StatusPong
+statusPong = PacketDescriptor
+  {packetState = Status
+  ,packetName = "StatusPong"
+  ,packetId = 0x01
+  ,packetPretty = \(StatusPong pongTok) -> [("Pong Token",T.pack $ "0x" ++ showHex pongTok "")]
+  }
 
 -- EID, UUID, Type of Object, x, y, z, pitch, yaw, Object Data, velx, vely, velz
 data SpawnObject = SpawnObject EntityId UUID (Some Object)
-instance Packet SpawnObject where
-  type PacketState SpawnObject = 'Playing
-  packetName = "SpawnObject"
-  packetId = 0x00
-  packetPretty (SpawnObject eid uuid (SuchThat (Identity (e :: o)))) = [("Entity Id",show eid),("UUID",show uuid),("Type",objectName @o),("Position",show (x,y,z)),("Looking",show (yaw,pitch)),("Data",show d)] ++ v
-    where
-      v = case mVel of
-        Just (EntityVelocity (dx,dy,dz)) -> [("Velocity",show (dx,dy,dz))]
-        Nothing -> []
-      (d,mVel) = objectData e
-      EntityLocation (x,y,z) (yaw,pitch) = objectLocation e
+spawnObject :: PacketDescriptor SpawnObject
+spawnObject = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "SpawnObject"
+  ,packetId = 0x00
+  ,packetPretty = pp
+  }
+  where
+    pp (SpawnObject eid uuid (SuchThat (Identity (e :: o)))) = [("Entity Id",showText eid),("UUID",showText uuid),("Type",objectName @o),("Position",showText (x,y,z)),("Looking",showText (yaw,pitch)),("Data",showText d)] ++ v
+      where
+        v = case mVel of
+          Just (EntityVelocity (dx,dy,dz)) -> [("Velocity",showText (dx,dy,dz))]
+          Nothing -> []
+        (d,mVel) = objectData e
+        EntityLocation (x,y,z) (yaw,pitch) = objectLocation e
 instance Serial SpawnObject where
   serialize (SpawnObject eid uuid (SuchThat (Identity (e :: o)))) = serialize eid *> serialize uuid *> serialize (objectId @o) *> serialize x *> serialize y *> serialize z *> serialize pitch *> serialize yaw *> dat
     where
@@ -109,28 +134,34 @@ instance Serial SpawnObject where
 
 -- EID, x, y, z, count
 data SpawnExpOrb = SpawnExpOrb EntityId (Double,Double,Double) Short deriving (Generic,Serial)
-instance Packet SpawnExpOrb where
-  type PacketState SpawnExpOrb = 'Playing
-  packetName = "SpawnExpOrb"
-  packetId = 0x01
-  packetPretty (SpawnExpOrb _ _ _) = []
+spawnExpOrb :: PacketDescriptor SpawnExpOrb
+spawnExpOrb = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "SpawnExpOrb"
+  ,packetId = 0x01
+  ,packetPretty = \(SpawnExpOrb _ _ _) -> []
+  }
 
 -- EID, Type (always 1 for thunderbolt), x, y, z
 data SpawnGlobalEntity = SpawnGlobalEntity EntityId Word8 (Double,Double,Double) deriving (Generic,Serial)
-instance Packet SpawnGlobalEntity where
-  type PacketState SpawnGlobalEntity = 'Playing
-  packetName = "SpawnGlobalEntity"
-  packetId = 0x02
-  packetPretty (SpawnGlobalEntity _ _ _) = []
+spawnGlobalEntity :: PacketDescriptor SpawnGlobalEntity
+spawnGlobalEntity = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "SpawnGlobalEntity"
+  ,packetId = 0x02
+  ,packetPretty = \(SpawnGlobalEntity _ _ _) -> []
+  }
 
 -- EID, UUID, Type, x, y, z, yaw, pitch, head pitch, velx, vely, velz, Metadata
 --data SpawnMob = SpawnMob EntityId UUID (Some Entity) Word8 EntityPropertySet deriving (Generic,Serial)
 data SpawnMob = SpawnMob EntityId UUID VarInt (Double,Double,Double) (Word8,Word8,Word8) (Short,Short,Short) EntityPropertySet deriving (Generic,Serial)
-instance Packet SpawnMob where
-  type PacketState SpawnMob = 'Playing
-  packetName = "SpawnMob"
-  packetId = 0x03
-  packetPretty (SpawnMob eid uuid mobType pos look vel _props) = [("Entity Id",show eid),("UUID",show uuid),("Type",show mobType),("Position",show pos),("Looking",show look),("Velocity",show vel)]
+spawnMob :: PacketDescriptor SpawnMob
+spawnMob = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "SpawnMob"
+  ,packetId = 0x03
+  ,packetPretty = \(SpawnMob eid uuid mobType pos look vel _props) -> [("Entity Id",showText eid),("UUID",showText uuid),("Type",showText mobType),("Position",showText pos),("Looking",showText look),("Velocity",showText vel)]
+  }
 
 makeSpawnMob :: EntityId -> UUID -> Word8 -> Some Entity -> SpawnMob
 makeSpawnMob eid uuid headPitch (SuchThat (Identity (e :: m))) = SpawnMob eid uuid (entityType @m) (x,y,z) (yaw,pitch,headPitch) (dx,dy,dz) (EntityPropertySet $ map Just $ entityMeta e)
@@ -145,146 +176,180 @@ makeSpawnMob eid uuid headPitch (SuchThat (Identity (e :: m))) = SpawnMob eid uu
 
 -- EID, UUID, Title, Location,
 data SpawnPainting = SpawnPainting EntityId UUID String BlockCoord Word8 deriving (Generic,Serial)
-instance Packet SpawnPainting where
-  type PacketState SpawnPainting = 'Playing
-  packetName = "SpawnPainting"
-  packetId = 0x04
-  packetPretty (SpawnPainting _ _ _ _ _) = []
+spawnPainting :: PacketDescriptor SpawnPainting
+spawnPainting = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "SpawnPainting"
+  ,packetId = 0x04
+  ,packetPretty = \(SpawnPainting _ _ _ _ _) -> []
+  }
 
 -- EID, UUID, x, y, z, yaw, pitch, metadata
 data SpawnPlayer = SpawnPlayer EntityId UUID (Double,Double,Double) Word8 Word8 EntityPropertySet deriving (Generic,Serial)
-instance Packet SpawnPlayer where
-  type PacketState SpawnPlayer = 'Playing
-  packetName = "SpawnPlayer"
-  packetId = 0x05
-  packetPretty (SpawnPlayer _ _ _ _ _ _) = []
+spawnPlayer :: PacketDescriptor SpawnPlayer
+spawnPlayer = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "SpawnPlayer"
+  ,packetId = 0x05
+  ,packetPretty = \(SpawnPlayer _ _ _ _ _ _) -> []
+  }
 
 -- EID, Animation ID (from table)
 data Animation = Animation EntityId Word8 deriving (Generic,Serial)
-instance Packet Animation where
-  type PacketState Animation = 'Playing
-  packetName = "Animation"
-  packetId = 0x06
-  packetPretty (Animation eid anim) = [("Entity Id",show eid),("Animation",show anim)]
+animation :: PacketDescriptor Animation
+animation = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "Animation"
+  ,packetId = 0x06
+  ,packetPretty = \(Animation eid anim) -> [("Entity Id",showText eid),("Animation",showText anim)]
+  }
 
 -- List of all stats
 data Statistics = Statistics (ProtocolList VarInt (ProtocolString,VarInt)) deriving (Generic,Serial)
-instance Packet Statistics where
-  type PacketState Statistics = 'Playing
-  packetName = "Statistics"
-  packetId = 0x07
-  packetPretty (Statistics _) = []
+statistics :: PacketDescriptor Statistics
+statistics = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "Statistics"
+  ,packetId = 0x07
+  ,packetPretty = \(Statistics _) -> []
+  }
 
 -- EID, Block coord, stage (0-9)
 data BlockBreakAnimation = BlockBreakAnimation EntityId BlockCoord Word8 deriving (Generic,Serial)
-instance Packet BlockBreakAnimation where
-  type PacketState BlockBreakAnimation = 'Playing
-  packetName = "BlockBreakAnimation"
-  packetId = 0x08
-  packetPretty (BlockBreakAnimation _ _ _) = []
+blockBreakAnimation :: PacketDescriptor BlockBreakAnimation
+blockBreakAnimation = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "BlockBreakAnimation"
+  ,packetId = 0x08
+  ,packetPretty = \(BlockBreakAnimation _ _ _) -> []
+  }
 
 data UpdateBlockEntity = UpdateBlockEntity BlockCoord Word8 ProtocolNBT deriving (Generic,Serial)
-instance Packet UpdateBlockEntity where
-  type PacketState UpdateBlockEntity = 'Playing
-  packetName = "UpdateBlockEntity"
-  packetId = 0x09
-  packetPretty (UpdateBlockEntity _ _ _) = []
+updateBlockEntity :: PacketDescriptor UpdateBlockEntity
+updateBlockEntity = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "UpdateBlockEntity"
+  ,packetId = 0x09
+  ,packetPretty = \(UpdateBlockEntity _ _ _) -> []
+  }
 
 -- Block coord, Action Id (enum), Action Param, Block Type ; http://wiki.vg/Block_Actions
 data BlockAction = BlockAction BlockCoord (Word8,Word8) VarInt deriving (Generic,Serial)
-instance Packet BlockAction where
-  type PacketState BlockAction = 'Playing
-  packetName = "BlockAction"
-  packetId = 0x0A
-  packetPretty (BlockAction _ _ _) = []
+blockAction :: PacketDescriptor BlockAction
+blockAction = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "BlockAction"
+  ,packetId = 0x0A
+  ,packetPretty = \(BlockAction _ _ _) -> []
+  }
 
 -- Block coord, Block ID (from global palette)
 data BlockChange = BlockChange BlockCoord (Some Block)
-instance Packet BlockChange where
-  type PacketState BlockChange = 'Playing
-  packetName = "BlockChange"
-  packetId = 0x0B
-  packetPretty (BlockChange bc bs) = [("Block",show bc),("New State",ambiguously (showBlock . runIdentity) bs)]
+blockChange :: PacketDescriptor BlockChange
+blockChange = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "BlockChange"
+  ,packetId = 0x0B
+  ,packetPretty = \(BlockChange bc bs) -> [("Block",showText bc),("New State",T.pack $ ambiguously (showBlock . runIdentity) bs)]
+  }
 instance Serial BlockChange where
   serialize (BlockChange bc bs) = serialize bc *> ambiguously (serializeBlock . runIdentity) bs
   deserialize = error "Unimplemented: deserialize @Client.BlockChange" --BlockChange <$> deserialize @BlockCoord <*> (ambiguate <$> deser
 
 -- UUID, Action (from enum)
 data BossBar = BossBar String {- BossBarAction NYI -}
-instance Packet BossBar where
-  type PacketState BossBar = 'Playing
-  packetName = "BossBar"
-  packetId = 0x0C
-  packetPretty (BossBar _ {- BossBarAction NYI -}) = []
+bossBar :: PacketDescriptor BossBar
+bossBar = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "BossBar"
+  ,packetId = 0x0C
+  ,packetPretty = \(BossBar _ {- BossBarAction NYI -}) -> []
+  }
 instance Serial BossBar where
   serialize (BossBar _ {- BossBarAction NYI -}) = error "Unimplemented serialize @Client.BossBar"
   deserialize = error "Unimplemented: deserialize @Client.BossBar"
 
 -- Difficulty (0-3)
 data ServerDifficulty = ServerDifficulty Difficulty deriving (Generic,Serial)
-instance Packet ServerDifficulty where
-  type PacketState ServerDifficulty = 'Playing
-  packetName = "ServerDifficulty"
-  packetId = 0x0D
-  packetPretty (ServerDifficulty dif) = [("Difficulty",show dif)]
+serverDifficulty :: PacketDescriptor ServerDifficulty
+serverDifficulty = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "ServerDifficulty"
+  ,packetId = 0x0D
+  ,packetPretty = \(ServerDifficulty dif) -> [("Difficulty",showText dif)]
+  }
 
 -- List of matches for tab completion. Prefixed with length when sent
 data TabComplete = TabComplete (ProtocolList VarInt ProtocolString) deriving (Generic,Serial)
-instance Packet TabComplete where
-  type PacketState TabComplete = 'Playing
-  packetName = "TabComplete"
-  packetId = 0x0E
-  packetPretty (TabComplete _) = []
+tabComplete :: PacketDescriptor TabComplete
+tabComplete = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "TabComplete"
+  ,packetId = 0x0E
+  ,packetPretty = \(TabComplete _) -> []
+  }
 
 -- JSON chat string, place to appear in (0:chatbox,1:sys msg. chatbox,2:hotbar)
 data ChatMessage = ChatMessage ProtocolString Word8 deriving (Generic,Serial)
-instance Packet ChatMessage where
-  type PacketState ChatMessage = 'Playing
-  packetName = "ChatMessage"
-  packetId = 0x0F
-  packetPretty (ChatMessage msg loc) = [("Message",show . unProtocolString $ msg),("Location",show loc)]
+chatMessage :: PacketDescriptor ChatMessage
+chatMessage = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "ChatMessage"
+  ,packetId = 0x0F
+  ,packetPretty = \(ChatMessage msg loc) -> [("Message",showText . unProtocolString $ msg),("Location",showText loc)]
+  }
 
 -- Chunk x, Chunk z, List of (chunk relative coords in special format, Block Id (global palette))
 data MultiBlockChange = MultiBlockChange (Int32,Int32) (ProtocolList VarInt ((Word8,Word8),VarInt)) deriving (Generic,Serial)
-instance Packet MultiBlockChange where
-  type PacketState MultiBlockChange = 'Playing
-  packetName = "MultiBlockChange"
-  packetId = 0x10
-  packetPretty (MultiBlockChange _ _) = []
+multiBlockChange :: PacketDescriptor MultiBlockChange
+multiBlockChange = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "MultiBlockChange"
+  ,packetId = 0x10
+  ,packetPretty = \(MultiBlockChange _ _) -> []
+  }
 
 -- Window Id, Transaction Id, Accepted
 data ConfirmTransaction = ConfirmTransaction WindowId TransactionId Bool deriving (Generic,Serial)
-instance Packet ConfirmTransaction where
-  type PacketState ConfirmTransaction = 'Playing
-  packetName = "ConfirmTransaction"
-  packetId = 0x11
-  packetPretty (ConfirmTransaction _ _ _) = []
+confirmTransaction :: PacketDescriptor ConfirmTransaction
+confirmTransaction = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "ConfirmTransaction"
+  ,packetId = 0x11
+  ,packetPretty = \(ConfirmTransaction _ _ _) -> []
+  }
 
 data CloseWindow = CloseWindow WindowId deriving (Generic,Serial)
-instance Packet CloseWindow where
-  type PacketState CloseWindow = 'Playing
-  packetName = "CloseWindow"
-  packetId = 0x12
-  packetPretty (CloseWindow _) = []
+closeWindow :: PacketDescriptor CloseWindow
+closeWindow = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "CloseWindow"
+  ,packetId = 0x12
+  ,packetPretty = \(CloseWindow _) -> []
+  }
 
 -- Window Id, Window Type (Enum), JSON chat string of Window Title, Num of Slots, optionally: EID of horse
 data OpenWindow = OpenWindow WindowId (Some Window) ProtocolString (Maybe EntityId)
-instance Packet OpenWindow where
-  type PacketState OpenWindow = 'Playing
-  packetName = "OpenWindow"
-  packetId = 0x13
-  packetPretty (OpenWindow wid (SuchThat (Identity (_ :: winT))) title horseEid) = [("Window Id",show wid),("Window Type",windowName @winT),("Window Title",show . unProtocolString $ title)] ++ (case horseEid of {Just eid -> [("Horse EID",show eid)];Nothing -> []})
+openWindow :: PacketDescriptor OpenWindow
+openWindow = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "OpenWindow"
+  ,packetId = 0x13
+  ,packetPretty = \(OpenWindow wid (SuchThat (Identity (_ :: winT))) title horseEid) -> [("Window Id",showText wid),("Window Type",windowName @winT),("Window Title",showText . unProtocolString $ title)] ++ (case horseEid of {Just eid -> [("Horse EID",showText eid)];Nothing -> []})
+  }
 instance Serial OpenWindow where
   serialize (OpenWindow wid (SuchThat (Identity (_ :: winT))) title horseEid) = serialize wid *> serialize (windowIdentifier @winT) *> serialize title *> serialize ((unsafeCoerce :: Short -> Word8) $ slotCount @winT) *> (case horseEid of {Just eid -> serialize eid;Nothing -> pure ()})
   deserialize = error "Unimplemented: deserialize @Client.OpenWindow"
 
 -- Window Id, Slots
 data WindowItems = WindowItems WindowId (ProtocolList Short Slot) deriving (Generic,Serial)
-instance Packet WindowItems where
-  type PacketState WindowItems = 'Playing
-  packetName = "WindowItems"
-  packetId = 0x14
-  packetPretty (WindowItems wid _slots) = [("Window Id",show wid)]
+windowItems :: PacketDescriptor WindowItems
+windowItems = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "WindowItems"
+  ,packetId = 0x14
+  ,packetPretty = \(WindowItems wid _slots) -> [("Window Id",showText wid)]
+  }
 {-
  - Use this code when we write `mkWindowItems`
 instance Serial WindowItems where
@@ -297,90 +362,110 @@ instance Serial WindowItems where
 
 -- Window Id, Property (enum), Value (enum)
 data WindowProperty = WindowProperty WindowId Short Short deriving (Generic,Serial)
-instance Packet WindowProperty where
-  type PacketState WindowProperty = 'Playing
-  packetName = "WindowProperty"
-  packetId = 0x15
-  packetPretty (WindowProperty _ _ _) = []
+windowProperty :: PacketDescriptor WindowProperty
+windowProperty = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "WindowProperty"
+  ,packetId = 0x15
+  ,packetPretty = \(WindowProperty _ _ _) -> []
+  }
 
 -- Window Id, Slot num, <Slot>
 data SetSlot = SetSlot WindowId Short Slot deriving (Generic,Serial)
-instance Packet SetSlot where
-  type PacketState SetSlot = 'Playing
-  packetName = "SetSlot"
-  packetId = 0x16
-  packetPretty (SetSlot wid slotNum slotData) = [("Window Id",show wid),("Slot Number",show slotNum),("Slot Data",show slotData)]
+setSlot :: PacketDescriptor SetSlot
+setSlot = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "SetSlot"
+  ,packetId = 0x16
+  ,packetPretty = \(SetSlot wid slotNum slotData) -> [("Window Id",showText wid),("Slot Number",showText slotNum),("Slot Data",showText slotData)]
+  }
 
 -- Item Id (applies to all instances), Cooldown Ticks
 data SetCooldown = SetCooldown VarInt VarInt deriving (Generic,Serial)
-instance Packet SetCooldown where
-  type PacketState SetCooldown = 'Playing
-  packetName = "SetCooldown"
-  packetId = 0x17
-  packetPretty (SetCooldown _ _) = []
+setCooldown :: PacketDescriptor SetCooldown
+setCooldown = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "SetCooldown"
+  ,packetId = 0x17
+  ,packetPretty = \(SetCooldown _ _) -> []
+  }
 
 -- Plugin Channel, Data
 data PluginMessage = PluginMessage ProtocolString BS.ByteString
-instance Packet PluginMessage where
-  type PacketState PluginMessage = 'Playing
-  packetName = "PluginMessage"
-  packetId = 0x18
+pluginMessage :: PacketDescriptor PluginMessage
+pluginMessage = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "PluginMessage"
+  ,packetId = 0x18
   --TODO: This hex part is very bad at indentation
-  packetPretty (PluginMessage chan msg) = [("Plugin Channel",unProtocolString chan),("Message","0x" ++ (flip showHex "" =<< BS.unpack msg))]
+  ,packetPretty = \(PluginMessage chan msg) -> [("Plugin Channel",T.pack $ unProtocolString chan),("Message",T.pack $ "0x" ++ (flip showHex "" =<< BS.unpack msg))]
+  }
 
--- Don't use generics because it would do the sensible thing and prepend the length.
--- Mojang doesn't do this, so we don't either
+-- Dont use generics because it would do the sensible thing and prepend the length.
+-- Mojang doesnt do this, so we dont either
 instance Serial PluginMessage where
   serialize (PluginMessage str bs) = serialize str *> putByteString bs
-  deserialize = error "Can't generically deserialize a PluginMessage"
+  deserialize = error "Cant generically deserialize a PluginMessage"
 
 -- Sound Name (Enum), Sound Category (Enum), weird encoding for: x,y,z, Volume, Pitch
 data NamedSoundEffect = NamedSoundEffect ProtocolString VarInt (Int32,Int32,Int32) Float Float deriving (Generic,Serial)
-instance Packet NamedSoundEffect where
-  type PacketState NamedSoundEffect = 'Playing
-  packetName = "NamedSoundEffect"
-  packetId = 0x19
-  packetPretty (NamedSoundEffect _ _ _ _ _) = []
+namedSoundEffect :: PacketDescriptor NamedSoundEffect
+namedSoundEffect = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "NamedSoundEffect"
+  ,packetId = 0x19
+  ,packetPretty = \(NamedSoundEffect _ _ _ _ _) -> []
+  }
 
 -- Reason (JSON chat string)
 data DisconnectPlay = DisconnectPlay ProtocolString deriving (Generic,Serial)
-instance Packet DisconnectPlay where
-  type PacketState DisconnectPlay = 'Playing
-  packetName = "DisconnectPlay"
-  packetId = 0x1A
-  packetPretty (DisconnectPlay _) = []
+disconnectPlay :: PacketDescriptor DisconnectPlay
+disconnectPlay = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "DisconnectPlay"
+  ,packetId = 0x1A
+  ,packetPretty = \(DisconnectPlay _) -> []
+  }
 
 -- EID, Status (Enum)
 data EntityStatus = EntityStatus EntityId Word8 deriving (Generic,Serial)
-instance Packet EntityStatus where
-  type PacketState EntityStatus = 'Playing
-  packetName = "EntityStatus"
-  packetId = 0x1B
-  packetPretty (EntityStatus _ _) = []
+entityStatus :: PacketDescriptor EntityStatus
+entityStatus = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "EntityStatus"
+  ,packetId = 0x1B
+  ,packetPretty = \(EntityStatus _ _) -> []
+  }
 
 -- x,y,z, radius, affected block offsets, velocity of pushed player
 data Explosion = Explosion (Float,Float,Float) Float [(Word8,Word8,Word8)] (Float,Float,Float) deriving (Generic,Serial)
-instance Packet Explosion where
-  type PacketState Explosion = 'Playing
-  packetName = "Explosion"
-  packetId = 0x1C
-  packetPretty (Explosion _ _ _ _) = []
+explosion :: PacketDescriptor Explosion
+explosion = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "Explosion"
+  ,packetId = 0x1C
+  ,packetPretty = \(Explosion _ _ _ _) -> []
+  }
 
 -- Chunk X, Chunk Z
 data UnloadChunk = UnloadChunk (Int32,Int32) deriving (Generic,Serial)
-instance Packet UnloadChunk where
-  type PacketState UnloadChunk = 'Playing
-  packetName = "UnloadChunk"
-  packetId = 0x1D
-  packetPretty (UnloadChunk _) = []
+unloadChunk :: PacketDescriptor UnloadChunk
+unloadChunk = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "UnloadChunk"
+  ,packetId = 0x1D
+  ,packetPretty = \(UnloadChunk _) -> []
+  }
 
 -- Reason (Enum), Value (from Enum)
 data ChangeGameState = ChangeGameState GameStateChange
-instance Packet ChangeGameState where
-  type PacketState ChangeGameState = 'Playing
-  packetName = "ChangeGameState"
-  packetId = 0x1E
-  packetPretty (ChangeGameState _) = []
+changeGameState :: PacketDescriptor ChangeGameState
+changeGameState = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "ChangeGameState"
+  ,packetId = 0x1E
+  ,packetPretty = \(ChangeGameState _) -> []
+  }
 --TODO: Lift subtype selection to type level
 instance Serial ChangeGameState where
   serialize (ChangeGameState InvalidBed) = putWord8 0x00 *> serialize (0 :: Float)
@@ -413,37 +498,45 @@ instance Serial ChangeGameState where
 
 -- Random Id <-- Prevents Timeout
 data KeepAlive = KeepAlive KeepAliveId deriving (Generic,Serial)
-instance Packet KeepAlive where
-  type PacketState KeepAlive = 'Playing
-  packetName = "KeepAlive"
-  packetId = 0x1F
-  packetPretty (KeepAlive kid) = [("Keep Alive Id",show kid)]
+keepAlive :: PacketDescriptor KeepAlive
+keepAlive = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "KeepAlive"
+  ,packetId = 0x1F
+  ,packetPretty = \(KeepAlive kid) -> [("Keep Alive Id",showText kid)]
+  }
 
 -- Chunk X, Chunk Z, Full Chunk?, Bitmask of slices present, [Chunk Section], optional: 256 byte array of biome data, [Block entity NBT tag]
 data ChunkData = ChunkData (Int32,Int32) Bool VarInt [ChunkSection] (Maybe BS.ByteString) (ProtocolList VarInt ProtocolNBT)
-instance Packet ChunkData where
-  type PacketState ChunkData = 'Playing
-  packetName = "ChunkData"
-  packetId = 0x20
-  packetPretty (ChunkData (cx,cz) guCont bitMask cs _mBio _nbt) = [("Column",show (cx,cz)),("Bit Mask",show bitMask)] ++ (if guCont then [("Full Chunk","")] else []) ++ [("Section Count",show (length cs))]
+chunkData :: PacketDescriptor ChunkData
+chunkData = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "ChunkData"
+  ,packetId = 0x20
+  ,packetPretty = \(ChunkData (cx,cz) guCont bitMask cs _mBio _nbt) -> [("Column",showText (cx,cz)),("Bit Mask",showText bitMask)] ++ (if guCont then [("Full Chunk","")] else []) ++ [("Section Count",showText (length cs))]
+  }
 instance Serial ChunkData where
   serialize (ChunkData (cx,cz) guCont bitMask chunkSecs mBiomes blockEnts) = serialize cx *> serialize cz *> serialize guCont *> serialize bitMask *> withLength (runPutS $ (traverse serialize chunkSecs) *> maybe (pure ()) putByteString mBiomes) *> serialize @(ProtocolList VarInt ProtocolNBT) blockEnts
   deserialize = error "Undefined: deserialize @ChunkData"
 
 -- Effect Id (Enum), block coord, extra data (from Enum), disable relative?
 data Effect = Effect Int32 BlockCoord Int32 Bool deriving (Generic,Serial)
-instance Packet Effect where
-  type PacketState Effect = 'Playing
-  packetName = "Effect"
-  packetId = 0x21
-  packetPretty (Effect _ _ _ _) = []
+effect :: PacketDescriptor Effect
+effect = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "Effect"
+  ,packetId = 0x21
+  ,packetPretty = \(Effect _ _ _ _) -> []
+  }
 
 data JoinGame = JoinGame EntityId Gamemode Dimension Difficulty Word8 String Bool
-instance Packet JoinGame where
-  type PacketState JoinGame = 'Playing
-  packetName = "JoinGame"
-  packetId = 0x23
-  packetPretty (JoinGame eid gm dim dif maxP lvl reduce) = [("Entity Id",show eid),("Gamemode", show gm),("Dimension",show dim),("Difficulty",show dif),("Max Players",show maxP),("Level Type",lvl)] ++ if reduce then [("Reduce Debug Info","")] else []
+joinGame :: PacketDescriptor JoinGame
+joinGame = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "JoinGame"
+  ,packetId = 0x23
+  ,packetPretty = \(JoinGame eid gm dim dif maxP lvl reduce) -> [("Entity Id",showText eid),("Gamemode", showText gm),("Dimension",showText dim),("Difficulty",showText dif),("Max Players",showText maxP),("Level Type",T.pack lvl)] ++ if reduce then [("Reduce Debug Info","")] else []
+  }
 instance Serial JoinGame where
   -- For whatever reason, we need the eid as an Int32 here, not a VarInt
   serialize (JoinGame eid gamemode dim dif maxp leveltype reduce) = serialize (unVarInt (unEID eid)) *> serialize gamemode *> serialize dim *> serialize dif *> serialize maxp *> serialize leveltype *> serialize reduce
@@ -451,11 +544,13 @@ instance Serial JoinGame where
   
 -- Flags bitfield, fly speed, fov modifier
 data PlayerAbilities = PlayerAbilities AbilityFlags Float Float deriving (Generic,Serial)
-instance Packet PlayerAbilities where
-  type PacketState PlayerAbilities = 'Playing
-  packetName = "PlayerAbilities"
-  packetId = 0x2B
-  packetPretty (PlayerAbilities (AbilityFlags i f af c) flySpeed fovMod) = u i "Invulnerable" ++ u f "Flying" ++ u af "Allow Flying" ++ u c "Creative" ++ [("Flying Speed",show flySpeed),("FOV Modifier",show fovMod)]
+playerAbilities :: PacketDescriptor PlayerAbilities
+playerAbilities = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "PlayerAbilities"
+  ,packetId = 0x2B
+  ,packetPretty = \(PlayerAbilities (AbilityFlags i f af c) flySpeed fovMod) -> u i "Invulnerable" ++ u f "Flying" ++ u af "Allow Flying" ++ u c "Creative" ++ [("Flying Speed",showText flySpeed),("FOV Modifier",showText fovMod)]
+  }
     where
       u b s = if b then [(s,"")] else []
 {-
@@ -466,42 +561,48 @@ instance Serial PlayerAbilities where
 
 -- x,y,z, yaw,pitch, relativity flags, TPconfirm Id
 data PlayerListItem a = PlayerListItem [(UUID,PlayerListAction a)]
-instance PlayerListActionEnum a => Packet (PlayerListItem a) where
-  type PacketState (PlayerListItem a) = 'Playing
-  packetName = "PlayerListItem"
-  packetId = 0x2D
-  packetPretty (PlayerListItem actions) = (\(u,_) -> [("UUID",show u),("Action",show "")]) =<< actions
+playerListItem :: PlayerListActionEnum a => PacketDescriptor (PlayerListItem a)
+playerListItem = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "PlayerListItem"
+  ,packetId = 0x2D
+  ,packetPretty = \(PlayerListItem actions) -> (\(u,_) -> [("UUID",showText u),("Action",showText ("" :: String))]) =<< actions
+  }
 
 instance PlayerListActionEnum a => Serial (PlayerListItem a) where 
   serialize (PlayerListItem acts) = serialize (playerListActionEnum @a) *> withListLength acts
   deserialize = error "Undefined: deserialize @PlayerListActionEnum"
 
 data PlayerPositionAndLook = PlayerPositionAndLook (Double,Double,Double) (Float,Float) Word8 TPConfirmId
-instance Packet PlayerPositionAndLook where
-  type PacketState PlayerPositionAndLook = 'Playing
-  packetName = "PlayerPositionAndLook"
-  packetId = 0x2E
-  packetPretty (PlayerPositionAndLook (x,y,z) (yaw,pitch) rel tid) =
-    [("X",r 1 (show x))
-    ,("Y",r 2 (show y))
-    ,("Z",r 3 (show z))
-    ,("Yaw",r 4 (show yaw))
-    ,("Pitch",r 5 (show pitch))
-    ,("Teleport Id", show tid)
-    ]
-    where
-      r b = if testBit rel b then ("~" ++) else id
+playerPositionAndLook :: PacketDescriptor PlayerPositionAndLook
+playerPositionAndLook = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "PlayerPositionAndLook"
+  ,packetId = 0x2E
+  ,packetPretty = pp
+  }
+  where
+    pp (PlayerPositionAndLook (x,y,z) (yaw,pitch) rel tid) =
+      [("X",r 1 (showText x))
+      ,("Y",r 2 (showText y))
+      ,("Z",r 3 (showText z))
+      ,("Yaw",r 4 (showText yaw))
+      ,("Pitch",r 5 (showText pitch))
+      ,("Teleport Id", showText tid)
+      ] where r b = if testBit rel b then ("~" <>) else id
 instance Serial PlayerPositionAndLook where
   serialize (PlayerPositionAndLook (x,y,z) (yaw,pitch) relFlag tpId) = serialize x *> serialize y *> serialize z *> serialize yaw *> serialize pitch *> serialize relFlag *> serialize tpId
   deserialize = PlayerPositionAndLook <$> ((,,) <$> deserialize <*> deserialize <*> deserialize) <*> ((,) <$> deserialize <*> deserialize) <*> deserialize <*> deserialize
 
 -- Block pos of player spawn
 data UpdateMetadata = UpdateMetadata EntityId EntityPropertySet
-instance Packet UpdateMetadata where
-  type PacketState UpdateMetadata = 'Playing
-  packetName = "UpdateMetadata"
-  packetId = 0x39
-  packetPretty (UpdateMetadata _eid _mDats) = []
+updateMetadata :: PacketDescriptor UpdateMetadata
+updateMetadata = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "UpdateMetadata"
+  ,packetId = 0x39
+  ,packetPretty = \(UpdateMetadata _eid _mDats) -> []
+  }
   -- TODO: subclass?
 instance Serial UpdateMetadata where
   serialize (UpdateMetadata eid mDats) = serialize eid *> serialize mDats
@@ -509,17 +610,19 @@ instance Serial UpdateMetadata where
 
 -- Block pos of player spawn
 data SpawnPosition = SpawnPosition BlockCoord
-instance Packet SpawnPosition where
-  type PacketState SpawnPosition = 'Playing
-  packetName = "SpawnPosition"
-  packetId = 0x43
-  packetPretty (SpawnPosition bc) = [("Spawn",show bc)]
+spawnPosition :: PacketDescriptor SpawnPosition
+spawnPosition = PacketDescriptor
+  {packetState = Playing
+  ,packetName = "SpawnPosition"
+  ,packetId = 0x43
+  ,packetPretty = \(SpawnPosition bc) -> [("Spawn",showText bc)]
+  }
 instance Serial SpawnPosition where
   serialize (SpawnPosition pos) = serialize pos
   deserialize = SpawnPosition <$> deserialize @BlockCoord
 
 -- All packets have their length and pktId annotated
--- serialize pkt = BS.append (serialize $ packetId @PlayerPositionAndLook) $ case pkt of
+-- serialize pkt = BS.append (serialize $ ,packetId @PlayerPositionAndLook) $ case pkt of
 
 --instance Show Packet where
   --show pkt = formatPacket (packetName pkt) $ case pkt of

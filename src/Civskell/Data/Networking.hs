@@ -1,5 +1,4 @@
 {-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE GADTs #-}
@@ -10,8 +9,6 @@ module Civskell.Data.Networking where
 
 import Control.Eff
 import Control.Concurrent.STM
-import Data.SuchThat
-import Data.Functor.Identity
 import Data.Bytes.Serial
 import Data.Bytes.Put
 import Data.Bytes.Get
@@ -51,11 +48,8 @@ addCompression = send . AddCompression
 removeCompression :: Networks n => BS.ByteString -> Eff n BS.ByteString
 removeCompression = send . RemoveCompression
 
-sendPacket :: (SendsPackets r,Serial p,Packet p) => p -> Eff r ()
-sendPacket = sendAnyPacket . ambiguate . OutboundPacket . ambiguate . Identity
-
-sendAnyPacket :: SendsPackets r => ForAny OutboundPacket -> Eff r ()
-sendAnyPacket = send . SendPacket
+sendPacket :: (Serial p,SendsPackets r) => PacketDescriptor p -> p -> Eff r ()
+sendPacket d p = send (SendPacket d p)
 
 iSolemnlySwearIHaveNoIdeaWhatImDoing :: SendsPackets r => BS.ByteString -> Eff r ()
 iSolemnlySwearIHaveNoIdeaWhatImDoing = send . UnsafeSendBytes
@@ -72,12 +66,12 @@ runPacketing (Pure x) = Pure x
 runPacketing (Eff u q) = case u of
   Weaken restOfU -> Eff restOfU (Singleton (runPacketing . runTCQ q))
   -- Unpack from the existentials to get the type information into a skolem, scoped tyvar
-  Inject (SendPacket (SuchThat (OutboundPacket (SuchThat (Identity (s :: a)))))) -> do
+  Inject (SendPacket pktDesc pkt) -> do
     -- Log its hex dump
-    logLevel ClientboundPacket . T.pack $ showPacket s
-    logLevel HexDump . T.pack $ indentedHex (runPutS . serialize $ s)
+    logLevel ClientboundPacket $ showPacket pktDesc pkt
+    logLevel HexDump . T.pack $ indentedHex (runPutS . serialize $ pkt)
     -- Send it
-    rPut =<< addCompression (runPutS $ serialize (packetId @a) *> serialize s)
+    rPut =<< addCompression (runPutS $ serialize (packetId pktDesc) *> serialize pkt)
     runPacketing (runTCQ q ())
   -- "Unsafe" means it doesn't come from a legitimate packet (doesn't have packetId) and doesn't get compressed
   Inject (UnsafeSendBytes bytes) -> rPut bytes >> runPacketing (runTCQ q ())

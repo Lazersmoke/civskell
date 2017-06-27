@@ -11,12 +11,11 @@ module Civskell.Tech.Network
   ) where
 
 import Control.Eff (Eff,send)
-import Data.Functor.Identity
 import Data.Bits
+import Data.Foldable
 import Data.Bytes.Get
 import Data.Bytes.Serial
 import Data.Semigroup ((<>))
-import qualified Data.Map as Map
 import Data.Word (Word8)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
@@ -28,19 +27,20 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.SuchThat
 import qualified Data.Text as T
-import qualified Data.Serialize.Get as Ser
 
 import Civskell.Data.Logging
 import Civskell.Data.Networking
 import Civskell.Data.Types
 
-parseFromSet :: MonadGet m => ParseSet m VarInt vc -> m (SuchThatStar vc)
-parseFromSet s = deserialize @VarInt >>= \pktId -> case Map.lookup pktId s of
-  Just cont -> cont
+parseFromSet :: MonadGet m => ParseSet -> m (SuchThat '[Serial] DescribedPacket)
+parseFromSet s = deserialize @VarInt >>= \pktId -> case find (\x -> ambiguously packetId x == pktId) s of
+  Just (SuchThat (desc :: PacketDescriptor p)) -> do
+    theP <- deserialize @p
+    return $ ambiguate $ DescribedPacket desc theP
   Nothing -> error $ "No parser for that packet (Id = " <> show pktId <> ")"
 
 -- Takes an effect to decide which parser to use once the packet arrives, and returns the parsed packet when it arrives
-getGenericPacket :: forall c r. (Logs r,Networks r) => Eff r (ParseSet Ser.Get VarInt '[Packet,c]) -> Eff r (Maybe (SuchThatStar '[Packet,c]))
+getGenericPacket :: forall r. (Logs r,Networks r) => Eff r ParseSet -> Eff r (Maybe (SuchThat '[Serial] DescribedPacket))
 getGenericPacket ep = do
   -- Get the raw data (sans length)
   pkt <- removeCompression =<< getRawPacket
@@ -49,9 +49,9 @@ getGenericPacket ep = do
   p <- ep
   case runGetS (parseFromSet p) pkt of
     -- If it parsed ok, then
-    Right serverPkt -> do
+    Right serverPkt@(SuchThat (DescribedPacket desc thePkt)) -> do
       -- Return it
-      logLevel ServerboundPacket . T.pack $ ambiguously (showPacket . runIdentity) serverPkt
+      logLevel ServerboundPacket $ showPacket desc thePkt
       logLevel HexDump . T.pack . indentedHex $ pkt
       return $ Just serverPkt
     -- If it didn't parse correctly, print the error and return Nothing

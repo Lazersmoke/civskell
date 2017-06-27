@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 module Civskell.Entity.Item where
 
 import Civskell.Entity.Base

@@ -64,7 +64,7 @@ openNewWindow winType title = do
     p <- readTVar t
     writeTVar t p {windows = Map.insert (nextWid p) (some winType) (windows p),nextWid = succ (nextWid p)}
     return (nextWid p)
-  sendPacket (Client.OpenWindow wid (some winType) title Nothing)
+  sendPacket Client.openWindow (Client.OpenWindow wid (some winType) title Nothing)
   return wid
 
 openWindowWithItems :: (HasWorld r,SendsPackets r,HasPlayer r,Logs r,Window w) => w -> ProtocolString -> TVar Inventory -> Eff r WindowId
@@ -74,7 +74,7 @@ openWindowWithItems (ty :: tyT) name tI = do
   items <- Map.union playerInv <$> (send . WorldSTM $ readTVar tI)
   logp $ "Sending window " <> T.pack (show wid) <> " of type " <> T.pack (windowIdentifier @tyT) <> " with items " <> T.pack (show items)
   -- This is wrong because it doesn't pad between items
-  sendPacket (Client.WindowItems wid (ProtocolList $ Map.elems items) {-(slotCount @tyT)-})
+  sendPacket Client.windowItems (Client.WindowItems wid (ProtocolList $ Map.elems items) {-(slotCount @tyT)-})
   return wid
 
 -- Add a new tid to the que
@@ -84,7 +84,7 @@ pendTeleport xyz yp relFlag = do
     p <- readTVar t
     writeTVar t p {nextTid = 1 + nextTid p,teleportConfirmationQue = Set.insert (nextTid p) $ teleportConfirmationQue p}
     return p
-  sendPacket (Client.PlayerPositionAndLook xyz yp relFlag (nextTid p))
+  sendPacket Client.playerPositionAndLook (Client.PlayerPositionAndLook xyz yp relFlag (nextTid p))
 
 -- Check if the tid is in the que. If it is, then clear and return true, else false
 clearTeleport :: HasPlayer r => VarInt -> Eff r Bool
@@ -97,16 +97,16 @@ clearTeleport tid = usingPlayer $ \t -> do
 setGamemode :: (SendsPackets r,Logs r,HasPlayer r) => Gamemode -> Eff r ()
 setGamemode g = do
   overPlayer $ \p -> p {gameMode = g}
-  sendPacket (Client.ChangeGameState (ChangeGamemode g))
+  sendPacket Client.changeGameState (Client.ChangeGameState (ChangeGamemode g))
   case g of
-    Survival -> sendPacket (Client.PlayerAbilities (AbilityFlags False False False False) 0 1)
-    Creative -> sendPacket (Client.PlayerAbilities (AbilityFlags True False True True) 0 1)
+    Survival -> sendPacket Client.playerAbilities (Client.PlayerAbilities (AbilityFlags False False False False) 0 1)
+    Creative -> sendPacket Client.playerAbilities (Client.PlayerAbilities (AbilityFlags True False True True) 0 1)
 
 -- TODO: Semantic slot descriptors
 setInventorySlot :: (SendsPackets r,Logs r, HasPlayer r) => Short -> Slot -> Eff r ()
 setInventorySlot slotNum slotData = do
   overPlayer $ \p -> p {playerInventory = setSlot slotNum slotData (playerInventory p)}
-  sendPacket (Client.SetSlot 0 slotNum slotData)
+  sendPacket Client.setSlot (Client.SetSlot 0 slotNum slotData)
  
 --getPacket :: forall p r. (Logs r,HasPlayer r,Packet p) => Eff r (Maybe p)
 --getPacket = send $ GetPacket (parsePacket @p)

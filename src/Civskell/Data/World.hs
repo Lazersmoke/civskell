@@ -90,8 +90,8 @@ allPlayers :: HasWorld r => Eff r [PlayerData]
 allPlayers = send AllPlayers
 
 {-# INLINE broadcastPacket #-}
-broadcastPacket :: (HasWorld r,Packet p,Serial p) => p -> Eff r ()
-broadcastPacket = send . BroadcastPacket . ambiguate . OutboundPacket . ambiguate . Identity
+broadcastPacket :: (HasWorld r,Serial p) => p -> Eff r ()
+broadcastPacket = send . BroadcastPacket . some
 
 {-# INLINE getEntity #-}
 getEntity :: (HasWorld r) => EntityId -> Eff r (Some Entity)

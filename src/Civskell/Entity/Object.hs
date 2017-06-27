@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE OverloadedStrings #-}
 -- import qualified Ciskell.Entity.Mob as Mob
 module Civskell.Entity.Object where
 

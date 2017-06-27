@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 module Civskell.Entity.Creeper where
 
 import Civskell.Entity.Base

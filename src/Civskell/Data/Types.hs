@@ -1,5 +1,6 @@
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE TypeInType #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE BinaryLiterals #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE OverloadedLists #-}
@@ -19,14 +20,13 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE RankNTypes #-}
--- ^^^ BEHOLD: THE 20 HORSEMEN OF THE HASKPOCALYPSE ^^^ --
 
 -- TODO: This export list is pretty scary. We should make tiered modules or something
 module Civskell.Data.Types
   -- Constants
   (airChunk,allCoords,protocolVersion,legacyHandshakePingConstant,legacyHandshakePongConstant
   -- Helper functions
-  ,blockInChunk,blockToChunk,blockToRelative,blockOnSide,showPacket,jsonyText,withLength,withListLength,indentedHex,serOpt,comb
+  ,blockInChunk,blockToChunk,blockToRelative,blockOnSide,showPacket,jsonyText,withLength,withListLength,indentedHex,serOpt,comb,showText
   -- Type synonyms
   ,EncryptionCouplet,PerformsIO,Short,LegacyString
   -- Blocks
@@ -61,7 +61,8 @@ module Civskell.Data.Types
   -- Packeting
   ,SendsPackets,Packeting(..)
   -- Packet
-  ,Packet(..),HandledPacket(..),OutboundPacket(..),InboundPacket(..)
+  ,PacketDescriptor(..),PacketHandler(..),DescribedPacket(..)
+  ,ThreadingMode(..)
   ,ParseSet
   -- Configuration
   ,Configured,Configuration(..),defaultConfiguration,forkConfig
@@ -78,7 +79,10 @@ module Civskell.Data.Types
   ) where
 
 import Control.Concurrent.STM
+import GHC.Generics
+import Data.Hashable
 import Data.Functor.Identity
+import Data.Semigroup
 import Data.Foldable
 import Control.Eff
 import Control.Eff.Reader
@@ -90,7 +94,7 @@ import qualified Data.Aeson.Types
 import Data.Attoparsec.ByteString (Parser)
 import Data.Bits
 import Data.Int (Int16,Int32,Int64)
-import Data.List (intercalate,unfoldr)
+import Data.List (unfoldr)
 import Data.Map.Lazy (Map)
 import Data.Maybe (fromMaybe)
 import Data.NBT
@@ -113,12 +117,16 @@ import Data.Bytes.Put
 import Data.Bytes.Get
 import qualified Data.Serialize as Cereal
 import qualified Data.Set as Set
+import qualified Data.HashSet as HashSet
 
 -- The current Minecraft Protocol Version number. This should be replaced with a
 -- configuration option, or even multiversion support in the future, but right
--- now we only support 316, which is 1.11.2 Vanilla.
+-- now we only support 335, which is 1.12 Vanilla.
 protocolVersion :: Integer
-protocolVersion = 316
+protocolVersion = 335
+
+showText :: Show a => a -> T.Text
+showText = T.pack . show
 
 newtype ProtocolNBT = ProtocolNBT {unProtocolNBT :: NBT}
 
@@ -135,8 +143,8 @@ legacyHandshakePongConstant = BS.pack [0xFF,0x00,0x1b,0x00,0xa7
   ,0x00,0x31 -- 1
   ,0x00,0x00 -- Seperator
   ,0x00,0x33 -- 3 -- Protocol Version number. TODO: Update this with protocolVersion
-  ,0x00,0x31 -- 1
-  ,0x00,0x36 -- 6
+  ,0x00,0x33 -- 3
+  ,0x00,0x35 -- 5
   ,0x00,0x00 -- Seperator
   ,0x00,0x31 -- 1 -- MC Version
   ,0x00,0x2e -- .
@@ -298,7 +306,7 @@ instance Show ChunkCoord where
 -- VarInt's max size is an Int32, so we use that to store it. 
 -- Note that they are serialized differently from a normal Minecraft Int (which
 -- is a normal Haskell Int32), so we need a newtype. All instances are GND
-newtype VarInt = VarInt {unVarInt :: Int32} deriving (Bits,Enum,Eq,Integral,Num,Ord,Real)
+newtype VarInt = VarInt {unVarInt :: Int32} deriving (Bits,Enum,Eq,Integral,Num,Ord,Real,Hashable)
 instance Show VarInt where show = show . unVarInt
 
 -- VarInt format in binary is:
@@ -353,7 +361,7 @@ type TPConfirmId = VarInt
 
 class Window w where
   -- Chest
-  windowName :: String
+  windowName :: Text
   -- minecraft:chest
   windowIdentifier :: String
   -- 27
@@ -455,7 +463,9 @@ instance Data.Aeson.Types.FromJSON ClientAuthProfile where
 -- "State" that tells us how to parse the packets. This should eventually be
 -- replaced by a config option that contains just a `Set (Parser Packet)` or
 -- something like that.
-data ServerState = Handshaking | Playing | LoggingIn | Status
+data ServerState = Handshaking | Playing | LoggingIn | Status deriving (Generic,Eq)
+
+instance Hashable ServerState where {}
 
 --------------------
 -- Notchian Enums --
@@ -879,9 +889,9 @@ airChunk = Map.fromList [(BlockLocation (x,y,z),some Air) | x <- [0..15], z <- [
 
 -- Helper function to format Packets during logging
 -- Takes a packet name and a list of properties (name value pairs). Empty values only show the name
-formatPacket :: String -> [(String,String)] -> String
-formatPacket n [] = "{" ++ n ++ "}"
-formatPacket n xs = flip (++) "]" . (++) ("{" ++ n ++ "} [") . intercalate " | " . map (\(name,val) -> if val == "" then name else name ++ ": " ++ val) $ xs
+formatPacket :: Text -> [(Text,Text)] -> Text
+formatPacket n [] = "{" <> n <> "}"
+formatPacket n xs = flip (<>) "]" . (<>) ("{" <> n <> "} [") . T.intercalate " | " . map (\(name,val) -> if val == "" then name else name <> ": " <> val) $ xs
 
 -- Stores all the relevant information about a player
 -- TODO: Extensibility?
@@ -907,7 +917,7 @@ data PlayerData = PlayerData
   ,clientBrand :: String
   ,clientUUID :: UUID
   ,playerId :: PlayerId
-  ,packetQueue :: TQueue (ForAny OutboundPacket)
+  ,packetQueue :: TQueue (Some Serial)
   }
 
 -- Having transactional access to a single Player's data is an effect
@@ -968,7 +978,7 @@ data World a where
   SummonMob :: (Some Mob) -> World ()
   SummonObject :: (Some Object) -> World ()
   AllPlayers :: World [PlayerData]
-  BroadcastPacket :: ForAny OutboundPacket -> World ()
+  BroadcastPacket :: Some Serial -> World ()
 
 -- Combinator for serializing Maybes in a Minecrafty way
 serOpt :: (MonadPut m,Serial s) => Maybe s -> m ()
@@ -1012,6 +1022,22 @@ withLength bs = serialize ((fromIntegral $ BS.length bs) :: VarInt) >> putByteSt
 withListLength :: (MonadPut m,Serial s) => [s] -> m ()
 withListLength ls = serialize ((fromIntegral $ length ls) :: VarInt) >> traverse_ serialize ls
 
+data PacketDescriptor p = PacketDescriptor 
+  {packetPretty :: p -> [(Text,Text)]
+  ,packetName :: Text
+  ,packetId :: VarInt
+  ,packetState :: ServerState
+  }
+
+data DescribedPacket p = DescribedPacket (PacketDescriptor p) p
+
+data ThreadingMode = SerialThreading | ParThreading
+
+data PacketHandler p = PacketHandler 
+  {packetThreadingMode :: ThreadingMode
+  ,onPacket :: forall r. (Configured r,SendsPackets r,PerformsIO r,Logs r,HasPlayer r,HasWorld r) => p -> Eff r ()
+  }
+
 -- NOTE: Ambiguous type on packetName, parsePacket, and packetId
 -- With TypeApplications we can do for example `packetId @Server.UseEntity`
 -- This applies `Server.UseEntity` to the capital lambda "forall":
@@ -1023,23 +1049,30 @@ withListLength ls = serialize ((fromIntegral $ length ls) :: VarInt) >> traverse
 
 -- Class of types that are packets
 -- TODO: Split into Client/Server subclasses so we don't have lots of `undefined` parsePacket and onPacket everywhere
-class Serial p => Packet p where
+--class Serial p => Packet p where
   -- State this packet is expected in
-  type PacketState p :: ServerState
+  --type PacketState p :: ServerState
   -- Extract name-value pairs to pretty print a packet
-  packetPretty :: p -> [(String,String)]
+  --packetPretty :: p -> [(String,String)]
   -- Name of the packet. Example `data Meow = ...` has the name "Meow"
-  packetName :: String
+  --packetName :: String
   -- Packet Id -- Put this in the type level? Fundep: `packetstate, packetId -> p`
-  packetId :: VarInt
+  --packetId :: VarInt
 
-type ParseSet m k vc = Map.Map k (m (SuchThatStar vc))
+type ParseSet = HashSet.HashSet (SuchThat '[Serial] PacketDescriptor)
+
+-- Ignore the function because nobody likes functions
+instance Hashable (SuchThat x PacketDescriptor) where
+  hashWithSalt s (SuchThat desc) = s `hashWithSalt` packetName desc `hashWithSalt` packetId desc `hashWithSalt` packetState desc
+
+instance Eq (SuchThat x PacketDescriptor) where
+  (SuchThat a) == (SuchThat b) = packetName a == packetName b && packetId a == packetId b && packetState a == packetState b
 
 -- Helper classes for using Data.SuchThat with TypeFamilies, which would otherwise be partially applied
-class Packet p => HandledPacket p where
+--class Packet p => HandledPacket p where
   -- Spawn a PLT on receipt of each packet
   -- TODO: remove arbitrary IO in favor of STM or something else
-  onPacket :: (Configured r,SendsPackets r,PerformsIO r,Logs r,HasPlayer r,HasWorld r) => p -> Eff r ()
+  --onPacket :: (Configured r,SendsPackets r,PerformsIO r,Logs r,HasPlayer r,HasWorld r) => p -> Eff r ()
   -- No default defn. here so that we get compiler warnings for not implmenting
   --onPacket p = send (LogString ErrorLog $ "Unsupported packet: " ++ showPacket p)
   -- Parse a packet
@@ -1047,27 +1080,27 @@ class Packet p => HandledPacket p where
   -- ^ Deprecated for Serial
   -- Can `onPacket` possibly poke the packet state, so we need to wait for it to
   -- finish in serial, not parallel?
-  canPokePacketState :: Bool
-  canPokePacketState = False
+  --canPokePacketState :: Bool
+  --canPokePacketState = False
 
-class (Packet p,s ~ PacketState p) => PacketWithState s p | p -> s where {}
-instance (Packet p,s ~ PacketState p) => PacketWithState s p where {}
+--class (Packet p,s ~ PacketState p) => PacketWithState s p | p -> s where {}
+--instance (Packet p,s ~ PacketState p) => PacketWithState s p where {}
 
 -- We can't make this an actual `Show` instance without icky extentions. Also,
 -- the instance context is not checked during instance selection, so we would
 -- have to make a full on `instance Show a where`, which is obviously bad.
-showPacket :: forall p. Packet p => p -> String
-showPacket pkt = formatPacket (packetName @p) (packetPretty pkt)
+showPacket :: PacketDescriptor p -> p -> Text
+showPacket pktDesc p = formatPacket (packetName pktDesc) (packetPretty pktDesc p)
 
 -- A `InboundPacket s` is a thing that is a HandledPacket with the given PacketState
-newtype InboundPacket s = InboundPacket (SuchThatStar '[PacketWithState s,HandledPacket])
+--newtype InboundPacket s = InboundPacket (SuchThatStar '[PacketWithState s,HandledPacket])
 
 -- A `OutboundPacket s` is a thing with the given PacketState
-newtype OutboundPacket s = OutboundPacket (SuchThatStar '[PacketWithState s,Serial])
+--newtype OutboundPacket s = OutboundPacket (SuchThatStar '[PacketWithState s,Serial])
 
 -- Entities are things with properties
 class Entity m where
-  entityName :: String
+  entityName :: Text
   entityType :: VarInt
   entitySize :: m -> (Float,Float,Float)
   entityLocation :: m -> EntityLocation
@@ -1078,7 +1111,7 @@ class Entity m => Mob m where {}
 
 -- Some entities are Objects, which can haev special, different properties
 class Entity m => Object m where
-  objectName :: String
+  objectName :: Text
   objectId :: Word8
   -- TODO: does objectSize always == entitySize? If so, remove objectSize
   objectSize :: m -> (Float,Float,Float)
@@ -1205,7 +1238,7 @@ type SendsPackets r = Member Packeting r
 
 data Packeting a where
   -- Send a packet for any packet state
-  SendPacket :: ForAny OutboundPacket -> Packeting ()
+  SendPacket :: Serial p => PacketDescriptor p -> p -> Packeting ()
   -- Send raw bytes over the network (used in LegacyHandshakePong)
   UnsafeSendBytes :: BS.ByteString -> Packeting ()
   -- Use the given shared secret to enable encryption
