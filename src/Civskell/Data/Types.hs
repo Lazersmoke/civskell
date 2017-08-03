@@ -24,9 +24,9 @@
 -- TODO: This export list is pretty scary. We should make tiered modules or something
 module Civskell.Data.Types
   -- Constants
-  (airChunk,allCoords,protocolVersion,legacyHandshakePingConstant,legacyHandshakePongConstant
+  (airChunk,allCoords,legacyHandshakePingConstant,legacyHandshakePongConstant
   -- Helper functions
-  ,blockInChunk,blockToChunk,blockToRelative,blockOnSide,showPacket,jsonyText,withLength,withListLength,indentedHex,serOpt,comb,showText
+  ,blockInChunk,blockToChunk,blockToRelative,blockOnSide,showPacket,jsonyText,withLength,withListLength,indentedHex,comb,showText,moveVec
   -- Type synonyms
   ,EncryptionCouplet,PerformsIO,Short,LegacyString
   -- Blocks
@@ -42,7 +42,7 @@ module Civskell.Data.Types
   ,PlayerEntityAction(..),AuthPacket(..),AuthProperty(..),ClientAuthResponse(..),ClientAuthProfile(..)
   -- Id's and newtypes
   ,VarInt(..),EntityId(..),PlayerId,WindowId(..),KeepAliveId,TPConfirmId,TransactionId
-  ,ProtocolString(..),ProtocolList(..),ProtocolNBT(..)
+  ,ProtocolOptional(..),ProtocolString(..),ProtocolList(..),ProtocolNBT(..),LengthAnnotatedByteString(..)
   -- Aux Data Types
   ,PlayerData(..),UUID(..)
   -- Slot
@@ -61,9 +61,13 @@ module Civskell.Data.Types
   -- Packeting
   ,SendsPackets,Packeting(..)
   -- Packet
-  ,PacketDescriptor(..),PacketHandler(..),DescribedPacket(..)
+  ,PacketDescriptor(..),DescribedPacket(..)
+  ,OutboundPacketDescriptor
+  ,PacketSerializer(..),defaultSerializer
+  ,InboundPacketDescriptor
+  ,CanHandlePackets,PacketHandler(..),defaultHandler
   ,ThreadingMode(..)
-  ,ParseSet
+  ,SupportedPackets
   -- Configuration
   ,Configured,Configuration(..),defaultConfiguration,forkConfig
   -- Entity
@@ -117,13 +121,7 @@ import Data.Bytes.Put
 import Data.Bytes.Get
 import qualified Data.Serialize as Cereal
 import qualified Data.Set as Set
-import qualified Data.HashSet as HashSet
-
--- The current Minecraft Protocol Version number. This should be replaced with a
--- configuration option, or even multiversion support in the future, but right
--- now we only support 335, which is 1.12 Vanilla.
-protocolVersion :: Integer
-protocolVersion = 335
+import qualified Data.Vector as Vector
 
 showText :: Show a => a -> T.Text
 showText = T.pack . show
@@ -134,7 +132,7 @@ instance Serial ProtocolNBT where
   serialize = putByteString . Cereal.runPut . Cereal.put . unProtocolNBT
   deserialize = remaining >>= \r -> getByteString (fromIntegral r) >>= \bs -> case Cereal.runGet Cereal.get bs of
     Left e -> error e
-    Right a -> return (ProtocolNBT a)
+    Right a -> pure (ProtocolNBT a)
 
 -- Legacy Handshake packet constant. This is what we send when we get a legacy
 -- ping from a client.
@@ -330,7 +328,7 @@ instance Serial VarInt where
     b <- getWord8
     if testBit b 7 
       then (\rest -> (unsafeCoerce $ b .&. 0b01111111) .|. shiftL rest 7) <$> deserialize @VarInt
-      else return (unsafeCoerce $ b .&. 0b01111111)
+      else pure (unsafeCoerce $ b .&. 0b01111111)
 
 -- TODO: Investigate GND for Serial here: it has to do with some role nonsense
 -- EntityId's are distinguished VarInt's. Note that the `Serial` instance here is
@@ -440,14 +438,19 @@ instance Data.Aeson.Types.FromJSON AuthPacket where
   parseJSON x = Data.Aeson.Types.typeMismatch "AuthPacket" x
 
 instance Data.Aeson.Types.FromJSON UUID where
-  parseJSON (Aeson.String s) = return $ (\i -> UUID (fromInteger $ i .&. 0xFFFFFFFFFFFFFFFF,fromInteger $ shiftR i 8)) . fst . head . readHex . T.unpack $ s
+  parseJSON (Aeson.String s) = pure $ (\i -> UUID (fromInteger $ i .&. 0xFFFFFFFFFFFFFFFF,fromInteger $ shiftR i 8)) . fst . head . readHex . T.unpack $ s
   parseJSON x = Data.Aeson.Types.typeMismatch "UUID" x
 
 -- Helper type to support the arbitrary properties in auth packets
-data AuthProperty = AuthProperty String String (Maybe String)
+data AuthProperty = AuthProperty ProtocolString ProtocolString (ProtocolOptional ProtocolString) deriving Generic
+
+instance Show AuthProperty where
+  show (AuthProperty (ProtocolString name) (ProtocolString value) (ProtocolOptional _mSig)) = "\"" ++ name ++ "\":\"" ++ value ++ "\""
+
+instance Serial AuthProperty where {}
 
 instance Data.Aeson.Types.FromJSON AuthProperty where
-  parseJSON = withObject "Auth Property" $ \o -> AuthProperty <$> o .: "name" <*> o .: "value" <*> o .:? "signature"
+  parseJSON = withObject "Auth Property" $ \o -> AuthProperty <$> o .: "name" <*> o .: "value" <*> (ProtocolOptional <$> o .:? "signature")
 
 data ClientAuthResponse = ClientAuthResponse {accessToken :: String, clientToken :: String, profileInformation :: (Maybe [ClientAuthProfile],Maybe ClientAuthProfile)} deriving Show
 
@@ -598,31 +601,48 @@ data AsType = AsBlock | AsItem
 -- Helper kind for PlayerListAction
 data PlayerListActionType = AddPlayer | UpdateGamemode | UpdateLatency | UpdateName | RemovePlayer
 
-class (Serial (PlayerListAction a)) => PlayerListActionEnum a where playerListActionEnum :: VarInt
-instance PlayerListActionEnum 'AddPlayer where playerListActionEnum = 0
-instance PlayerListActionEnum 'UpdateGamemode where playerListActionEnum = 1
-instance PlayerListActionEnum 'UpdateLatency where playerListActionEnum = 2
-instance PlayerListActionEnum 'UpdateName where playerListActionEnum = 3
-instance PlayerListActionEnum 'RemovePlayer where playerListActionEnum = 4
+class (Serial (PlayerListAction a)) => PlayerListActionEnum a where 
+  playerListActionEnum :: VarInt
+  showPlayerListAction :: PlayerListAction a -> [(Text,Text)]
+
+instance PlayerListActionEnum 'AddPlayer where 
+  playerListActionEnum = 0
+  showPlayerListAction (PlayerListAdd (ProtocolString name) (ProtocolList props) gm ping (ProtocolOptional mDispName)) = [("Action","Add Player"),("Name",T.pack name),("Properties",showText props),("Gamemode",showText gm),("Ping",showText ping)] ++ (case mDispName of {Just d -> [("Display Name",showText . unProtocolString $ d)]; Nothing -> []})
+
+instance PlayerListActionEnum 'UpdateGamemode where 
+  playerListActionEnum = 1
+  showPlayerListAction (PlayerListGamemode gm) = [("Action","Update Gamemode"),("Gamemode",showText gm)]
+
+instance PlayerListActionEnum 'UpdateLatency where 
+  playerListActionEnum = 2
+  showPlayerListAction (PlayerListLatency ping) = [("Action","Update Latency"),("Ping",showText ping <> "ms")]
+
+instance PlayerListActionEnum 'UpdateName where 
+  playerListActionEnum = 3
+  showPlayerListAction (PlayerListName (ProtocolOptional mDispName)) = [("Action","Update Name")] ++ (case mDispName of {Just d -> [("Display Name",showText . unProtocolString $ d)]; Nothing -> []})
+
+instance PlayerListActionEnum 'RemovePlayer where 
+  playerListActionEnum = 4
+  showPlayerListAction PlayerListRemove = [("Action","Remove")]
 
 -- Used in Client.PlayerListItem
 data PlayerListAction (a :: PlayerListActionType) where
-  PlayerListAdd :: String -> [AuthProperty] -> Gamemode -> VarInt -> (Maybe String) -> PlayerListAction 'AddPlayer
+  PlayerListAdd :: ProtocolString -> ProtocolList VarInt AuthProperty -> Gamemode -> VarInt -> ProtocolOptional ProtocolString -> PlayerListAction 'AddPlayer
   PlayerListGamemode :: Gamemode -> PlayerListAction 'UpdateGamemode
   PlayerListLatency :: VarInt -> PlayerListAction 'UpdateLatency
-  PlayerListName :: (Maybe String) -> PlayerListAction 'UpdateName
+  PlayerListName :: ProtocolOptional ProtocolString -> PlayerListAction 'UpdateName
   PlayerListRemove :: PlayerListAction 'RemovePlayer
 
+-- NOTE: Boring Serial instances
+-- Haskell GADTs with type indicies don't support deriving Generic, even something like:
+--
+--   deriving instance (PlayerListAction 'AddPlayer)
+--     
+-- So we just have to write out these serial instances the boring long way
+
 instance Serial (PlayerListAction 'AddPlayer) where
-  serialize (PlayerListAdd name props gm ping mDispName) = serialize (ProtocolString name) >> serialize ((fromIntegral $ length props) :: VarInt) >> traverse_ serProp props >> serialize gm >> serialize ping >> serOpt mDispName
-    where
-      serProp (AuthProperty n value mSigned) = serialize n >> serialize value >> serOpt mSigned
-  deserialize = do
-    name <- unProtocolString <$> deserialize @ProtocolString
-    len <- deserialize @VarInt
-    PlayerListAdd <$> pure name <*> replicateM (fromIntegral len) deserProp <*> deserialize @Gamemode <*> deserialize @VarInt <*> deserOpt @String
-    where
-      deserProp = AuthProperty <$> deserialize @String <*> deserialize @String <*> deserOpt @String
+  serialize (PlayerListAdd name props gm ping mDispName) = serialize name *> serialize props *> serialize gm *> serialize ping *> serialize mDispName
+  deserialize = PlayerListAdd <$> deserialize <*> deserialize <*> deserialize <*> deserialize <*> deserialize
 
 instance Serial (PlayerListAction 'UpdateGamemode) where
   serialize (PlayerListGamemode gm) = serialize gm
@@ -633,12 +653,12 @@ instance Serial (PlayerListAction 'UpdateLatency) where
   deserialize = PlayerListLatency <$> deserialize @VarInt
 
 instance Serial (PlayerListAction 'UpdateName) where
-  serialize (PlayerListName mDisp) = serOpt mDisp
-  deserialize = PlayerListName <$> deserOpt @String
+  serialize (PlayerListName mDisp) = serialize mDisp
+  deserialize = PlayerListName <$> deserialize @(ProtocolOptional ProtocolString)
 
 instance Serial (PlayerListAction 'RemovePlayer) where
-  serialize PlayerListRemove = return ()
-  deserialize = return PlayerListRemove
+  serialize PlayerListRemove = pure ()
+  deserialize = pure PlayerListRemove
 
 -- Used in Server.PlayerDigging
 data PlayerDigAction = StartDig BlockCoord BlockFace | StopDig BlockCoord BlockFace | EndDig BlockCoord BlockFace | DropItem Bool | ShootArrowOrFinishEating | SwapHands
@@ -869,7 +889,7 @@ instance Serial Slot where
   serialize (Slot Nothing) = serialize (-1 :: Short)
   serialize (Slot (Just sd)) = serialize @SlotData sd
   deserialize = deserialize @Short >>= \case
-    (-1) -> return $ Slot Nothing
+    (-1) -> pure $ Slot Nothing
     _itemId -> error "Unimplemented: Deserialization of general Slots. May be unimplementable in general :/"
 
 instance Serial SlotData where
@@ -917,7 +937,7 @@ data PlayerData = PlayerData
   ,clientBrand :: String
   ,clientUUID :: UUID
   ,playerId :: PlayerId
-  ,packetQueue :: TQueue (Some Serial)
+  ,packetQueue :: TQueue (ForAny (DescribedPacket PacketSerializer))
   }
 
 -- Having transactional access to a single Player's data is an effect
@@ -978,19 +998,32 @@ data World a where
   SummonMob :: (Some Mob) -> World ()
   SummonObject :: (Some Object) -> World ()
   AllPlayers :: World [PlayerData]
-  BroadcastPacket :: Some Serial -> World ()
+  BroadcastPacket :: ForAny (DescribedPacket PacketSerializer) -> World ()
 
 -- Combinator for serializing Maybes in a Minecrafty way
-serOpt :: (MonadPut m,Serial s) => Maybe s -> m ()
-serOpt (Just a) = serialize True >> serialize a
-serOpt Nothing = serialize False
+--serOpt :: (MonadPut m,Serial s) => Maybe s -> m ()
+--serOpt (Just a) = serialize True >> serialize a
+--serOpt Nothing = serialize False
 
-deserOpt :: forall s m. (MonadGet m,Serial s) => m (Maybe s)
-deserOpt = deserialize @Bool >>= \case
-  False -> return Nothing
-  True -> Just <$> deserialize @s
+--deserOpt :: forall s m. (MonadGet m,Serial s) => m (Maybe s)
+--deserOpt = deserialize @Bool >>= \case
+ -- False -> pure Nothing
+  --True -> Just <$> deserialize @s
 
-newtype ProtocolString = ProtocolString {unProtocolString :: String} deriving (IsString,Show,Eq)
+newtype ProtocolOptional a = ProtocolOptional {unProtocolOptional :: Maybe a} deriving (Eq,Show)
+
+instance Serial a => Serial (ProtocolOptional a) where
+  serialize (ProtocolOptional ma) = case ma of
+    Just a -> serialize True *> serialize a
+    Nothing -> serialize False
+  deserialize = deserialize @Bool >>= \case
+    False -> pure (ProtocolOptional Nothing)
+    True -> ProtocolOptional . Just <$> deserialize @a
+
+newtype ProtocolString = ProtocolString {unProtocolString :: String} deriving (IsString,Eq,Data.Aeson.Types.FromJSON)
+
+instance Show ProtocolString where
+  show (ProtocolString s) = show s
 
 instance Serial ProtocolString where
   serialize (ProtocolString str) = serialize ((fromIntegral $ BS.length encoded) :: VarInt) >> putByteString encoded
@@ -1022,74 +1055,71 @@ withLength bs = serialize ((fromIntegral $ BS.length bs) :: VarInt) >> putByteSt
 withListLength :: (MonadPut m,Serial s) => [s] -> m ()
 withListLength ls = serialize ((fromIntegral $ length ls) :: VarInt) >> traverse_ serialize ls
 
-data PacketDescriptor p = PacketDescriptor 
+newtype LengthAnnotatedByteString = LengthAnnotatedByteString {unLengthAnnotatedByteString :: BS.ByteString} deriving (Show,Eq)
+
+instance Serial LengthAnnotatedByteString where
+  serialize (LengthAnnotatedByteString bs) = serialize @VarInt (fromIntegral $ BS.length bs) *> putByteString bs
+  deserialize = LengthAnnotatedByteString <$> (getByteString . fromIntegral =<< deserialize @VarInt)
+
+data PacketDescriptor h p = PacketDescriptor 
   {packetPretty :: p -> [(Text,Text)]
   ,packetName :: Text
-  ,packetId :: VarInt
   ,packetState :: ServerState
+  ,packetHandler :: h p
   }
 
-data DescribedPacket p = DescribedPacket (PacketDescriptor p) p
+type InboundPacketDescriptor = PacketDescriptor PacketHandler
+
+type OutboundPacketDescriptor = PacketDescriptor PacketSerializer
+
+data DescribedPacket h p = DescribedPacket (PacketDescriptor h p) p
 
 data ThreadingMode = SerialThreading | ParThreading
 
-data PacketHandler p = PacketHandler 
-  {packetThreadingMode :: ThreadingMode
-  ,onPacket :: forall r. (Configured r,SendsPackets r,PerformsIO r,Logs r,HasPlayer r,HasWorld r) => p -> Eff r ()
+data PacketSerializer p = PacketSerializer 
+  {packetId :: VarInt
+  ,serializePacket :: forall m. MonadPut m => p -> m ()
   }
 
--- NOTE: Ambiguous type on packetName, parsePacket, and packetId
--- With TypeApplications we can do for example `packetId @Server.UseEntity`
--- This applies `Server.UseEntity` to the capital lambda "forall":
---
--- packetName :: forall p. Packet p => String
---
--- and we substitute `Server.UseEntity` for `p`, and get `:: Packet Server.UseEntity => String`
--- which brings the correct representation "into scope" via dictionary
+defaultSerializer :: Serial p => VarInt -> PacketSerializer p
+defaultSerializer pId = PacketSerializer {packetId = pId, serializePacket = serialize}
 
--- Class of types that are packets
--- TODO: Split into Client/Server subclasses so we don't have lots of `undefined` parsePacket and onPacket everywhere
---class Serial p => Packet p where
-  -- State this packet is expected in
-  --type PacketState p :: ServerState
-  -- Extract name-value pairs to pretty print a packet
-  --packetPretty :: p -> [(String,String)]
-  -- Name of the packet. Example `data Meow = ...` has the name "Meow"
-  --packetName :: String
-  -- Packet Id -- Put this in the type level? Fundep: `packetstate, packetId -> p`
-  --packetId :: VarInt
+type CanHandlePackets r = (Configured r,SendsPackets r,PerformsIO r,Logs r,HasPlayer r,HasWorld r)
 
-type ParseSet = HashSet.HashSet (SuchThat '[Serial] PacketDescriptor)
+data PacketHandler p = PacketHandler 
+  {packetThreadingMode :: ThreadingMode
+  ,onPacket :: forall r. CanHandlePackets r => p -> Eff r ()
+  ,deserializePacket :: forall m. MonadGet m => m p
+  }
+
+defaultHandler :: Serial p => PacketHandler p
+defaultHandler = PacketHandler
+  {packetThreadingMode = ParThreading
+  ,onPacket = const (pure ())
+  ,deserializePacket = deserialize
+  }
+
+type SupportedPackets h = Vector.Vector (SuchThat '[Serial] (PacketDescriptor h))
+
+moveVec :: Int -> Int -> Vector.Vector a -> Vector.Vector a
+moveVec old new v = Vector.concat [before,between,Vector.singleton oldelem,after]
+  where
+    before = Vector.slice 0 old v
+    oldelem = v Vector.! old
+    between = Vector.slice (old + 1) (new - old - 1) v
+    after = Vector.slice (new + 1) (Vector.length v - new - 1) v 
 
 -- Ignore the function because nobody likes functions
-instance Hashable (SuchThat x PacketDescriptor) where
-  hashWithSalt s (SuchThat desc) = s `hashWithSalt` packetName desc `hashWithSalt` packetId desc `hashWithSalt` packetState desc
+--instance Hashable (SuchThat x (PacketDescriptor h)) where
+  --hashWithSalt s (SuchThat desc) = s `hashWithSalt` packetName desc `hashWithSalt` packetId desc `hashWithSalt` packetState desc
 
-instance Eq (SuchThat x PacketDescriptor) where
-  (SuchThat a) == (SuchThat b) = packetName a == packetName b && packetId a == packetId b && packetState a == packetState b
-
--- Helper classes for using Data.SuchThat with TypeFamilies, which would otherwise be partially applied
---class Packet p => HandledPacket p where
-  -- Spawn a PLT on receipt of each packet
-  -- TODO: remove arbitrary IO in favor of STM or something else
-  --onPacket :: (Configured r,SendsPackets r,PerformsIO r,Logs r,HasPlayer r,HasWorld r) => p -> Eff r ()
-  -- No default defn. here so that we get compiler warnings for not implmenting
-  --onPacket p = send (LogString ErrorLog $ "Unsupported packet: " ++ showPacket p)
-  -- Parse a packet
-  --parsePacket :: Parser p
-  -- ^ Deprecated for Serial
-  -- Can `onPacket` possibly poke the packet state, so we need to wait for it to
-  -- finish in serial, not parallel?
-  --canPokePacketState :: Bool
-  --canPokePacketState = False
-
---class (Packet p,s ~ PacketState p) => PacketWithState s p | p -> s where {}
---instance (Packet p,s ~ PacketState p) => PacketWithState s p where {}
+--instance Eq (SuchThat x (PacketDescriptor h)) where
+  --(SuchThat a) == (SuchThat b) = packetName a == packetName b && packetId a == packetId b && packetState a == packetState b
 
 -- We can't make this an actual `Show` instance without icky extentions. Also,
 -- the instance context is not checked during instance selection, so we would
 -- have to make a full on `instance Show a where`, which is obviously bad.
-showPacket :: PacketDescriptor p -> p -> Text
+showPacket :: PacketDescriptor h p -> p -> Text
 showPacket pktDesc p = formatPacket (packetName pktDesc) (packetPretty pktDesc p)
 
 -- A `InboundPacket s` is a thing that is a HandledPacket with the given PacketState
@@ -1134,7 +1164,7 @@ defaultObject e name oId oDat = MkObject
 -}
 
 -- EntityMeta is just a normal value with special type properties
-newtype EntityMeta p = EntityMeta p
+newtype EntityMeta p = EntityMeta p deriving Generic
 
 -- Those special properties are that the type has an instance for `EntityMetaType`
 type EntityMetadata = SuchThat '[EntityMetaType] EntityMeta
@@ -1161,58 +1191,40 @@ instance Serial EntityPropertySet where
 -- NYI: (4,Chat) (7,Rotation 3xFloat) (8,Position)
 
 instance EntityMetaType Word8 where entityMetaFlag = 0x00
-instance Serial (EntityMeta Word8) where 
-  serialize (EntityMeta a) = serialize a
-  deserialize = EntityMeta <$> deserialize
+instance Serial (EntityMeta Word8) where {}
 
 instance EntityMetaType VarInt where entityMetaFlag = 0x01
-instance Serial (EntityMeta VarInt) where
-  serialize (EntityMeta a) = serialize a
-  deserialize = EntityMeta <$> deserialize
+instance Serial (EntityMeta VarInt) where {}
 
 instance EntityMetaType Float where entityMetaFlag = 0x02
-instance Serial (EntityMeta Float) where 
-  serialize (EntityMeta a) = serialize a
-  deserialize = EntityMeta <$> deserialize
+instance Serial (EntityMeta Float) where {}
 
 instance EntityMetaType String where entityMetaFlag = 0x03
-instance Serial (EntityMeta String) where
-  serialize (EntityMeta a) = serialize a
-  deserialize = EntityMeta <$> deserialize
+instance Serial (EntityMeta String) where {}
 
 instance EntityMetaType SlotData where entityMetaFlag = 0x05
-instance Serial (EntityMeta SlotData) where 
-  serialize (EntityMeta a) = serialize a
-  deserialize = EntityMeta <$> deserialize @SlotData
+instance Serial (EntityMeta SlotData) where {}
 
 instance EntityMetaType Bool where entityMetaFlag = 0x06
-instance Serial (EntityMeta Bool) where 
-  serialize (EntityMeta a) = serialize a
-  deserialize = EntityMeta <$> deserialize
+instance Serial (EntityMeta Bool) where {}
 
-instance EntityMetaType (Maybe BlockCoord) where entityMetaFlag = 0x09
-instance Serial (EntityMeta (Maybe BlockCoord)) where 
-  serialize (EntityMeta m) = serOpt m
-  deserialize = EntityMeta <$> deserOpt
+instance EntityMetaType (ProtocolOptional BlockCoord) where entityMetaFlag = 0x09
+instance Serial (EntityMeta (ProtocolOptional BlockCoord)) where {}
 
 instance EntityMetaType BlockFace where entityMetaFlag = 0x0A
 instance Serial (EntityMeta BlockFace) where 
   serialize (EntityMeta f) = serialize @VarInt $ fromIntegral (fromEnum f)
   deserialize = EntityMeta . toEnum . fromIntegral <$> deserialize @VarInt
 
-instance EntityMetaType (Maybe UUID) where entityMetaFlag = 0x0B
-instance Serial (EntityMeta (Maybe UUID)) where 
-  serialize (EntityMeta m) = serOpt m
-  deserialize = deserialize @Bool >>= \case
-    False -> return $ EntityMeta Nothing
-    True -> EntityMeta . Just <$> deserialize @UUID
+instance EntityMetaType (ProtocolOptional UUID) where entityMetaFlag = 0x0B
+instance Serial (EntityMeta (ProtocolOptional UUID)) where {}
 
 instance EntityMetaType (Maybe BlockState) where entityMetaFlag = 0x0C
 instance Serial (EntityMeta (Maybe BlockState)) where 
   serialize (EntityMeta m) = serialize @VarInt $ case m of {Nothing -> 0;Just (BlockState bid dmg) -> unsafeCoerce $ shiftL bid 4 .|. unsafeCoerce dmg}
   deserialize = deserialize @VarInt >>= \case
-    0 -> return (EntityMeta Nothing)
-    x -> return $ EntityMeta $ Just $ BlockState (unsafeCoerce $ shiftR x 4) (unsafeCoerce $ x .&. 0xf)
+    0 -> pure (EntityMeta Nothing)
+    x -> pure $ EntityMeta $ Just $ BlockState (unsafeCoerce $ shiftR x 4) (unsafeCoerce $ x .&. 0xf)
 
 -- Having access to low-level networking operations is an effect
 type Networks r = Member Networking r
@@ -1238,7 +1250,7 @@ type SendsPackets r = Member Packeting r
 
 data Packeting a where
   -- Send a packet for any packet state
-  SendPacket :: Serial p => PacketDescriptor p -> p -> Packeting ()
+  SendPacket :: ForAny (DescribedPacket PacketSerializer) -> Packeting ()
   -- Send raw bytes over the network (used in LegacyHandshakePong)
   UnsafeSendBytes :: BS.ByteString -> Packeting ()
   -- Use the given shared secret to enable encryption
@@ -1255,19 +1267,26 @@ type Configured r = Member (Reader Configuration) r
 
 data Configuration = Configuration
   {shouldLog :: LogLevel -> Bool
+  ,protocolVersion :: Integer
+  ,serverVersion :: Text
   ,serverName :: Text
+  ,serverMotd :: Text
   ,spawnLocation :: BlockCoord
   ,defaultDifficulty :: Difficulty
   ,defaultDimension :: Dimension
   ,defaultGamemode :: Gamemode
   ,maxPlayers :: Word8
   ,compressionThreshold :: Maybe VarInt
+  ,packetsForState :: ServerState -> SupportedPackets PacketHandler
   }
 
 defaultConfiguration :: Configuration
 defaultConfiguration = Configuration
   {shouldLog = \case {HexDump -> False; _ -> True}
+  ,protocolVersion = 0
+  ,serverVersion = "Default"
   ,serverName = "Civskell"
+  ,serverMotd = "An Experimental Minecraft server written in Haskell | github.com/Lazersmoke/civskell"
   ,spawnLocation = BlockLocation (0,64,0)
   ,defaultDifficulty = Peaceful
   ,defaultDimension = Overworld
@@ -1275,12 +1294,13 @@ defaultConfiguration = Configuration
   -- TODO: Check against this
   ,maxPlayers = 100
   ,compressionThreshold = Just 16
+  ,packetsForState = const Vector.empty
   }
 
 forkConfig :: Configured q => Eff (Reader Configuration ': r) a -> Eff q (Eff r a)
 forkConfig e = do
   c <- ask
-  return $ runReader' c e
+  pure $ runReader' c e
 
 comb :: Some c -> (forall a. c a => r) -> r
 comb (SuchThat (Identity (_ :: a))) f = f @a

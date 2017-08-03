@@ -187,7 +187,7 @@ instance Entity Guardian where
   entityVelocity (Guardian i _ _) = insentientVelocity i
   entityMeta (Guardian i retractSpikes targetEID) = insentientMeta i ++ [mm retractSpikes,mm targetEID]
 
-data Shulker = Shulker Insentient BlockFace (Maybe BlockCoord) Word8 Word8
+data Shulker = Shulker Insentient BlockFace (ProtocolOptional BlockCoord) Word8 Word8
 instance Mob Shulker where {}
 instance Entity Shulker where
   entityName = "Shulker"
@@ -249,7 +249,7 @@ instance Entity Squid where
   entityVelocity (Squid i) = insentientVelocity i
   entityMeta (Squid i) = insentientMeta i
 
-data Wolf = Wolf Insentient Word8 (Maybe UUID) Float Bool VarInt
+data Wolf = Wolf Insentient Word8 (ProtocolOptional UUID) Float Bool VarInt
 instance Mob Wolf where {}
 instance Entity Wolf where
   entityName = "Wolf"

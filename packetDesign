@@ -1,0 +1,8 @@
+A mineman packet has some attributes:
+
+- Packet ID (VarInt)
+- Packet Name (String)
+- Serialization method
+
+When we get one of these packets, it's type in Civskell must depend on the value
+of the packet Id that we get from the wire. 

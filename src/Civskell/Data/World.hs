@@ -13,7 +13,6 @@ import Control.Eff
 import Control.Monad (forM)
 import Data.Bits
 import Data.SuchThat
-import Data.Bytes.Serial
 import qualified Data.ByteString as BS
 import qualified Data.Map.Lazy as Map
 
@@ -90,8 +89,8 @@ allPlayers :: HasWorld r => Eff r [PlayerData]
 allPlayers = send AllPlayers
 
 {-# INLINE broadcastPacket #-}
-broadcastPacket :: (HasWorld r,Serial p) => p -> Eff r ()
-broadcastPacket = send . BroadcastPacket . some
+broadcastPacket :: HasWorld r => OutboundPacketDescriptor p -> p -> Eff r ()
+broadcastPacket d p = send (BroadcastPacket (ambiguate $ DescribedPacket d p))
 
 {-# INLINE getEntity #-}
 getEntity :: (HasWorld r) => EntityId -> Eff r (Some Entity)
@@ -123,21 +122,21 @@ runWorld w' (Eff u q) = case u of
     send $ modifyMVar_ w' $ \w -> do
       let f = Map.delete (blockToRelative bc)
       return w {chunks = Map.alter (Just . maybe (ChunkSection $ f Map.empty) (\(ChunkSection c) -> ChunkSection $ f c)) (blockToChunk bc) (chunks w)}
-    runWorld w' $ broadcastPacket (Client.BlockChange bc (some Air))
+    runWorld w' $ broadcastPacket Client.blockChange (Client.BlockChange bc (some Air))
     runWorld w' (runTCQ q ())
   Inject (SetBlock b' bc) -> do
     send $ modifyMVar_ w' $ \w -> do
       let f = Map.insert (blockToRelative bc) b'
       return w {chunks = Map.alter (Just . maybe (ChunkSection $ f Map.empty) (\(ChunkSection c) -> ChunkSection $ f c)) (blockToChunk bc) (chunks w)}
-    runWorld w' $ broadcastPacket (Client.BlockChange bc b')
+    runWorld w' $ broadcastPacket Client.blockChange (Client.BlockChange bc b')
     runWorld w' (runTCQ q ())
   Inject (SetChunk c' cc@(ChunkCoord (x,y,z))) -> do
     send $ modifyMVar_ w' $ \w -> return w {chunks = Map.insert cc c' (chunks w)}
-    runWorld w' $ broadcastPacket (Client.ChunkData (fromIntegral x,fromIntegral z) False (bit y) [c'] Nothing (ProtocolList []))
+    runWorld w' $ broadcastPacket Client.chunkData (Client.ChunkData (fromIntegral x,fromIntegral z) False (bit y) [c'] Nothing (ProtocolList []))
     runWorld w' (runTCQ q ())
   Inject (SetColumn col' (cx,cz) mBio) -> do
     send $ modifyMVar_ w' $ \w -> return w {chunks = fst $ foldl (\(m,i) c -> (Map.insert (ChunkCoord (cx,i,cz)) c m,i + 1)) (chunks w,0) col'}
-    runWorld w' $ broadcastPacket $ chunksToColumnPacket col' (cx,cz) mBio
+    runWorld w' $ broadcastPacket Client.chunkData $ chunksToColumnPacket col' (cx,cz) mBio
     runWorld w' (runTCQ q ())
   Inject FreshEID -> (>>= runWorld w' . runTCQ q) . send . modifyMVar w' $ \w -> return (w {nextEID = succ $ nextEID w},nextEID w)
   Inject FreshUUID -> (>>= runWorld w' . runTCQ q) . send . modifyMVar w' $ \w -> return (w {nextUUID = incUUID $ nextUUID w},nextUUID w)
@@ -159,15 +158,15 @@ runWorld w' (Eff u q) = case u of
   Inject (SummonMob (SuchThat m)) -> do
     (eid,uuid) <- send . modifyMVar w' $ \w ->
       return (w {entities = Map.insert (nextEID w) (SuchThat m) (entities w),nextEID = succ (nextEID w),nextUUID = incUUID (nextUUID w)},(nextEID w,nextUUID w))
-    runWorld w' $ broadcastPacket $ Client.makeSpawnMob eid uuid 0 (SuchThat m)
+    runWorld w' $ broadcastPacket Client.spawnMob $ Client.makeSpawnMob eid uuid 0 (SuchThat m)
     runWorld w' (runTCQ q ())
     where
       incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
   Inject (SummonObject (SuchThat m)) -> do
     (eid,uuid) <- send . modifyMVar w' $ \w ->
       return (w {entities = Map.insert (nextEID w) (SuchThat m) (entities w),nextEID = succ (nextEID w),nextUUID = incUUID (nextUUID w)},(nextEID w,nextUUID w))
-    runWorld w' $ broadcastPacket $ Client.SpawnObject eid uuid (SuchThat m)
-    runWorld w' $ broadcastPacket $ Client.UpdateMetadata eid (EntityPropertySet $ map Just $ entityMeta (runIdentity m))
+    runWorld w' $ broadcastPacket Client.spawnObject $ Client.SpawnObject eid uuid (SuchThat m)
+    runWorld w' $ broadcastPacket Client.updateMetadata $ Client.UpdateMetadata eid (EntityPropertySet $ map Just $ entityMeta (runIdentity m))
     runWorld w' (runTCQ q ())
     where
       incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)

@@ -10,6 +10,7 @@ module Civskell.Data.Networking where
 import Control.Eff
 import Control.Concurrent.STM
 import Data.Bytes.Serial
+import Data.SuchThat
 import Data.Bytes.Put
 import Data.Bytes.Get
 import qualified Data.Text as T
@@ -48,8 +49,8 @@ addCompression = send . AddCompression
 removeCompression :: Networks n => BS.ByteString -> Eff n BS.ByteString
 removeCompression = send . RemoveCompression
 
-sendPacket :: (Serial p,SendsPackets r) => PacketDescriptor p -> p -> Eff r ()
-sendPacket d p = send (SendPacket d p)
+sendPacket :: SendsPackets r => OutboundPacketDescriptor p -> p -> Eff r ()
+sendPacket d p = send (SendPacket (ambiguate $ DescribedPacket d p))
 
 iSolemnlySwearIHaveNoIdeaWhatImDoing :: SendsPackets r => BS.ByteString -> Eff r ()
 iSolemnlySwearIHaveNoIdeaWhatImDoing = send . UnsafeSendBytes
@@ -66,12 +67,14 @@ runPacketing (Pure x) = Pure x
 runPacketing (Eff u q) = case u of
   Weaken restOfU -> Eff restOfU (Singleton (runPacketing . runTCQ q))
   -- Unpack from the existentials to get the type information into a skolem, scoped tyvar
-  Inject (SendPacket pktDesc pkt) -> do
+  Inject (SendPacket (SuchThat (DescribedPacket pktDesc pkt))) -> do
+    let pktHandler = packetHandler pktDesc
+    let writePacket = serializePacket pktHandler pkt
     -- Log its hex dump
     logLevel ClientboundPacket $ showPacket pktDesc pkt
-    logLevel HexDump . T.pack $ indentedHex (runPutS . serialize $ pkt)
+    logLevel HexDump . T.pack $ indentedHex (runPutS writePacket)
     -- Send it
-    rPut =<< addCompression (runPutS $ serialize (packetId pktDesc) *> serialize pkt)
+    rPut =<< addCompression (runPutS $ serialize (packetId pktHandler) *> writePacket)
     runPacketing (runTCQ q ())
   -- "Unsafe" means it doesn't come from a legitimate packet (doesn't have packetId) and doesn't get compressed
   Inject (UnsafeSendBytes bytes) -> rPut bytes >> runPacketing (runTCQ q ())

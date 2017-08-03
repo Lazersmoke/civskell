@@ -1,9 +1,11 @@
+{-# LANGUAGE OverloadedStrings #-}
 module Main where
 
 import Civskell
+import Civskell.Versions.Vanilla (vanilla1_12)
 
 -- This is user code
 main :: IO ()
 main = do
   putStrLn "Starting..."
-  runServer defaultConfiguration {shouldLog = const True} -- \l -> case l of {NormalLog -> True; TaggedLog _ -> True; _ -> False}}
+  runServer vanilla1_12 --{shouldLog = const True}

@@ -1,6 +1,8 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE TypeApplications #-}
+--{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -8,19 +10,19 @@
 module Piskell where
 
 import qualified Network as Net
-import Data.Functor.Identity
+--import Data.Functor.Identity
 import Data.Bytes.Serial
-import Data.Bytes.Put
-import Data.Bytes.Get
-import Data.SuchThat
+--import Data.Bytes.Put
+--import Data.Bytes.Get
+--import Data.SuchThat
 import Data.Semigroup
-import qualified Data.Map as Map
+--import qualified Data.HashSet as HashSet
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import Control.Eff
 import Control.Eff.State
 import Control.Eff.Reader
-import qualified Data.ByteString as BS
+--import qualified Data.ByteString as BS
 import Control.Concurrent.STM
 import Control.Concurrent (forkIO)
 import System.IO
@@ -28,9 +30,9 @@ import System.IO
 import Civskell.Data.Types
 import Civskell.Data.Logging
 import Civskell.Tech.Network
-import Civskell.Tech.Encrypt
+--import Civskell.Tech.Encrypt
 import qualified Civskell.Packet.Serverbound as Server
-import qualified Civskell.Packet.Clientbound as Client
+--import qualified Civskell.Packet.Clientbound as Client
 
 type HasPiskell r = Member (State PiskellState) r
 
@@ -40,10 +42,10 @@ data PiskellState = Piskell
   ,piskellPassword :: String
   }
 
-class Packet p => PiskellPacket p where
-  reactToPacket :: (SendsPackets r,HasPiskell r,PerformsIO r,Logs r) => p -> Eff r ()
-  canPokePacketStatePiskell :: Bool
-  canPokePacketStatePiskell = False
+data PiskellPacketHandler p = PiskellPacketHandler
+  {reactToPacket :: forall r. (SendsPackets r,HasPiskell r,PerformsIO r,Logs r) => p -> Eff r ()
+  ,piskellThreadingMode :: Bool
+  }
 
 runClient :: Configuration -> IO ()
 runClient c = runM . runReader' c $ do
@@ -74,7 +76,7 @@ login authInfo@(theUsername,thePassword) hdl = do
   -- Make new networking TVars for this client
   mEnc <- send $ newTVarIO Nothing
   mThresh <- send $ newTVarIO Nothing
-  let setup = sendPacket (Server.Handshake 316 "localhost" 25565 2) >> sendPacket (Server.LoginStart $ ProtocolString theUsername)
+  let setup = sendPacket (asSender Server.handshake) (Server.Handshake 316 "localhost" 25565 2) >> sendPacket (asSender Server.loginStart) (Server.LoginStart $ ProtocolString theUsername)
   -- Getting thread
   _ <- send . forkIO . runM =<< forkConfig =<< (forkLogger . runNetworking mEnc mThresh hdl . runPacketing . evalState' Piskell {piskellUsername = theUsername, piskellPassword = thePassword, currentState = LoggingIn} $ setup >> packetLoop)
   runNetworking mEnc mThresh hdl . runPacketing $ terminal
@@ -82,13 +84,21 @@ login authInfo@(theUsername,thePassword) hdl = do
 -- Simple busy work thread that will terminate when the user says to t
 terminal :: (Configured r, Logs r, PerformsIO r, SendsPackets r) => Eff r ()
 terminal = send getLine >>= \case
-  "a" -> sendPacket (Server.ChatMessage "Test Chat Message") >> terminal
+  "a" -> sendPacket (asSender Server.chatMessage) (Server.ChatMessage "Test Chat Message") >> terminal
   "q" -> pure ()
   _ -> terminal
 
+asSender :: Serial p => InboundPacketDescriptor p -> OutboundPacketDescriptor p
+asSender r = r {packetHandler = defaultSerializer (error "Piskell.asSender: This was written before packet ids were inferred from their position in the vector, so this method needs a rethink :thinking:")}
+
+packetLoop :: Eff r ()
+packetLoop = undefined
+{-
 -- When we get an encryption request, respond and enable encryption
-instance PiskellPacket Client.EncryptionRequest where
-  reactToPacket (Client.EncryptionRequest _sId pubKeyEnc vt) = do
+instance PiskellReaction Client.EncryptionRequest where {piskellReaction = piskellHandleEncryptionRequest}
+piskellHandleEncryptionRequest :: PiskellPacketHandler Client.EncryptionRequest
+piskellHandleEncryptionRequest = PiskellPacketHandler
+  {reactToPacket = \(Client.EncryptionRequest _sId pubKeyEnc vt) -> do
     -- TODO: Randomize
     let sharedSecret = BS.pack [0x01,0x00,0x03,0x02,0x05,0x04,0x07,0x06,0x09,0x08,0x0B,0x0A,0x0D,0x0C,0x0F,0x0E]
     -- Extract the public key from the encryption request
@@ -99,19 +109,26 @@ instance PiskellPacket Client.EncryptionRequest where
         -- Generate a response and send it. genEncryptionResponse can't directly
         -- create a Server.EncryptionResponse because that would require
         -- cyclical imports between Packet.Server and Tech.Encrypt
-        sendPacket =<< uncurry (flip Server.EncryptionResponse) <$> genEncryptionResponse pubKey vt sharedSecret
+        sendPacket Server.encryptionResponse =<< uncurry (flip Server.EncryptionResponse) <$> genEncryptionResponse pubKey vt sharedSecret
         -- Only start encrypting *after* the encryption response is sent
         beginEncrypting sharedSecret
+  }
 
-instance PiskellPacket Client.LoginSuccess where
-  reactToPacket (Client.LoginSuccess _uuid _username) = do
+instance PiskellReaction Client.LoginSuccess where {piskellReaction = piskellHandleLoginSuccess}
+piskellHandleLoginSuccess :: PiskellPacketHandler Client.LoginSuccess
+piskellHandleLoginSuccess = PiskellPacketHandler
+  {reactToPacket = \(Client.LoginSuccess _uuid _username) -> do
     logg "Login Successful. Switching to `Play` mode."
     modify (\x -> x {currentState = Playing})
+  }
 
-instance PiskellPacket Client.SetCompression where
-  reactToPacket (Client.SetCompression thresh) = do
+instance PiskellReaction Client.SetCompression where {piskellReaction = piskellHandleSetCompression}
+piskellHandleSetCompression :: PiskellPacketHandler Client.SetCompression
+piskellHandleSetCompression = PiskellPacketHandler
+  {reactToPacket = \(Client.SetCompression thresh) -> do
     logg $ "Compression threshold set to " <> T.pack (show thresh)
     beginCompression thresh
+  }
     
   -- get Join Game
   -- get Plugin Message with Brand
@@ -119,27 +136,36 @@ instance PiskellPacket Client.SetCompression where
   -- get Spawn position
   -- get plaer abilities
 
-instance PiskellPacket Client.PlayerAbilities where
-  reactToPacket (Client.PlayerAbilities _ _ _) = do
-    sendPacket (Server.PluginMessage "MC|Brand" . runPutS . serialize @ProtocolString $ "Piskell Client")
-    sendPacket (Server.ClientSettings "en_US" 8 {-Chunks Render distance-} 0 {-Chat enabled-} True {-Chat Colors enabled-} 0x7f {-All skin componnents enabled-} 1 {-Main hand: Right-})
+instance PiskellReaction Client.PlayerAbilities where {piskellReaction = piskellHandlePlayerAbilities}
+piskellHandlePlayerAbilities :: PiskellPacketHandler Client.PlayerAbilities
+piskellHandlePlayerAbilities = PiskellPacketHandler
+  {reactToPacket = \(Client.PlayerAbilities _ _ _) -> do
+    sendPacket Server.pluginMessage (Server.PluginMessage "MC|Brand" . runPutS . serialize @ProtocolString $ "Piskell Client")
+    sendPacket Server.clientSettings (Server.ClientSettings "en_US" 8 {-Chunks Render distance-} 0 {-Chat enabled-} True {-Chat Colors enabled-} 0x7f {-All skin componnents enabled-} 1 {-Main hand: Right-})
+  }
 
-instance PiskellPacket Client.PlayerPositionAndLook where
-  reactToPacket (Client.PlayerPositionAndLook pos look _relFlags tpId) = do
+instance PiskellReaction Client.PlayerPositionAndLook where {piskellReaction = piskellHandlePlayerPositionAndLook}
+piskellHandlePlayerPositionAndLook :: PiskellPacketHandler Client.PlayerPositionAndLook
+piskellHandlePlayerPositionAndLook = PiskellPacketHandler
+  {reactToPacket = \(Client.PlayerPositionAndLook pos look _relFlags tpId) -> do
     logg $ "Player position and look: " <> T.pack (show pos)
-    sendPacket (Server.TPConfirm tpId)
-    sendPacket (Server.PlayerPositionAndLook pos look True)
-    sendPacket (Server.ClientStatus PerformRespawn)
+    sendPacket Server.tpConfirm (Server.TPConfirm tpId)
+    sendPacket Server.playerPositionAndLook (Server.PlayerPositionAndLook pos look True)
+    sendPacket Server.clientStatus (Server.ClientStatus PerformRespawn)
+  }
 
-instance PiskellPacket Client.Disconnect where
-  reactToPacket (Client.Disconnect (ProtocolString reason)) = logg $ "Disconnect because: " <> T.pack reason
+instance PiskellReaction Client.Disconnect where {piskellReaction = piskellHandleDisconnect}
+piskellHandleDisconnect :: PiskellPacketHandler Client.Disconnect
+piskellHandleDisconnect = PiskellPacketHandler
+  {reactToPacket = \(Client.Disconnect (ProtocolString reason)) -> logg $ "Disconnect because: " <> T.pack reason
+  }
 
 packetLoop :: (Logs r,SendsPackets r,HasPiskell r,Networks r,PerformsIO r) => Eff r ()
 packetLoop = do
   -- Block until a packet arrives, then deal with it
-  getGenericPacket @PiskellPacket getParser >>= \case
+  getGenericPacket getParser >>= \case
     Nothing -> loge "Failed to parse incoming packet"
-    Just (SuchThat (Identity q)) -> reactToPacket q
+    Just (SuchThat (DescribedPacket desc (q :: qt))) -> reactToPacket (piskellReaction @qt) q
   packetLoop
   where
     -- This is an *action* to decide what parser to use. It needs to be like this because
@@ -151,11 +177,13 @@ packetLoop = do
       --Playing -> piPlaying
       _ -> undefined
 
-piLogin :: MonadGet m => ParseSet m VarInt '[Packet,PiskellPacket]
-piLogin = Map.fromList 
-  [(packetId @Client.LoginSuccess,ambiguate . Identity <$> deserialize @Client.LoginSuccess)
-  ,(packetId @Client.EncryptionRequest,ambiguate . Identity <$> deserialize @Client.EncryptionRequest)
-  ,(packetId @Client.Disconnect,ambiguate . Identity <$> deserialize @Client.Disconnect)
+piLogin :: ParseSet
+piLogin = HashSet.fromList 
+  [ambiguate Client.loginSuccess
+  ,ambiguate Client.encryptionRequest
+  ,ambiguate Client.disconnect
   --,(packetId @Client.LegacyHandshake,ambiguate . Identity <$> deserialize @Client.LegacyHandshake)
   ]
 
+class PiskellReaction p where {piskellReaction :: PiskellPacketHandler p}
+-}

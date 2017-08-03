@@ -12,7 +12,6 @@ module Civskell.Tech.Network
 
 import Control.Eff (Eff,send)
 import Data.Bits
-import Data.Foldable
 import Data.Bytes.Get
 import Data.Bytes.Serial
 import Data.Semigroup ((<>))
@@ -27,20 +26,21 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.SuchThat
 import qualified Data.Text as T
+import qualified Data.Vector as Vector
 
 import Civskell.Data.Logging
 import Civskell.Data.Networking
 import Civskell.Data.Types
 
-parseFromSet :: MonadGet m => ParseSet -> m (SuchThat '[Serial] DescribedPacket)
-parseFromSet s = deserialize @VarInt >>= \pktId -> case find (\x -> ambiguously packetId x == pktId) s of
-  Just (SuchThat (desc :: PacketDescriptor p)) -> do
+parseFromSet :: MonadGet m => SupportedPackets PacketHandler -> m (ForAny (DescribedPacket PacketHandler))
+parseFromSet s = deserialize @VarInt >>= \pktId -> case s Vector.!? (fromIntegral pktId) of
+  Just (SuchThat (desc :: PacketDescriptor PacketHandler p)) -> do
     theP <- deserialize @p
     return $ ambiguate $ DescribedPacket desc theP
   Nothing -> error $ "No parser for that packet (Id = " <> show pktId <> ")"
 
 -- Takes an effect to decide which parser to use once the packet arrives, and returns the parsed packet when it arrives
-getGenericPacket :: forall r. (Logs r,Networks r) => Eff r ParseSet -> Eff r (Maybe (SuchThat '[Serial] DescribedPacket))
+getGenericPacket :: forall r. (Logs r,Networks r) => Eff r (SupportedPackets PacketHandler) -> Eff r (Maybe (ForAny (DescribedPacket PacketHandler)))
 getGenericPacket ep = do
   -- Get the raw data (sans length)
   pkt <- removeCompression =<< getRawPacket

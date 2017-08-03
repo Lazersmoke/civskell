@@ -5,11 +5,9 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
 module Civskell (module Civskell.Data.Types, runServer) where
 
 import Control.Concurrent (forkIO,threadDelay)
-import Data.Functor.Identity
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import Data.Semigroup
@@ -32,7 +30,6 @@ import Civskell.Tech.Network
 import qualified Civskell.Block.Stone as Stone
 import qualified Civskell.Window as Window
 import qualified Civskell.Packet.Clientbound as Client
-import qualified Civskell.Packet.Serverbound as Server
 
 -- Top level entry point to the server. Drops us from IO into a Configured Eff
 runServer :: Configuration -> IO ()
@@ -56,7 +53,7 @@ testInitWorld = initWorld {chunks = Map.fromList [(ChunkCoord (cx,cy,cz),example
 
 -- Create a new player and jump into their player thread. Default player information is given here
 -- We need the TQueue here to be the same one that is running in the sending thread
-initPlayer :: (SendsPackets r, PerformsIO r, HasWorld r, Logs r) => TQueue (ForAny OutboundPacket) -> Eff (Player ': r) a -> Eff r a
+initPlayer :: (SendsPackets r, PerformsIO r, HasWorld r, Logs r) => TQueue (ForAny (DescribedPacket PacketSerializer)) -> Eff (Player ': r) a -> Eff r a
 initPlayer pq e = do
   t <- send (newTVarIO playerData)
   runPlayer t e
@@ -107,7 +104,7 @@ keepAliveThread i = do
   -- Wait 2 seconds
   send (threadDelay 2000000)
   -- Send everyone a keep alive packet
-  broadcastPacket (Client.KeepAlive i)
+  broadcastPacket Client.keepAlive (Client.KeepAlive i)
   logLevel VerboseLog "Broadcasting Keepalives"
   -- Do it again with the next keep alive id
   keepAliveThread (succ i)
@@ -145,34 +142,29 @@ connLoop sock = do
   connLoop sock
 
 -- TODO: remove PerformsIO constraint in favor of special STM effects or something
-flushPackets :: (Logs r,SendsPackets r,PerformsIO r) => TQueue (ForAny OutboundPacket) -> Eff r ()
-flushPackets q = send (atomically $ readTQueue q) >>= sendAnyPacket >> flushPackets q
+flushPackets :: (Logs r,SendsPackets r,PerformsIO r) => TQueue (ForAny (DescribedPacket PacketSerializer)) -> Eff r ()
+flushPackets q = send (atomically $ readTQueue q) >>= (\(SuchThat (DescribedPacket d p)) -> sendPacket d p) >> flushPackets q
 
 -- Get packet -> Spawn thread -> Repeat loop for players
 packetLoop :: (Configured r,PerformsIO r,HasPlayer r,Logs r,Networks r,HasWorld r) => Eff r ()
 packetLoop = do
   -- TODO: Fork new thread on every packet
   -- Block until a packet arrives, then deal with it
-  getGenericPacket @HandledPacket getParser >>= \case
+  getGenericPacket getPacketParsers >>= \case
     Nothing -> loge "Failed to parse incoming packet"
-    -- If you are chasing a bug and you think it may be caused by the one-liner below, you are probably right.
-    -- You can't substitute `onPacket q` for `op` except using the let binding as shown below. The type gods
-    -- will become angry and smite you where you stand. TODO: investigate appeasing the type gods by enabling/
-    -- disabling the monomorphism restriction
-    Just (SuchThat (Identity (q :: qt))) -> if canPokePacketState @qt
-      -- Serial mode
-      then runPacketing $ onPacket q
-      -- Parallel mode
-      else do
-        let op = onPacket q
-        send . (>> pure ()) . forkIO =<< (runM <$>) . forkConfig =<< forkLogger =<< forkNetwork =<< forkWorld =<< (runPacketing <$> forkPlayer op)
+    Just (SuchThat (DescribedPacket pktDesc (q :: qt))) -> case packetThreadingMode (packetHandler pktDesc) of
+      -- Invariant: If a packet handler is capable of changing the ServeState,
+      -- it must also be marked as SerialThreading. Otherwise, it might get a
+      -- forked thread, and we get a packet from the new ServerState before the
+      -- original packet finishes processing and updating the ServerState.
+      SerialThreading -> runPacketing $ (onPacket . packetHandler $ pktDesc) q
+      ParThreading -> send . (>> pure ()) . forkIO =<< (runM <$>) . forkConfig =<< forkLogger =<< forkNetwork =<< forkWorld =<< (runPacketing <$> forkPlayer ((onPacket . packetHandler $ pktDesc) q))
   packetLoop
   where
     -- This is an *action* to decide what parser to use. It needs to be like this because
     -- the player could change states *while we are waiting* for the next packet to arrive.
     -- This design ensures that the correct parser is always used.
-    getParser = flip fmap (playerState <$> getPlayer) $ \case
-      Handshaking -> Server.parseHandshakePacket
-      LoggingIn -> Server.parseLoginPacket
-      Status -> Server.parseStatusPacket
-      Playing -> Server.parsePlayPacket
+    getPacketParsers = do
+      ss <- playerState <$> getPlayer
+      getPackets <- packetsForState <$> ask
+      pure (getPackets ss)
