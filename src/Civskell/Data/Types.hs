@@ -26,7 +26,7 @@ module Civskell.Data.Types
   -- Constants
   (airChunk,allCoords,legacyHandshakePingConstant,legacyHandshakePongConstant
   -- Helper functions
-  ,blockInChunk,blockToChunk,blockToRelative,blockOnSide,showPacket,jsonyText,withLength,withListLength,indentedHex,comb,showText,moveVec
+  ,blockInChunk,blockToChunk,blockToRelative,blockOnSide,formatPacket,showPacket,jsonyText,withLength,withListLength,indentedHex,comb,showText,moveVec
   -- Type synonyms
   ,EncryptionCouplet,PerformsIO,Short,LegacyString
   -- Blocks
@@ -65,7 +65,7 @@ module Civskell.Data.Types
   ,OutboundPacketDescriptor
   ,PacketSerializer(..),defaultSerializer
   ,InboundPacketDescriptor
-  ,CanHandlePackets,PacketHandler(..),defaultHandler
+  ,CanHandlePackets,PacketHandler(..)
   ,ThreadingMode(..)
   ,SupportedPackets
   -- Configuration
@@ -521,7 +521,7 @@ instance Serial Hand where
   deserialize = flip fmap (deserialize @VarInt) $ \case
     0 -> MainHand
     1 -> OffHand
-    _ -> undefined
+    x -> error $ "deserialize @Hand: Got (VarInt) " <> show x
 
 data BlockFace = Bottom | Top | SideFace CardinalDirection deriving Show
 
@@ -594,7 +594,7 @@ instance Serial EntityInteraction where
     0 -> Interact <$> deserialize @Hand
     1 -> pure Attack
     2 -> InteractAt <$> deserialize @(Float,Float,Float) <*> deserialize @Hand
-    _ -> undefined
+    x -> error $ "deserialize @EntityInteraction: Got (VarInt) " <> show x
 
 data AsType = AsBlock | AsItem
 
@@ -680,7 +680,7 @@ instance Serial PlayerDigAction where
     4 -> pure (DropItem False)
     5 -> pure ShootArrowOrFinishEating
     6 -> pure SwapHands
-    _ -> undefined
+    x -> error $ "deserialize @PlayerDigAction: Got (VarInt) " <> show x
 
 -- Used in Server.EntityAction
 data PlayerEntityAction = Sneak Bool | Sprint Bool | HorseJumpStart VarInt | HorseJumpStop | LeaveBed | ElytraFly | HorseInventory
@@ -706,7 +706,7 @@ instance Serial PlayerEntityAction where
     6 -> pure HorseJumpStop
     7 -> pure HorseInventory
     8 -> pure ElytraFly
-    _ -> undefined
+    x -> error $ "deserialize @PlayerEntityAction: Got (VarInt) " <> show x
 
 -- Used in Server.ClickWindow
 data InventoryClickMode = NormalClick Bool | ShiftClick Bool | NumberKey Word8 | MiddleClick | ItemDropOut Bool | PaintingMode Word8 | DoubleClick deriving Show
@@ -1090,13 +1090,6 @@ data PacketHandler p = PacketHandler
   {packetThreadingMode :: ThreadingMode
   ,onPacket :: forall r. CanHandlePackets r => p -> Eff r ()
   ,deserializePacket :: forall m. MonadGet m => m p
-  }
-
-defaultHandler :: Serial p => PacketHandler p
-defaultHandler = PacketHandler
-  {packetThreadingMode = ParThreading
-  ,onPacket = const (pure ())
-  ,deserializePacket = deserialize
   }
 
 type SupportedPackets h = Vector.Vector (SuchThat '[Serial] (PacketDescriptor h))

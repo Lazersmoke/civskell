@@ -101,10 +101,10 @@ startListening = do
 -- Send a keep alive packet to every player every 2 seconds
 keepAliveThread :: (Logs r, HasWorld r,PerformsIO r) => KeepAliveId -> Eff r ()
 keepAliveThread i = do
-  -- Wait 2 seconds
-  send (threadDelay 2000000)
+  -- Wait 20 seconds
+  send (threadDelay 20000000)
   -- Send everyone a keep alive packet
-  broadcastPacket Client.keepAlive (Client.KeepAlive i)
+  broadcastPacket (Client.keepAlive 0x1F) (Client.KeepAlive i)
   logLevel VerboseLog "Broadcasting Keepalives"
   -- Do it again with the next keep alive id
   keepAliveThread (succ i)

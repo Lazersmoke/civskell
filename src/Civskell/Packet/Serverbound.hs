@@ -1,20 +1,18 @@
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ExistentialQuantification #-}
 module Civskell.Packet.Serverbound where
 
 import Data.Int
-import Control.Eff.Reader (ask)
 import Control.Eff
-import Control.Concurrent.STM
-import Data.List (intercalate)
-import Data.Functor.Identity
 import Data.Word
 import Data.Bytes.Put
 import Data.Bytes.Get
@@ -22,61 +20,40 @@ import Data.Bytes.Serial
 import Data.Semigroup
 import qualified Data.Text as T
 import GHC.Generics
-import qualified Data.Map as Map
 import qualified Data.ByteString as BS
 import Crypto.Hash (hash,Digest,SHA1)
 import Numeric (showHex)
-import Control.Monad
-import Data.SuchThat
-import qualified Data.Set as Set
 
 import Civskell.Data.Types hiding (Player)
-import Civskell.Tech.Network
-import Civskell.Tech.Encrypt
-import qualified Civskell.Entity as Entity
-import qualified Civskell.Window as Window
---import qualified Civskell.Tile as Tile
-import qualified Civskell.Block.Stone as Stone
-import Civskell.Data.Player
-import Civskell.Data.Logging
-import Civskell.Data.World
-import qualified Civskell.Packet.Clientbound as Client
+
+defaultDescriptor :: Serial p => ServerState -> T.Text -> (p -> [(T.Text,T.Text)]) -> (forall r. CanHandlePackets r => p -> Eff r ()) -> InboundPacketDescriptor p
+defaultDescriptor ss name pret handle = PacketDescriptor
+  {packetState = ss 
+  ,packetName = name 
+  ,packetPretty = pret
+  ,packetHandler = PacketHandler 
+    {packetThreadingMode = ParThreading
+    ,onPacket = handle -- \p -> loge $ "Unhandled Packet: " <> formatPacket name (pret p)
+    ,deserializePacket = deserialize
+    }
+  }
 
 ---------------
 -- Handshake --
 ---------------
 
 data Handshake = Handshake VarInt ProtocolString Word16 VarInt deriving (Generic,Serial)
-handshake :: InboundPacketDescriptor Handshake
-handshake = PacketDescriptor
-  {packetState = Handshaking
-  ,packetName = "Handshake"
-  ,packetPretty = \(Handshake protocol addr port newstate) ->
+handshake :: (forall r. CanHandlePackets r => Handshake -> Eff r ()) -> InboundPacketDescriptor Handshake
+handshake = defaultDescriptor Handshaking "Handshake" $ \(Handshake protocol addr port newstate) ->
     [("Protocol Version",showText protocol)
     ,("Server Address",T.pack (unProtocolString addr) <> ":" <> showText port)
     ,("Requesting change to",case newstate of {1 -> "Status"; 2 -> "Login"; _ -> "Invalid"})
     ]  -- Normal handshake recieved
-  ,packetHandler = defaultHandler {onPacket = \(Handshake protocol _addr _port newstate) -> protocolVersion <$> ask >>= \prot -> if fromIntegral protocol == prot
-    -- They are using the correct protocol version, so continue as they request
-    -- TODO: Enum for newstate
-    then case newstate of
-      1 -> setPlayerState Status
-      2 -> setPlayerState LoggingIn
-      _ -> logp "Invalid newstate"
-    -- They are using the incorrect protocol version. Disconnect packet will probably work even if they have a different version.
-    else sendPacket Client.disconnect (Client.Disconnect (jsonyText $ "Unsupported protocol version. Please use " <> show prot))
-    }
-  }
+
 
 data LegacyHandshake = LegacyHandshake Word8 LegacyString Int32
-legacyHandshake :: InboundPacketDescriptor LegacyHandshake
-legacyHandshake = PacketDescriptor
-  {packetState = Handshaking
-  ,packetName = "LegacyHandshake"
-  ,packetPretty = \(LegacyHandshake _ _ _) -> []  -- Legacy response
-  ,packetHandler = defaultHandler {onPacket = \(LegacyHandshake _ _ _) -> iSolemnlySwearIHaveNoIdeaWhatImDoing . runPutS . serialize $ Client.LegacyHandshakePong
-    }
-  }
+legacyHandshake :: (forall r. CanHandlePackets r => LegacyHandshake -> Eff r ()) -> InboundPacketDescriptor LegacyHandshake
+legacyHandshake = defaultDescriptor Handshaking "LegacyHandshake" $ \(LegacyHandshake _ _ _) -> []  -- Legacy response
 
 instance Serial LegacyHandshake where
   serialize (LegacyHandshake proto hostname port) = putByteString legacyHandshakePingConstant *> serialize @Int16 (fromIntegral $ 7 + BS.length hostname) *> putWord8 proto *> serialize hostname *> serialize @Int32 port
@@ -92,84 +69,31 @@ instance Serial LegacyHandshake where
 ----------
 
 data TPConfirm = TPConfirm VarInt deriving (Generic,Serial)
-tpConfirm :: InboundPacketDescriptor TPConfirm
-tpConfirm = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "TPConfirm"
-  ,packetPretty = \(TPConfirm i) -> [("Teleport Id",showText i)]
-
-  -- Check the tid presented against all the tid's we have stored
-  ,packetHandler = defaultHandler {onPacket = \(TPConfirm tid) -> clearTeleport tid >>= \case
-    -- If it's valid, say so
-    True -> logp $ "Client confirms teleport with id: " <> showText tid
-    -- If it's not, complain
-    False -> loge $ "Client provided bad teleport id: " <> showText tid
-    }
-  }
+tpConfirm :: (forall r. CanHandlePackets r => TPConfirm -> Eff r ()) -> InboundPacketDescriptor TPConfirm
+tpConfirm = defaultDescriptor Playing "TPConfirm" $ \(TPConfirm i) -> [("Teleport Id",showText i)]
 
 --Legacy buggy type
 --data PrepareCraftingGrid = WindowId Short TransactionId (ProtocolList Short (Slot,Word8,Word8)) (ProtocolList Short (Slot,Word8,Word8)) deriving (Generic,Serial)
-data PrepareCraftingGrid = WindowId VarInt Bool deriving (Generic,Serial)
-prepareCraftingGrid :: InboundPacketDescriptor PrepareCraftingGrid
-prepareCraftingGrid = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "PrepareCraftingGrid"
-  ,packetPretty = const []
-  ,packetHandler = defaultHandler
-  }
+data CraftRecipeRequest = WindowId VarInt Bool deriving (Generic,Serial)
+craftRecipeRequest :: (forall r. CanHandlePackets r => CraftRecipeRequest -> Eff r ()) -> InboundPacketDescriptor CraftRecipeRequest
+craftRecipeRequest = defaultDescriptor Playing "CraftRecipeRequest" $ const []
 
 data TabComplete = TabComplete ProtocolString Bool (ProtocolOptional BlockCoord) deriving (Generic,Serial)
-tabComplete :: InboundPacketDescriptor TabComplete
-tabComplete = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "TabComplete"
-  ,packetPretty = \(TabComplete textSoFar forceCommand (ProtocolOptional mBlockLookingAt)) -> [("Text so far",showText textSoFar),("Force command",showText forceCommand)] ++ (case mBlockLookingAt of {Just b -> [("Looking At",showText b)]; Nothing -> []})
-  ,packetHandler = defaultHandler {onPacket = \p -> logp $ showPacket tabComplete p}
-  }
+tabComplete :: (forall r. CanHandlePackets r => TabComplete -> Eff r ()) -> InboundPacketDescriptor TabComplete
+tabComplete = defaultDescriptor Playing "TabComplete" $ \(TabComplete textSoFar forceCommand (ProtocolOptional mBlockLookingAt)) -> [("Text so far",showText textSoFar),("Force command",showText forceCommand)] ++ (case mBlockLookingAt of {Just b -> [("Looking At",showText b)]; Nothing -> []})
 
 data ChatMessage = ChatMessage ProtocolString deriving (Generic,Serial)
-chatMessage  :: InboundPacketDescriptor ChatMessage 
-chatMessage  = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "ChatMessage "
-  ,packetPretty = \(ChatMessage msg) -> [("Message",T.pack $ unProtocolString msg)]
-  ,packetHandler = defaultHandler {onPacket = \(ChatMessage (ProtocolString msg)) -> case msg of
-    "/gamemode 1" -> setGamemode Creative
-    "/gamemode 0" -> setGamemode Survival
-    "chunks" -> forM_ [0..48] $ \x -> sendPacket Client.chunkData =<< colPacket ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
-    "creeper" -> summonMob (Entity.Creeper Entity.defaultInsentient 0 False False)
-    "/testchest" -> do
-      let items = Map.fromList [{-(5,slot Item.Stick 3)-}]
-      i <- send (WorldSTM $ newTVar items)
-      _ <- openWindowWithItems (Window.Chest i) (jsonyText "Test Chest") i
-      pure ()
-    _ -> do
-      broadcastPacket Client.chatMessage (Client.ChatMessage (jsonyText msg) 0)
-      name <- clientUsername <$> getPlayer
-      logt (T.pack name) (T.pack msg)
-    }
-  }
+chatMessage :: (forall r. CanHandlePackets r => ChatMessage  -> Eff r ()) -> InboundPacketDescriptor ChatMessage 
+chatMessage = defaultDescriptor Playing "ChatMessage " $ \(ChatMessage msg) -> [("Message",T.pack $ unProtocolString msg)]
 
 data ClientStatus = ClientStatus ClientStatusAction deriving (Generic,Serial)
-clientStatus :: InboundPacketDescriptor ClientStatus
-clientStatus = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "ClientStatus"
-  ,packetPretty = \(ClientStatus status) -> [("Status",showText status)]
-  ,packetHandler = defaultHandler {onPacket = \(ClientStatus status) -> case status of
-    PerformRespawn -> logp "Client wants to perform respawn"
-    RequestStats -> logp "Client requests stats"
-    OpenInventory -> logp "Client is opening their inventory"
-    }
-  }
+clientStatus :: (forall r. CanHandlePackets r => ClientStatus -> Eff r ()) -> InboundPacketDescriptor ClientStatus
+clientStatus = defaultDescriptor Playing "ClientStatus" $ \(ClientStatus status) -> [("Status",showText status)]
 
 -- TODO: type synonyms or newtypes or whatever
 data ClientSettings = ClientSettings ProtocolString Word8 VarInt Bool Word8 VarInt deriving (Generic,Serial)
-clientSettings :: InboundPacketDescriptor ClientSettings
-clientSettings = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "ClientSettings"
-  ,packetPretty = \(ClientSettings (ProtocolString loc) viewDist chatMode chatColors skin hand) ->
+clientSettings :: (forall r. CanHandlePackets r => ClientSettings -> Eff r ()) -> InboundPacketDescriptor ClientSettings
+clientSettings = defaultDescriptor Playing "ClientSettings" $ \(ClientSettings (ProtocolString loc) viewDist chatMode chatColors skin hand) ->
     [("Locale",T.pack loc)
     ,("View Distance",showText viewDist)
     ,("Chat Mode",showText chatMode)
@@ -178,59 +102,26 @@ clientSettings = PacketDescriptor
     ,("Main Hand",showText hand)
     ]
 
-  -- Teleport the client when they send this packet because reasons
-  -- 0x00 means all absolute (It's a relativity flag bitfield)
-  ,packetHandler = defaultHandler {onPacket = \(ClientSettings _loc _viewDist _chatMode _chatColors _skin _hand) -> pendTeleport (1.0,130.0,1.0) (0.0,0.0) 0x00
-    }
-  }
-
 data ConfirmTransaction = ConfirmTransaction WindowId TransactionId Bool deriving (Generic,Serial)
-confirmTransaction :: InboundPacketDescriptor ConfirmTransaction
-confirmTransaction = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "ConfirmTransaction"
-  ,packetPretty = \(ConfirmTransaction wid transId acc) -> [("Window Id",showText wid),("Transaction Id",showText transId),("Accepted",if acc then "Yes" else "No")]
-  ,packetHandler = defaultHandler {onPacket = \(ConfirmTransaction wid transId _acc) -> do
-    apologized <- Set.member (wid,transId) . failedTransactions <$> getPlayer
-    if apologized
-      then do
-        logg "Client apologized for bad transaction"
-        overPlayer $ \p -> p {failedTransactions = Set.delete (wid,transId) $ failedTransactions p}
-      else loge "Client apologized for non-existant transaction"
-    }
-  }
+confirmTransaction :: (forall r. CanHandlePackets r => ConfirmTransaction -> Eff r ()) -> InboundPacketDescriptor ConfirmTransaction
+confirmTransaction = defaultDescriptor Playing "ConfirmTransaction" $ \(ConfirmTransaction wid transId acc) -> [("Window Id",showText wid),("Transaction Id",showText transId),("Accepted",if acc then "Yes" else "No")]
+
 
 data EnchantItem = EnchantItem WindowId Word8 deriving (Generic,Serial)
-enchantItem :: InboundPacketDescriptor EnchantItem
-enchantItem = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "EnchantItem"
-  ,packetPretty = \(EnchantItem _ _) -> []
-  ,packetHandler = defaultHandler
-  }
+enchantItem :: (forall r. CanHandlePackets r => EnchantItem -> Eff r ()) -> InboundPacketDescriptor EnchantItem
+enchantItem = defaultDescriptor Playing "EnchantItem" $ \(EnchantItem wid ench) -> [("Window Id",showText wid),("Enchantment Selected",showText ench)]
 
 -- Slot Number
 -- THIS SERIAL INSTANCE IS INCORRECT:
 -- Button is in InventoryClickMode but should be before the transaction Id
 data ClickWindow = ClickWindow WindowId Short TransactionId InventoryClickMode Slot
 instance Serial ClickWindow where
-  serialize = undefined
-  deserialize = undefined
-clickWindow :: InboundPacketDescriptor ClickWindow
-clickWindow = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "ClickWindow"
-  ,packetPretty = \(ClickWindow wid slotNum transId invMode item) -> [("Window Id",showText wid),("Slot Number",showText slotNum),("Transaction Id",showText transId),("Inventory Mode",showText invMode),("Subject Item",showText item)]
+  serialize = error "Unimplemented: serialize @Server.ClickWindow"
+  deserialize = error "Unimplemented: deserialize @Server.ClickWindow"
+clickWindow :: (forall r. CanHandlePackets r => ClickWindow -> Eff r ()) -> InboundPacketDescriptor ClickWindow
+clickWindow = defaultDescriptor Playing "ClickWindow" $ \(ClickWindow wid slotNum transId invMode item) -> [("Window Id",showText wid),("Slot Number",showText slotNum),("Transaction Id",showText transId),("Inventory Mode",showText invMode),("Subject Item",showText item)]
 
-  -- This function needs to change items in the window Id it is given
-  ,packetHandler = defaultHandler {onPacket = \(ClickWindow wid slotNum transId mode _clientProvidedSlot) -> do
-    logp $ "Player clicked window " <> showText wid <> " at slot number " <> showText slotNum
-    failing <- not . Set.null . failedTransactions <$> getPlayer
-    (SuchThat (Identity (w :: wt))) <- flip (Map.!) wid . windows <$> getPlayer
-    if failing then loge "Failed, but client is still sending clicks" else onWindowClick @wt w wid slotNum transId mode >>= sendPacket Client.confirmTransaction . Client.ConfirmTransaction wid transId
-    }
-  }
-  {- This code kept as reference for when we write `instance Serial ClickWindow`
+ {- This code kept as reference for when we write `instance Serial ClickWindow`
    -
    - parsePacket = do
     specificVarInt 0x07 <?> "Packet Id 0x07"
@@ -252,183 +143,69 @@ clickWindow = PacketDescriptor
   -}
 
 data CloseWindow = CloseWindow WindowId deriving (Generic,Serial)
-closeWindow :: InboundPacketDescriptor CloseWindow
-closeWindow = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "CloseWindow"
-  ,packetPretty = \(CloseWindow wid) -> [("Window Id", showText wid)]
-  ,packetHandler = defaultHandler {onPacket = \(CloseWindow w) -> do
-    logp $ "Player is closing a window with id: " <> showText w
-    case w of
-      0 -> pure ()
-      wid -> overPlayer $ \p -> p {windows = Map.delete wid (windows p)}
-    }
-  }
+closeWindow :: (forall r. CanHandlePackets r => CloseWindow -> Eff r ()) -> InboundPacketDescriptor CloseWindow
+closeWindow = defaultDescriptor Playing "CloseWindow" $ \(CloseWindow wid) -> [("Window Id", showText wid)]
 
 data PluginMessage = PluginMessage ProtocolString BS.ByteString
-pluginMessage :: InboundPacketDescriptor PluginMessage
-pluginMessage = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "PluginMessage"
-  ,packetPretty = \case
+pluginMessage :: (forall r. CanHandlePackets r => PluginMessage -> Eff r ()) -> InboundPacketDescriptor PluginMessage
+pluginMessage = defaultDescriptor Playing "PluginMessage" $ \case
     (PluginMessage "MC|Brand" cliBrand) -> [("Client Brand",showText (BS.tail cliBrand))]
     (PluginMessage chan bs) -> [("Channel",showText chan),("Payload",showText bs)]
-
-  -- BS.tail removes the length prefixing
-  ,packetHandler = defaultHandler {onPacket = \case
-    (PluginMessage "MC|Brand" cliBrand) -> setBrand $ show (BS.tail cliBrand)
-    p -> logp $ "Unsupported Plugin Message: " <> showPacket pluginMessage p
-    }
-  }
-
 instance Serial PluginMessage where
   serialize (PluginMessage ch dat) = serialize ch *> putByteString dat
   deserialize = PluginMessage <$> deserialize @ProtocolString <*> (getByteString . fromIntegral =<< remaining)
 
 data UseEntity = UseEntity EntityId EntityInteraction deriving (Generic,Serial)
-useEntity :: InboundPacketDescriptor UseEntity
-useEntity = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "UseEntity"
-  ,packetPretty = \(UseEntity targetEID action) -> [("Target",showText targetEID),("Action",showText action)]
-  ,packetHandler = defaultHandler {onPacket = \(UseEntity targetEID action) -> do
-    (SuchThat (Identity (_ :: m))) <- getEntity targetEID
-    logg $ entityName @m <> " was " <> showText action <> "(ed)"
-    }
-  }
+useEntity :: (forall r. CanHandlePackets r => UseEntity -> Eff r ()) -> InboundPacketDescriptor UseEntity
+useEntity = defaultDescriptor Playing "UseEntity" $ \(UseEntity targetEID action) -> [("Target",showText targetEID),("Action",showText action)]
 
 data KeepAlive = KeepAlive KeepAliveId deriving (Generic,Serial)
-keepAlive :: InboundPacketDescriptor KeepAlive
-keepAlive = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "KeepAlive"
-  ,packetPretty = \(KeepAlive i) -> [("Keep Alive Id",showText i)]
-  ,packetHandler = defaultHandler {onPacket = \(KeepAlive kid) -> logp $ "Player sent keep alive pong with id: " <> showText kid
-    }
-  }
+keepAlive :: (forall r. CanHandlePackets r => KeepAlive -> Eff r ()) -> InboundPacketDescriptor KeepAlive
+keepAlive = defaultDescriptor Playing "KeepAlive" $ \(KeepAlive i) -> [("Keep Alive Id",showText i)]
 
 data Player = Player Bool deriving (Generic,Serial)
-player :: InboundPacketDescriptor Player
-player = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "Player"
-  ,packetPretty = \(Player grounded) -> [("On Ground",showText grounded)]
-  ,packetHandler = defaultHandler {onPacket = \(Player _grounded) -> pure ()
-    }
-  }
+player :: (forall r. CanHandlePackets r => Player -> Eff r ()) -> InboundPacketDescriptor Player
+player = defaultDescriptor Playing "Player" $ \(Player grounded) -> [("On Ground",showText grounded)]
 
 data PlayerPosition = PlayerPosition (Double,Double,Double) Bool deriving (Generic,Serial)
-playerPosition :: InboundPacketDescriptor PlayerPosition
-playerPosition = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "PlayerPosition"
-  ,packetPretty = \(PlayerPosition (x,y,z) grounded) -> [("Positon",showText (x,y,z)),("On Ground",showText grounded)]
-  ,packetHandler = defaultHandler {onPacket = \(PlayerPosition (x,y,z) _grounded) -> setPlayerPos (x,y,z)
-    }
-  }
+playerPosition :: (forall r. CanHandlePackets r => PlayerPosition -> Eff r ()) -> InboundPacketDescriptor PlayerPosition
+playerPosition = defaultDescriptor Playing "PlayerPosition" $ \(PlayerPosition (x,y,z) grounded) -> [("Positon",showText (x,y,z)),("On Ground",showText grounded)]
 
 data PlayerPositionAndLook = PlayerPositionAndLook (Double,Double,Double) (Float,Float) Bool deriving (Generic,Serial)
-playerPositionAndLook :: InboundPacketDescriptor PlayerPositionAndLook
-playerPositionAndLook = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "PlayerPositionAndLook"
-  ,packetPretty = \(PlayerPositionAndLook (x,y,z) (yaw,pitch) grounded) -> [("Positon",showText (x,y,z)),("Looking",showText (yaw,pitch)),("On Ground",showText grounded)]
-  ,packetHandler = defaultHandler {onPacket = \(PlayerPositionAndLook (x,y,z) (yaw,pitch) _grounded) -> do
-    setPlayerPos (x,y,z)
-    setPlayerViewAngle (yaw,pitch)
-    }
-  }
+playerPositionAndLook :: (forall r. CanHandlePackets r => PlayerPositionAndLook -> Eff r ()) -> InboundPacketDescriptor PlayerPositionAndLook
+playerPositionAndLook = defaultDescriptor Playing "PlayerPositionAndLook" $ \(PlayerPositionAndLook (x,y,z) (yaw,pitch) grounded) -> [("Positon",showText (x,y,z)),("Looking",showText (yaw,pitch)),("On Ground",showText grounded)]
 
 data PlayerLook = PlayerLook (Float,Float) Bool deriving (Generic,Serial)
-playerLook :: InboundPacketDescriptor PlayerLook
-playerLook = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "PlayerLook"
-  ,packetPretty = \(PlayerLook  (yaw,pitch) grounded) -> [("Looking",showText (yaw,pitch)),("On Ground",showText grounded)]
-  ,packetHandler = defaultHandler {onPacket = \(PlayerLook (y,p) _grounded) -> setPlayerViewAngle (y,p)
-    }
-  }
+playerLook :: (forall r. CanHandlePackets r => PlayerLook -> Eff r ()) -> InboundPacketDescriptor PlayerLook
+playerLook = defaultDescriptor Playing "PlayerLook" $ \(PlayerLook  (yaw,pitch) grounded) -> [("Looking",showText (yaw,pitch)),("On Ground",showText grounded)]
 
 data VehicleMove = VehicleMove (Double,Double,Double) (Float,Float) deriving (Generic,Serial)
-vehicleMove :: InboundPacketDescriptor VehicleMove
-vehicleMove = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "VehicleMove"
-  ,packetPretty = \(VehicleMove _ _) -> []
-  ,packetHandler = defaultHandler
-  }
+vehicleMove :: (forall r. CanHandlePackets r => VehicleMove -> Eff r ()) -> InboundPacketDescriptor VehicleMove
+vehicleMove = defaultDescriptor Playing "VehicleMove" $ \(VehicleMove _ _) -> []
 
 data SteerBoat = SteerBoat Bool Bool deriving (Generic,Serial)
-steerBoat :: InboundPacketDescriptor SteerBoat
-steerBoat = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "SteerBoat"
-  ,packetPretty = \(SteerBoat _ _) -> []
-  ,packetHandler = defaultHandler
-  }
+steerBoat :: (forall r. CanHandlePackets r => SteerBoat -> Eff r ()) -> InboundPacketDescriptor SteerBoat
+steerBoat = defaultDescriptor Playing "SteerBoat" $ \(SteerBoat _ _) -> []
 
 data PlayerAbilities = PlayerAbilities AbilityFlags Float Float deriving (Generic,Serial)
-playerAbilities :: InboundPacketDescriptor PlayerAbilities
-playerAbilities = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "PlayerAbilities"
-  ,packetPretty = \(PlayerAbilities (AbilityFlags i f af c) flySpeed fovMod) -> u i "Invulnerable" <> u f "Flying" <> u af "Allow Flying" <> u c "Creative" <> [("Flying Speed",showText flySpeed),("FOV Modifier",showText fovMod)]
-  -- Only sent when flight is toggled
-  ,packetHandler = defaultHandler {onPacket = \(PlayerAbilities (AbilityFlags _i f _af _c) _flySpeed _fovMod) -> if f then setMoveMode Flying else setMoveMode Walking
-    }
-  }
+playerAbilities :: (forall r. CanHandlePackets r => PlayerAbilities -> Eff r ()) -> InboundPacketDescriptor PlayerAbilities
+playerAbilities = defaultDescriptor Playing "PlayerAbilities" $ \(PlayerAbilities (AbilityFlags i f af c) flySpeed fovMod) -> u i "Invulnerable" <> u f "Flying" <> u af "Allow Flying" <> u c "Creative" <> [("Flying Speed",showText flySpeed),("FOV Modifier",showText fovMod)]
   where
     u b s = if b then [(s,"")] else []
 
 data PlayerDigging = PlayerDigging PlayerDigAction deriving (Generic,Serial)
-playerDigging :: InboundPacketDescriptor PlayerDigging
-playerDigging = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "PlayerDigging"
-  ,packetPretty = \(PlayerDigging action) -> case action of
+playerDigging :: (forall r. CanHandlePackets r => PlayerDigging -> Eff r ()) -> InboundPacketDescriptor PlayerDigging
+playerDigging = defaultDescriptor Playing "PlayerDigging" $ \(PlayerDigging action) -> case action of
     StartDig bc side -> [("Action","Start Digging"),("Block",showText bc),("Side",showText side)]
     StopDig bc side -> [("Action","Stop Digging"),("Block",showText bc),("Side",showText side)]
     EndDig bc side -> [("Action","Finished Digging"),("Block",showText bc),("Side",showText side)]
     DropItem isStack -> [("Action","Drop " <> if isStack then "Stack" else "Item")]
     ShootArrowOrFinishEating -> [("Action","inb4 Minecraft")]
     SwapHands -> [("Action","Swap items in hands")]
-  ,packetHandler = defaultHandler {onPacket = \p@(PlayerDigging action) -> case action of
-    StartDig block _side -> do
-      logp $ "Started digging block: " <> showText block
-      -- Instant Dig
-      removeBlock block
-    SwapHands -> do
-      -- Get the current items
-      heldSlot <- holdingSlot <$> getPlayer
-      heldItem <- getInventorySlot heldSlot
-      -- 45 is the off hand slot
-      offItem <- getInventorySlot 45
-      -- Swap them
-      setInventorySlot heldSlot offItem
-      setInventorySlot 45 heldItem
-    -- No dropping from offhand
-    DropItem isStack -> do
-      heldSlot <- holdingSlot <$> getPlayer
-      heldItem <- getInventorySlot heldSlot
-      -- Drop the entire stack, or at most one item
-      let (dropped,newHeld) = splitStack (if isStack then 64 else 1) heldItem
-      logp $ "Dropping: " <> showText dropped
-      setInventorySlot heldSlot newHeld
-      -- This needs to be qualified because the `playerPosition` packet
-      -- descriptor is imported qualified everywhere else, but is in our
-      -- local namespace in this module
-      plaLoc <- Civskell.Data.Types.playerPosition <$> getPlayer
-      summonObject (Entity.Item (Entity.BaseEntity (EntityLocation plaLoc (0,0)) (EntityVelocity (0,0,0)) 0x00 300 "" False False False) ((\(Slot (Just x)) -> x) dropped))
-    _ -> loge $ "Unhandled Player Dig Action: " <> showPacket playerDigging p
-    }
-  }
 
 data EntityAction = EntityAction PlayerId PlayerEntityAction deriving (Generic,Serial)
-entityAction :: InboundPacketDescriptor EntityAction
-entityAction = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "EntityAction"
-  ,packetPretty = \(EntityAction eid fire) -> (("Entity Id",showText eid):) $ let u b = if b then id else ("Stop "<>) in case fire of
+entityAction :: (forall r. CanHandlePackets r => EntityAction -> Eff r ()) -> InboundPacketDescriptor EntityAction
+entityAction = defaultDescriptor Playing "EntityAction" $ \(EntityAction eid fire) -> (("Entity Id",showText eid):) $ let u b = if b then id else ("Stop "<>) in case fire of
     Sneak b -> [("Action",u b "Sneak")]
     Sprint b -> [("Action",u b "Sprint")]
     HorseJumpStart s -> [("Action","Horse Jump"),("Horse Jump Strength",showText s)]
@@ -437,28 +214,9 @@ entityAction = PacketDescriptor
     HorseInventory -> [("Action","Open Horse Inventory")]
     ElytraFly -> [("Action","Elytra Fly")]
 
-  -- We know the eid because its us
-  ,packetHandler = defaultHandler {onPacket = \(EntityAction _eid action) -> case action of
-    Sneak True -> setMoveMode Sneaking
-    Sneak False -> setMoveMode Walking
-    Sprint True -> setMoveMode Sprinting
-    Sprint False -> setMoveMode Walking
-    HorseJumpStart _ -> logp "Jumping with horse"
-    HorseJumpStop -> logp "Stopped Jumping with horse"
-    LeaveBed -> pure ()
-    HorseInventory -> pure () -- Open window here?
-    ElytraFly -> pure () -- ?
-    }
-  }
-
 data SteerVehicle = SteerVehicle Float Float Word8 deriving (Generic,Serial)
-steerVehicle :: InboundPacketDescriptor SteerVehicle
-steerVehicle = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "SteerVehicle"
-  ,packetPretty = \(SteerVehicle _ _ _) -> []
-  ,packetHandler = defaultHandler
-  }
+steerVehicle :: (forall r. CanHandlePackets r => SteerVehicle -> Eff r ()) -> InboundPacketDescriptor SteerVehicle
+steerVehicle = defaultDescriptor Playing "SteerVehicle" $ \(SteerVehicle _ _ _) -> []
 
 data CraftingBookData = CraftingBookDisplayedRecipe Int32 | CraftingBookStatus Bool Bool
 instance Serial CraftingBookData where
@@ -468,22 +226,12 @@ instance Serial CraftingBookData where
     0 -> CraftingBookDisplayedRecipe <$> deserialize @Int32
     1 -> CraftingBookStatus <$> deserialize @Bool <*> deserialize @Bool
     x -> error $ "deserialize @CraftingBookData: Bad 'Type' indicator " <> show x
-craftingBookData :: InboundPacketDescriptor CraftingBookData
-craftingBookData = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "CraftingBookData"
-  ,packetPretty = const []
-  ,packetHandler = defaultHandler
-  }
+craftingBookData :: (forall r. CanHandlePackets r => CraftingBookData -> Eff r ()) -> InboundPacketDescriptor CraftingBookData
+craftingBookData = defaultDescriptor Playing "CraftingBookData" $ const []
 
 data ResourcePackStatus = ResourcePackStatus VarInt deriving (Generic,Serial)
-resourcePackStatus :: InboundPacketDescriptor ResourcePackStatus
-resourcePackStatus = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "ResourcePackStatus"
-  ,packetPretty = \(ResourcePackStatus _) -> []
-  ,packetHandler = defaultHandler
-  }
+resourcePackStatus :: (forall r. CanHandlePackets r => ResourcePackStatus -> Eff r ()) -> InboundPacketDescriptor ResourcePackStatus
+resourcePackStatus = defaultDescriptor Playing "ResourcePackStatus" $ \(ResourcePackStatus _) -> []
 
 -- Nothing means tab closed, Just a means tab a was opened
 data AdvancementTab = AdvancementTab (Maybe ProtocolString)
@@ -494,138 +242,44 @@ instance Serial AdvancementTab where
     0 -> AdvancementTab . Just <$> deserialize @ProtocolString
     1 -> pure (AdvancementTab Nothing)
     x -> error $ "deserialize @AdvancementTab: Bad 'Action' indicator " <> show x
-advancementTab :: InboundPacketDescriptor AdvancementTab
-advancementTab = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "AdvancementTab"
-  ,packetPretty = \_ -> []
-  ,packetHandler = defaultHandler
-  }
+advancementTab :: (forall r. CanHandlePackets r => AdvancementTab -> Eff r ()) -> InboundPacketDescriptor AdvancementTab
+advancementTab = defaultDescriptor Playing "AdvancementTab" $ \_ -> []
 
 data HeldItemChange = HeldItemChange Short deriving (Generic,Serial)
-heldItemChange :: InboundPacketDescriptor HeldItemChange
-heldItemChange = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "HeldItemChange"
-  ,packetPretty = \(HeldItemChange i) -> [("Slot",showText i)]
-
-  -- Update the slot they are holding in the player data
-  ,packetHandler = defaultHandler {onPacket = \(HeldItemChange slotNum) -> setHolding slotNum
-    }
-  }
+heldItemChange :: (forall r. CanHandlePackets r => HeldItemChange -> Eff r ()) -> InboundPacketDescriptor HeldItemChange
+heldItemChange = defaultDescriptor Playing "HeldItemChange" $ \(HeldItemChange i) -> [("Slot",showText i)]
 
 data CreativeInventoryAction = CreativeInventoryAction Short Slot deriving (Generic,Serial)
-creativeInventoryAction :: InboundPacketDescriptor CreativeInventoryAction
-creativeInventoryAction = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "CreativeInventoryAction"
-  ,packetPretty = \(CreativeInventoryAction slotNum item) -> [("Slot",showText slotNum),("New Item", showText item)]
-
-  -- Clients handle all the dirty details such that this is just a "set slot" packet
-  ,packetHandler = defaultHandler {onPacket = \(CreativeInventoryAction slotNum slotDat) -> do
-    logp $ "Player creatively set slot " <> showText slotNum <> " to {" <> showText slotDat <> "}"
-    -- TODO: This will echo back a SetSlot packet, add another way to access the effect inventory
-    -- Maybe that is ok? idk requires further testing to be sure
-    setInventorySlot slotNum slotDat
-    }
-  }
+creativeInventoryAction :: (forall r. CanHandlePackets r => CreativeInventoryAction -> Eff r ()) -> InboundPacketDescriptor CreativeInventoryAction
+creativeInventoryAction = defaultDescriptor Playing "CreativeInventoryAction" $ \(CreativeInventoryAction slotNum item) -> [("Slot",showText slotNum),("New Item", showText item)]
 
 data UpdateSign = UpdateSign BlockCoord (ProtocolString,ProtocolString,ProtocolString,ProtocolString) deriving (Generic,Serial)
-updateSign :: InboundPacketDescriptor UpdateSign
-updateSign = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "UpdateSign"
-  ,packetPretty = \(UpdateSign _ _) -> []
-  ,packetHandler = defaultHandler
-  }
+updateSign :: (forall r. CanHandlePackets r => UpdateSign -> Eff r ()) -> InboundPacketDescriptor UpdateSign
+updateSign = defaultDescriptor Playing "UpdateSign" $ \(UpdateSign _ _) -> []
 
 data Animation = Animation Hand deriving (Generic,Serial)
-animation :: InboundPacketDescriptor Animation
-animation = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "Animation"
-  ,packetPretty = \(Animation hand) -> [("Hand",showText hand)]
-  -- Don't do anything about the spammy animation packets
-  ,packetHandler = defaultHandler {onPacket = \(Animation _anim) -> pure ()}
-  }
+animation :: (forall r. CanHandlePackets r => Animation -> Eff r ()) -> InboundPacketDescriptor Animation
+animation = defaultDescriptor Playing "Animation" $ \(Animation hand) -> [("Hand",showText hand)]
 
 data Spectate = Spectate UUID deriving (Generic,Serial)
-spectate :: InboundPacketDescriptor Spectate
-spectate = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "Spectate"
-  ,packetPretty = \(Spectate _uuid) -> []
-  ,packetHandler = defaultHandler
-  }
+spectate :: (forall r. CanHandlePackets r => Spectate -> Eff r ()) -> InboundPacketDescriptor Spectate
+spectate = defaultDescriptor Playing "Spectate" $ \(Spectate uuid) -> [("UUID",showText uuid)]
 
 data PlayerBlockPlacement = PlayerBlockPlacement BlockCoord BlockFace Hand (Float,Float,Float) deriving (Generic,Serial)
-playerBlockPlacement :: InboundPacketDescriptor PlayerBlockPlacement
-playerBlockPlacement = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "PlayerBlockPlacement"
-  ,packetPretty = \(PlayerBlockPlacement block _side hand _cursorCoord) -> [("Block",showText block),("Hand",showText hand)]
-  ,packetHandler = defaultHandler {onPacket = \(PlayerBlockPlacement block side hand cursorCoord) -> do
-    sb <- getBlock block
-    let oc = ambiguously (\(Identity (b :: bt)) -> ($b) <$> onClick @bt) sb
-    case oc of
-      Just cb -> cb block side hand cursorCoord
-      Nothing -> do
-        -- Find out what item they are trying to place
-        heldSlot <- if hand == MainHand then holdingSlot <$> getPlayer else pure 45
-        msl <- getInventorySlot (heldSlot + 36)
-        case msl of
-          Slot Nothing -> logp "No item to use"
-          Slot (Just (SlotData (SuchThat (Identity (i :: it))) _cnt)) -> case onItemUse @it of
-            -- If they right click on a block with an empty hand, this will happen
-            Nothing -> logp "No onItemUse for item"
-            Just oiu -> oiu i block side hand cursorCoord
-            -- Remove item from inventory
-            --let newSlot = if icount == 1 then EmptySlot else (Slot i (icount - 1))
-            --setInventorySlot heldSlot newSlot
-            -- TODO: map item damage to block damage somehow
-            --setBlock (Tile.Chest North []) (blockOnSide block side)
-    }
-  }
+playerBlockPlacement :: (forall r. CanHandlePackets r => PlayerBlockPlacement -> Eff r ()) -> InboundPacketDescriptor PlayerBlockPlacement
+playerBlockPlacement = defaultDescriptor Playing "PlayerBlockPlacement" $ \(PlayerBlockPlacement block side hand _cursorCoord) -> [("Block",showText block),("Side",showText side),("Hand",showText hand)]
 
 data UseItem = UseItem Hand deriving (Generic,Serial)
-useItem :: InboundPacketDescriptor UseItem
-useItem = PacketDescriptor
-  {packetState = Playing
-  ,packetName = "UseItem"
-  ,packetPretty = \(UseItem hand) -> [("Hand",showText hand)]
-  ,packetHandler = defaultHandler {onPacket = \(UseItem hand) -> do
-    -- Decide which slot they are using, and find the item in that hand
-    held <- getInventorySlot =<< (case hand of {MainHand -> holdingSlot <$> getPlayer; OffHand -> pure 45})
-    logp $ "Used: " <> showText held
-    }
-  }
+useItem :: (forall r. CanHandlePackets r => UseItem -> Eff r ()) -> InboundPacketDescriptor UseItem
+useItem = defaultDescriptor Playing "UseItem" $ \(UseItem hand) -> [("Hand",showText hand)]
 
 -----------
 -- Login --
 -----------
 
 data LoginStart = LoginStart ProtocolString deriving (Generic,Serial)
-loginStart :: InboundPacketDescriptor LoginStart
-loginStart = PacketDescriptor
-  {packetState = LoggingIn
-  ,packetName = "LoginStart"
-  ,packetPretty = \(LoginStart name) -> [("Username",T.pack $ unProtocolString name)]
-  -- LoginStart packets contain their username as a String
-  ,packetHandler = defaultHandler {onPacket = \(LoginStart (ProtocolString name)) -> do
-    -- Log that they are logging in
-    logt (T.pack name) "Logging In"
-    setUsername name
-    -- Verify Token is fixed because why not
-    -- TODO: make this a random token
-    let vt = BS.pack [0xDE,0xAD,0xBE,0xEF]
-    -- Server Id is blank because (((history)))
-    let sId = ""
-    -- Send an encryption request to the client
-    sendPacket Client.encryptionRequest (Client.EncryptionRequest sId (LengthAnnotatedByteString encodedPublicKey) (LengthAnnotatedByteString vt))
-    -- TODO
-    --setPlayerState (AwaitingEncryptionResponse vt sId)
-    }
-  }
+loginStart :: (forall r. CanHandlePackets r => LoginStart -> Eff r ()) -> InboundPacketDescriptor LoginStart
+loginStart = defaultDescriptor LoggingIn "LoginStart" $ \(LoginStart name) -> [("Username",T.pack $ unProtocolString name)]
 
 data EncryptionResponse = EncryptionResponse BS.ByteString BS.ByteString 
 instance Serial EncryptionResponse where
@@ -636,110 +290,23 @@ instance Serial EncryptionResponse where
     putByteString vt
   deserialize = EncryptionResponse <$> (deserialize @VarInt >>= getByteString . fromIntegral) <*> (deserialize @VarInt >>= getByteString . fromIntegral)
 
-encryptionResponse :: InboundPacketDescriptor EncryptionResponse
-encryptionResponse = PacketDescriptor
-  {packetState = LoggingIn
-  ,packetName = "EncryptionResponse"
-  ,packetPretty = \(EncryptionResponse ss vt) ->
+encryptionResponse :: (forall r. CanHandlePackets r => EncryptionResponse -> Eff r ()) -> InboundPacketDescriptor EncryptionResponse
+encryptionResponse = defaultDescriptor LoggingIn "EncryptionResponse" $ \(EncryptionResponse ss vt) ->
     [("Shared Secret Hash",(T.take 7 $ showText (hash ss :: Digest SHA1)) <> "...")
     ,("Verify Token Hash",(T.take 7 $ showText (hash vt :: Digest SHA1)) <> "...")
     ]
-
-  -- Wait for them to send an Encryption Response
-  ,packetHandler = defaultHandler {onPacket = \(EncryptionResponse ssFromClient vtFromClient) -> do
-    -- TODO: get this from getPlayerState >>= \(AwaitingEcnryptionResponse vt sId) ->
-    let vt = BS.pack [0xDE,0xAD,0xBE,0xEF]
-    -- Make sure that the encryption stuff all lines up properly
-    case checkVTandSS (snd globalKeypair) vtFromClient ssFromClient vt of
-      -- If it doesn't, disconnect
-      Left s -> sendPacket Client.disconnect (Client.Disconnect (jsonyText s)) >> loge (T.pack s) >> loge ("Public Key was: " <> showText (fst globalKeypair))
-      -- If it does, keep going
-      Right ss -> do
-        -- Start encrypting our packets, now that we have the shared secret
-        beginEncrypting ss
-        -- Make the serverId hash for auth
-        let loginHash = genLoginHash "" ss encodedPublicKey
-        -- Do the Auth stuff with Mojang
-        name <- clientUsername <$> getPlayer
-        -- TODO: This uses arbitrary IO, we should make it into an effect
-        serverAuthentication name loginHash >>= \case
-          -- TODO: we just crash if the token is negative :3 pls fix or make it a feature
-          -- If the auth is borked, its probably our fault tbh
-          Nothing -> do
-            loge "Failed to authenticate with Mojang"
-            -- Claim guilt
-            sendPacket Client.disconnect (Client.Disconnect $ jsonyText "Auth failed (Lazersmoke's fault, probably!)")
-          Just (AuthPacket uuid nameFromAuth authProps) -> do
-            -- Get the config ready because we need it a lot here
-            c <- ask
-            pid <- registerPlayer
-            setUsername nameFromAuth
-            setUUID uuid
-            -- Warning: setting this to 3 gave us a bad frame exception :S
-            case compressionThreshold c of
-              -- If the config says to compress, inform the client
-              Just t -> sendPacket Client.setCompression (Client.SetCompression t) >> beginCompression t
-              -- No compression -> don't do anything
-              Nothing -> pure ()
-            -- Send a login success. We are now in play mode
-            sendPacket Client.loginSuccess (Client.LoginSuccess (ProtocolString $ show uuid) (ProtocolString nameFromAuth))
-            -- This is where the protocol specifies the state transition to be
-            setPlayerState Playing
-            -- 100 is the max players
-            sendPacket Client.joinGame (Client.JoinGame pid (defaultGamemode c) (defaultDimension c) (defaultDifficulty c) (maxPlayers c) "default" False)
-            -- Also sends player abilities
-            setGamemode (defaultGamemode c)
-            -- Tell them we aren't vanilla so no one gets mad at mojang for our fuck ups
-            sendPacket Client.pluginMessage (Client.PluginMessage "MC|Brand" (runPutS $ serialize @ProtocolString "Civskell"))
-            -- Difficulty to peaceful
-            sendPacket Client.serverDifficulty (Client.ServerDifficulty (defaultDifficulty c))
-            -- World Spawn/Compass Direction, not where they will spawn initially
-            sendPacket Client.spawnPosition (Client.SpawnPosition (spawnLocation c))
-            -- Send initial world. Need a 7x7 grid or the client gets angry with us
-            forM_ [0..48] $ \x -> sendPacket Client.chunkData =<< colPacket ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
-            -- Send an initial blank inventory
-            sendPacket Client.windowItems (Client.WindowItems 0 (ProtocolList []))
-            -- Give them some stone (for testing)
-            setInventorySlot 4 (Slot . Just $ SlotData (some (Stone.Stone :: Stone.Stone 'AsItem)) 32)
-            ps <- allPlayers
-            sendPacket Client.playerListItem (Client.PlayerListItem . ProtocolList $ (map (\p -> (clientUUID p,PlayerListAdd (ProtocolString $ clientUsername p) (ProtocolList authProps) Survival 0 (ProtocolOptional Nothing))) ps))
-    }
-  }
 
 ------------
 -- Status --
 ------------
 
 data StatusRequest = StatusRequest deriving (Generic,Serial)
-statusRequest :: InboundPacketDescriptor StatusRequest
-statusRequest = PacketDescriptor
-  {packetState = Status
-  ,packetName = "StatusRequest"
-  ,packetPretty = \StatusRequest -> []
-  ,packetHandler = defaultHandler {onPacket = \_ -> do
-    -- Get the list of connected players so we can show info about them in the server menu
-    playersOnline <- allPlayers
-    motd <- serverMotd <$> ask
-    proto <- protocolVersion <$> ask
-    vers <- serverVersion <$> ask
-    let userSample = intercalate "," . map (\p -> "{\"name\":\"" <> clientUsername p <> "\",\"id\":\"" <> show (clientUUID p) <> "\"}") $ playersOnline
-    let resp = "{\"version\":{\"name\":\"" <> T.unpack vers <> "\",\"protocol\":" <> show proto <> "},\"players\":{\"max\": 100,\"online\": " <> show (length playersOnline) <> ",\"sample\":[" <> userSample <> "]},\"description\":{\"text\":\"" <> T.unpack motd <> "\"},\"favicon\":\"" <> {-image-} "" <> "\"}"
-    -- Send resp to clients
-    sendPacket Client.statusResponse (Client.StatusResponse (ProtocolString resp))
-    -- TODO
-    -- setPlayerState WaitingForStatusPing
-    }
-  }
+statusRequest :: (forall r. CanHandlePackets r => StatusRequest -> Eff r ()) -> InboundPacketDescriptor StatusRequest
+statusRequest = defaultDescriptor Status "StatusRequest" $ \StatusRequest -> []
 
 data StatusPing = StatusPing Int64 deriving (Generic,Serial)
-statusPing :: InboundPacketDescriptor StatusPing
-statusPing = PacketDescriptor
-  {packetState = Status
-  ,packetName = "StatusPing"
-  ,packetPretty = \(StatusPing i) -> [("Ping Token",T.pack $ "0x" <> showHex i "")]
-  -- Send a pong with the same ping token right away
-  ,packetHandler = defaultHandler {onPacket = \(StatusPing l) -> sendPacket Client.statusPong (Client.StatusPong l)}
-  }
+statusPing :: (forall r. CanHandlePackets r => StatusPing -> Eff r ()) -> InboundPacketDescriptor StatusPing
+statusPing = defaultDescriptor Status "StatusPing" $ \(StatusPing i) -> [("Ping Token",T.pack $ "0x" <> showHex i "")]
 
 -- TODO: make this not cancer
 image :: String
