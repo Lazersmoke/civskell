@@ -4,7 +4,7 @@
 module Civskell.Entity.Object where
 
 import Civskell.Entity.Base
-import Civskell.Data.Types hiding (Item)
+import Civskell.Data.Types
 import Data.Word (Word8)
 
 data Skeleton = Skeleton Insentient Bool

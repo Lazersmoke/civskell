@@ -10,13 +10,15 @@ import qualified Data.Set as Set
 import Control.Concurrent.STM
 import Data.SuchThat
 import Data.Functor.Identity
-import Control.Eff
+import Control.Monad.Freer
 import qualified Data.Text as T
 import Data.Semigroup ((<>))
 
 import Civskell.Data.Types hiding (Player)
+import Civskell.Data.Protocol
 import Civskell.Data.Logging
-import Civskell.Data.Player
+import Civskell.Item
+--import Civskell.Data.Player
 {-
 -- Num slots
 data Container = Container Word8 deriving Show
@@ -25,6 +27,18 @@ instance Window Container where
   windowIdentifier = "minecraft:conatiner"
   slotCount (Container s) = s
 -}
+
+class Window w where
+  -- Chest
+  windowName :: T.Text
+  -- minecraft:chest
+  windowIdentifier :: String
+  -- 27
+  slotCount :: Short
+  -- Bool is transaction success
+  onWindowClick :: (HasWorld r,SendsPackets r,Logs r,HasPlayer r) => w -> WindowId -> Short -> TransactionId -> InventoryClickMode -> Eff r Bool
+  --clientToCivskellSlot :: Short -> Short
+  --civskellToClientSlot :: Short -> Short
 
 defaultInventoryClick :: (SendsPackets r,Logs r,HasWorld r,HasPlayer r) => (Short -> Eff r Slot) -> (Short -> Slot -> Eff r ()) -> WindowId -> Short -> TransactionId -> InventoryClickMode -> Eff r Bool
 defaultInventoryClick gs ss wid slotNum transId = \case

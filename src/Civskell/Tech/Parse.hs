@@ -18,6 +18,7 @@ import Unsafe.Coerce
 import qualified Data.ByteString as BS
 
 import Civskell.Data.Types
+import Civskell.Data.Protocol
 
 
 anyChar :: Parser Char

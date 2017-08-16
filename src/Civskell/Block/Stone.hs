@@ -7,7 +7,7 @@
 module Civskell.Block.Stone where
 
 import Civskell.Data.Types
-import Civskell.Block
+import Civskell.Data.Block
 --import Civskell.Block.Cobblestone
 
 -- Bool isPolished

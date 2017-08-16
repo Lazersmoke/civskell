@@ -2,7 +2,8 @@
 module Civskell.Entity.Item where
 
 import Civskell.Entity.Base
-import Civskell.Data.Types hiding (Item)
+import Civskell.Data.Types
+import Civskell.Item (SlotData)
 
 data Item = Item BaseEntity SlotData
 

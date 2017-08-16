@@ -10,7 +10,7 @@ module Civskell.Tech.Network
   ,parseFromSet,getGenericPacket,serverAuthentication, clientAuthentication--,getPacketFromParser --,sendPacket,getPacket
   ) where
 
-import Control.Eff (Eff,send)
+import Control.Monad.Freer (Eff,send)
 import Data.Bits
 import Data.Bytes.Get
 import Data.Bytes.Serial

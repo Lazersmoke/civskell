@@ -30,7 +30,9 @@ import qualified Data.ByteString as BS
 import Unsafe.Coerce
 
 import Civskell.Data.Types
---import qualified Civskell.Window as Window
+import Civskell.Data.Protocol
+import Civskell.Item
+import Civskell.Window
 
 defaultDescriptor :: Serial p => ServerState -> T.Text -> (p -> [(T.Text,T.Text)]) -> VarInt -> OutboundPacketDescriptor p
 defaultDescriptor ss name pret pktId = PacketDescriptor 
@@ -96,7 +98,7 @@ instance Serial SpawnObject where
       dat = serialize d *> (case mVel of {Just (EntityVelocity (dx,dy,dz)) -> serialize dx *> serialize dy *> serialize dz; Nothing -> serialize (0 :: Short) *> serialize (0 :: Short) *> serialize (0 :: Short)})
       (d,mVel) = objectData e
       EntityLocation (x,y,z) (yaw,pitch) = objectLocation e
-  deserialize = error "Undefined: deserialize @Client.SpawnObject"
+  deserialize = error "Undefined: deserialize @SpawnObject"
 
 -- EID, x, y, z, count
 data SpawnExpOrb = SpawnExpOrb EntityId (Double,Double,Double) Short deriving (Generic,Serial)
@@ -165,15 +167,15 @@ blockChange :: VarInt -> OutboundPacketDescriptor BlockChange
 blockChange = defaultDescriptor Playing "BlockChange" $ \(BlockChange bc bs) -> [("Block",showText bc),("New State",T.pack $ ambiguously (showBlock . runIdentity) bs)]
 instance Serial BlockChange where
   serialize (BlockChange bc bs) = serialize bc *> ambiguously (serializeBlock . runIdentity) bs
-  deserialize = error "Unimplemented: deserialize @Client.BlockChange" --BlockChange <$> deserialize @BlockCoord <*> (ambiguate <$> deser
+  deserialize = error "Unimplemented: deserialize @BlockChange" --BlockChange <$> deserialize @BlockCoord <*> (ambiguate <$> deser
 
 -- UUID, Action (from enum)
 data BossBar = BossBar String {- BossBarAction NYI -}
 bossBar :: VarInt -> OutboundPacketDescriptor BossBar
 bossBar = defaultDescriptor Playing "BossBar" $ \(BossBar _ {- BossBarAction NYI -}) -> []
 instance Serial BossBar where
-  serialize (BossBar _ {- BossBarAction NYI -}) = error "Unimplemented serialize @Client.BossBar"
-  deserialize = error "Unimplemented: deserialize @Client.BossBar"
+  serialize (BossBar _ {- BossBarAction NYI -}) = error "Unimplemented serialize @BossBar"
+  deserialize = error "Unimplemented: deserialize @BossBar"
 
 -- Difficulty (0-3)
 data ServerDifficulty = ServerDifficulty Difficulty deriving (Generic,Serial)
@@ -210,7 +212,7 @@ openWindow :: VarInt -> OutboundPacketDescriptor OpenWindow
 openWindow = defaultDescriptor Playing "OpenWindow" $ \(OpenWindow wid (SuchThat (Identity (_ :: winT))) title horseEid) -> [("Window Id",showText wid),("Window Type",windowName @winT),("Window Title",showText . unProtocolString $ title)] ++ (case horseEid of {Just eid -> [("Horse EID",showText eid)];Nothing -> []})
 instance Serial OpenWindow where
   serialize (OpenWindow wid (SuchThat (Identity (_ :: winT))) title horseEid) = serialize wid *> serialize (windowIdentifier @winT) *> serialize title *> serialize ((unsafeCoerce :: Short -> Word8) $ slotCount @winT) *> (case horseEid of {Just eid -> serialize eid;Nothing -> pure ()})
-  deserialize = error "Unimplemented: deserialize @Client.OpenWindow"
+  deserialize = error "Unimplemented: deserialize @OpenWindow"
 
 -- Window Id, Slots
 data WindowItems = WindowItems WindowId (ProtocolList Short Slot) deriving (Generic,Serial)
@@ -356,6 +358,68 @@ data PlayerListItem a = PlayerListItem (ProtocolList VarInt (UUID,PlayerListActi
 playerListItem :: PlayerListActionEnum a => VarInt -> OutboundPacketDescriptor (PlayerListItem a)
 playerListItem = defaultDescriptor Playing "PlayerListItem" $ \(PlayerListItem (ProtocolList actions)) -> (\(u,a) -> [("UUID",showText u)] ++ showPlayerListAction a) =<< actions
 
+-- Helper kind for PlayerListAction
+data PlayerListActionType = AddPlayer | UpdateGamemode | UpdateLatency | UpdateName | RemovePlayer
+
+class (Serial (PlayerListAction a)) => PlayerListActionEnum a where 
+  playerListActionEnum :: VarInt
+  showPlayerListAction :: PlayerListAction a -> [(Text,Text)]
+
+instance PlayerListActionEnum 'AddPlayer where 
+  playerListActionEnum = 0
+  showPlayerListAction (PlayerListAdd (ProtocolString name) (ProtocolList props) gm ping (ProtocolOptional mDispName)) = [("Action","Add Player"),("Name",T.pack name),("Properties",showText props),("Gamemode",showText gm),("Ping",showText ping)] ++ (case mDispName of {Just d -> [("Display Name",showText . unProtocolString $ d)]; Nothing -> []})
+
+instance PlayerListActionEnum 'UpdateGamemode where 
+  playerListActionEnum = 1
+  showPlayerListAction (PlayerListGamemode gm) = [("Action","Update Gamemode"),("Gamemode",showText gm)]
+
+instance PlayerListActionEnum 'UpdateLatency where 
+  playerListActionEnum = 2
+  showPlayerListAction (PlayerListLatency ping) = [("Action","Update Latency"),("Ping",showText ping <> "ms")]
+
+instance PlayerListActionEnum 'UpdateName where 
+  playerListActionEnum = 3
+  showPlayerListAction (PlayerListName (ProtocolOptional mDispName)) = [("Action","Update Name")] ++ (case mDispName of {Just d -> [("Display Name",showText . unProtocolString $ d)]; Nothing -> []})
+
+instance PlayerListActionEnum 'RemovePlayer where 
+  playerListActionEnum = 4
+  showPlayerListAction PlayerListRemove = [("Action","Remove")]
+
+-- Used in PlayerListItem
+data PlayerListAction (a :: PlayerListActionType) where
+  PlayerListAdd :: ProtocolString -> ProtocolList VarInt AuthProperty -> Gamemode -> VarInt -> ProtocolOptional ProtocolString -> PlayerListAction 'AddPlayer
+  PlayerListGamemode :: Gamemode -> PlayerListAction 'UpdateGamemode
+  PlayerListLatency :: VarInt -> PlayerListAction 'UpdateLatency
+  PlayerListName :: ProtocolOptional ProtocolString -> PlayerListAction 'UpdateName
+  PlayerListRemove :: PlayerListAction 'RemovePlayer
+
+-- NOTE: Boring Serial instances
+-- Haskell GADTs with type indicies don't support deriving Generic, even something like:
+--
+--   deriving instance (PlayerListAction 'AddPlayer)
+--     
+-- So we just have to write out these serial instances the boring long way
+
+instance Serial (PlayerListAction 'AddPlayer) where
+  serialize (PlayerListAdd name props gm ping mDispName) = serialize name *> serialize props *> serialize gm *> serialize ping *> serialize mDispName
+  deserialize = PlayerListAdd <$> deserialize <*> deserialize <*> deserialize <*> deserialize <*> deserialize
+
+instance Serial (PlayerListAction 'UpdateGamemode) where
+  serialize (PlayerListGamemode gm) = serialize gm
+  deserialize = PlayerListGamemode <$> deserialize @Gamemode
+
+instance Serial (PlayerListAction 'UpdateLatency) where
+  serialize (PlayerListLatency ping) = serialize ping
+  deserialize = PlayerListLatency <$> deserialize @VarInt
+
+instance Serial (PlayerListAction 'UpdateName) where
+  serialize (PlayerListName mDisp) = serialize mDisp
+  deserialize = PlayerListName <$> deserialize @(ProtocolOptional ProtocolString)
+
+instance Serial (PlayerListAction 'RemovePlayer) where
+  serialize PlayerListRemove = pure ()
+  deserialize = pure PlayerListRemove
+
 instance PlayerListActionEnum a => Serial (PlayerListItem a) where 
   serialize (PlayerListItem acts) = serialize (playerListActionEnum @a) *> serialize acts
   deserialize = error "Undefined: deserialize @PlayerListActionEnum"
@@ -398,3 +462,138 @@ instance Serial SpawnPosition where
 
 --instance Show Packet where
   --show pkt = formatPacket (packetName pkt) $ case pkt of
+
+openNewWindow :: (SendsPackets r,HasPlayer r,Window w) => w -> ProtocolString -> Eff r WindowId
+openNewWindow winType title = do
+  wid <- usingPlayer $ \t -> do
+    p <- readTVar t
+    writeTVar t p {windows = Map.insert (nextWid p) (some winType) (windows p),nextWid = succ (nextWid p)}
+    return (nextWid p)
+  sendPacket (openWindow 0x13) (OpenWindow wid (some winType) title Nothing)
+  return wid
+
+openWindowWithItems :: (HasWorld r,SendsPackets r,HasPlayer r,Logs r,Window w) => w -> ProtocolString -> TVar Inventory -> Eff r WindowId
+openWindowWithItems (ty :: tyT) name tI = do
+  wid <- openNewWindow ty name
+  playerInv <- Map.mapKeysMonotonic (+(27 - 9)) . playerInventory <$> getPlayer
+  items <- Map.union playerInv <$> (send . WorldSTM $ readTVar tI)
+  logp $ "Sending window " <> T.pack (show wid) <> " of type " <> T.pack (windowIdentifier @tyT) <> " with items " <> T.pack (show items)
+  -- This is wrong because it doesn't pad between items
+  sendPacket (windowItems 0x14) (WindowItems wid (ProtocolList $ Map.elems items) {-(slotCount @tyT)-})
+  return wid
+
+-- Add a new tid to the que
+pendTeleport :: (SendsPackets r,Logs r,HasPlayer r) => (Double,Double,Double) -> (Float,Float) -> Word8 -> Eff r ()
+pendTeleport xyz yp relFlag = do
+  p <- usingPlayer $ \t -> do
+    p <- readTVar t
+    writeTVar t p {nextTid = 1 + nextTid p,teleportConfirmationQue = Set.insert (nextTid p) $ teleportConfirmationQue p}
+    return p
+  sendPacket (playerPositionAndLook 0x2F) (PlayerPositionAndLook xyz yp relFlag (nextTid p))
+
+-- Check if the tid is in the que. If it is, then clear and return true, else false
+clearTeleport :: HasPlayer r => VarInt -> Eff r Bool
+clearTeleport tid = usingPlayer $ \t -> do
+  p <- readTVar t 
+  writeTVar t p {teleportConfirmationQue = Set.delete tid $ teleportConfirmationQue p}
+  return (Set.member tid $ teleportConfirmationQue p)
+
+-- Set the player's gamemode
+setGamemode :: (SendsPackets r,Logs r,HasPlayer r) => Gamemode -> Eff r ()
+setGamemode g = do
+  overPlayer $ \p -> p {gameMode = g}
+  sendPacket (changeGameState 0x1E) (ChangeGameState (ChangeGamemode g))
+  case g of
+    Survival -> sendPacket (playerAbilities 0x2C) (PlayerAbilities (AbilityFlags False False False False) 0 1)
+    Creative -> sendPacket (playerAbilities 0x2C) (PlayerAbilities (AbilityFlags True False True True) 0 1)
+
+-- Ideal version:
+--
+-- sendPacket (ChangeGameState (ChangeGamemode g))
+--
+
+-- TODO: Semantic slot descriptors
+setInventorySlot :: (SendsPackets r,Logs r, HasPlayer r) => Short -> Slot -> Eff r ()
+setInventorySlot slotNum slotData = do
+  overPlayer $ \p -> p {playerInventory = setSlot slotNum slotData (playerInventory p)}
+  sendPacket (setSlot 0x16) (SetSlot 0 slotNum slotData)
+
+{-# INLINE colPacket #-}
+colPacket :: HasWorld r => (Int,Int) -> Maybe BS.ByteString -> Eff r ChunkData
+colPacket (cx,cz) mbio = forM [0..15] (\cy -> getChunk (ChunkCoord (cx,cy,cz))) >>= \cs -> return (chunksToColumnPacket cs (cx,cz) mbio)
+
+chunksToColumnPacket :: [ChunkSection] -> (Int,Int) -> Maybe BS.ByteString -> ChunkData
+chunksToColumnPacket cs (cx,cz) mbio = ChunkData (fromIntegral cx,fromIntegral cz) True (bitMask cs) (filter (not . isAirChunk) cs) mbio (ProtocolList [])
+  where
+    -- [Bool] -> VarInt basically
+    bitMask as = foldr (\b i -> fromBool b .|. shiftL i 1) 0 (map (not . isAirChunk) as)
+    fromBool True = 1
+    fromBool False = 0
+    isAirChunk (ChunkSection m) = Map.null m
+
+runWorld :: (Logs r, PerformsIO r) => MVar WorldData -> Eff (World ': r) a -> Eff r a
+runWorld _ (Pure x) = Pure x
+runWorld w' (Eff u q) = case u of
+  Inject (ForkWorld e) -> runWorld w' (runTCQ q (runWorld w' e))
+  Inject (GetChunk chunk) -> runWorld w' . runTCQ q . Map.findWithDefault (ChunkSection Map.empty) chunk . chunks =<< send (readMVar w')
+  Inject (RemoveBlock bc) -> do
+    send $ modifyMVar_ w' $ \w -> do
+      let f = Map.delete (blockToRelative bc)
+      return w {chunks = Map.alter (Just . maybe (ChunkSection $ f Map.empty) (\(ChunkSection c) -> ChunkSection $ f c)) (blockToChunk bc) (chunks w)}
+    runWorld w' $ broadcastPacket (blockChange 0x0B) (BlockChange bc (some Air))
+    runWorld w' (runTCQ q ())
+  Inject (SetBlock b' bc) -> do
+    send $ modifyMVar_ w' $ \w -> do
+      let f = Map.insert (blockToRelative bc) b'
+      return w {chunks = Map.alter (Just . maybe (ChunkSection $ f Map.empty) (\(ChunkSection c) -> ChunkSection $ f c)) (blockToChunk bc) (chunks w)}
+    runWorld w' $ broadcastPacket (blockChange 0x0B) (BlockChange bc b')
+    runWorld w' (runTCQ q ())
+  Inject (SetChunk c' cc@(ChunkCoord (x,y,z))) -> do
+    send $ modifyMVar_ w' $ \w -> return w {chunks = Map.insert cc c' (chunks w)}
+    runWorld w' $ broadcastPacket (chunkData 0x20) (ChunkData (fromIntegral x,fromIntegral z) False (bit y) [c'] Nothing (ProtocolList []))
+    runWorld w' (runTCQ q ())
+  Inject (SetColumn col' (cx,cz) mBio) -> do
+    send $ modifyMVar_ w' $ \w -> return w {chunks = fst $ foldl (\(m,i) c -> (Map.insert (ChunkCoord (cx,i,cz)) c m,i + 1)) (chunks w,0) col'}
+    runWorld w' $ broadcastPacket (chunkData 0x20) $ chunksToColumnPacket col' (cx,cz) mBio
+    runWorld w' (runTCQ q ())
+  Inject FreshEID -> (>>= runWorld w' . runTCQ q) . send . modifyMVar w' $ \w -> return (w {nextEID = succ $ nextEID w},nextEID w)
+  Inject FreshUUID -> (>>= runWorld w' . runTCQ q) . send . modifyMVar w' $ \w -> return (w {nextUUID = incUUID $ nextUUID w},nextUUID w)
+    where
+      incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
+  -- Warning: throws error if player not found
+  Inject (GetPlayer i) -> runWorld w' . runTCQ q =<< send . readTVarIO . flip (Map.!) i . players =<< send (readMVar w')
+  -- Warning: throws error if player not found
+  Inject (SetPlayer i p) -> do
+    send . atomically . flip writeTVar p . flip (Map.!) i . players =<< send (readMVar w')
+    runWorld w' (runTCQ q ())
+  Inject (NewPlayer t) -> do
+    pid <- runWorld w' freshEID
+    send $ modifyMVar_ w' $ \w -> return w {players = Map.insert pid t $ players w}
+    runWorld w' (runTCQ q pid)
+  Inject (GetEntity e) -> send (readMVar w') >>= runWorld w' . runTCQ q . flip (Map.!) e . entities
+  Inject (DeleteEntity e) -> send (modifyMVar_ w' $ \w -> return w {entities = Map.delete e . entities $ w}) >> runWorld w' (runTCQ q ())
+  -- Pattern match on SuchThat to reinfer the constrain `Mob` into the contraint `Entity` for storage in the entities map
+  Inject (SummonMob (SuchThat m)) -> do
+    (eid,uuid) <- send . modifyMVar w' $ \w ->
+      return (w {entities = Map.insert (nextEID w) (SuchThat m) (entities w),nextEID = succ (nextEID w),nextUUID = incUUID (nextUUID w)},(nextEID w,nextUUID w))
+    runWorld w' $ broadcastPacket (spawnMob 0x03) $ makeSpawnMob eid uuid 0 (SuchThat m)
+    runWorld w' (runTCQ q ())
+    where
+      incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
+  Inject (SummonObject (SuchThat m)) -> do
+    (eid,uuid) <- send . modifyMVar w' $ \w ->
+      return (w {entities = Map.insert (nextEID w) (SuchThat m) (entities w),nextEID = succ (nextEID w),nextUUID = incUUID (nextUUID w)},(nextEID w,nextUUID w))
+    runWorld w' $ broadcastPacket (spawnObject 0x00) $ SpawnObject eid uuid (SuchThat m)
+    runWorld w' $ broadcastPacket (updateMetadata 0x3C) $ UpdateMetadata eid (EntityPropertySet $ map Just $ entityMeta (runIdentity m))
+    runWorld w' (runTCQ q ())
+    where
+      incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
+  Inject AllPlayers -> runWorld w' . runTCQ q =<< send . atomically . traverse readTVar . Map.elems . players =<< send (readMVar w')
+  --Inject (ForallPlayers f) -> do
+    --send $ modifyMVar_ w' $ \w -> return w {players = fmap f (players w)}
+    --runWorld w' (runTCQ q ())
+  Inject (BroadcastPacket pkt) -> do
+    send . atomically . mapM_ (\p -> readTVar p >>= \pd -> case playerState pd of {Playing -> flip writeTQueue pkt . packetQueue $ pd; _ -> pure ()}) . players =<< send (readMVar w')
+    runWorld w' (runTCQ q ())
+  Inject (WorldSTM stm) -> runWorld w' . runTCQ q =<< send (atomically stm)
+  Weaken u' -> Eff u' (Singleton (runWorld w' . runTCQ q))

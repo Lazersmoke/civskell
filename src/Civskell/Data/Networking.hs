@@ -7,7 +7,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 module Civskell.Data.Networking where
 
-import Control.Eff
+import Control.Monad.Freer
 import Control.Concurrent.STM
 import Data.Bytes.Serial
 import Data.SuchThat
@@ -63,11 +63,12 @@ beginCompression = send . BeginCompression
 
 -- `Packeting`/`SendsPackets` is a high level interface that explicitly marks raw bytes as unsafe
 runPacketing :: (Logs r,Networks r) => Eff (Packeting ': r) a -> Eff r a
-runPacketing (Pure x) = Pure x
-runPacketing (Eff u q) = case u of
-  Weaken restOfU -> Eff restOfU (Singleton (runPacketing . runTCQ q))
+runPacketing = handleRelay pure (flip handlePacketing)
+
+handlePacketing :: (Logs r,Networks r) => Arr r v a -> Packeting v -> Eff r a
+handlePacketing k = \case
   -- Unpack from the existentials to get the type information into a skolem, scoped tyvar
-  Inject (SendPacket (SuchThat (DescribedPacket pktDesc pkt))) -> do
+  SendPacket (SuchThat (DescribedPacket pktDesc pkt)) -> do
     let pktHandler = packetHandler pktDesc
     let writePacket = serializePacket pktHandler pkt
     -- Log its hex dump
@@ -75,63 +76,58 @@ runPacketing (Eff u q) = case u of
     logLevel HexDump . T.pack $ indentedHex (runPutS writePacket)
     -- Send it
     rPut =<< addCompression (runPutS $ serialize (packetId pktHandler) *> writePacket)
-    runPacketing (runTCQ q ())
+    k ()
   -- "Unsafe" means it doesn't come from a legitimate packet (doesn't have packetId) and doesn't get compressed
-  Inject (UnsafeSendBytes bytes) -> rPut bytes >> runPacketing (runTCQ q ())
+  UnsafeSendBytes bytes -> rPut bytes *> k ()
   -- Passthrough for setting up encryption and compression
-  Inject (BeginEncrypting ss) -> setupEncryption ss >> runPacketing (runTCQ q ())
-  Inject (BeginCompression thresh) -> setCompression thresh >> runPacketing (runTCQ q ())
+  BeginEncrypting ss -> setupEncryption ss *> k ()
+  BeginCompression thresh -> setCompression thresh *> k ()
 
 -- Used to fork a new thread that uses the same `TVar`s/`MVars` as this one
 forkNetwork :: (Networks q,PerformsIO r) => Eff (Networking ': r) a -> Eff q (Eff r a)
 forkNetwork = send . ForkNetwork
 
 runNetworking :: PerformsIO r => TVar (Maybe EncryptionCouplet) -> TVar (Maybe VarInt) -> Handle -> Eff (Networking ': r) a -> Eff r a
-runNetworking _ _ _ (Pure x) = Pure x
-runNetworking mEnc mThresh hdl (Eff u q) = case u of
-  Weaken restOfU -> Eff restOfU (Singleton (runNetworking mEnc mThresh hdl . runTCQ q))
-  Inject (ForkNetwork e) -> runNetworking mEnc mThresh hdl (runTCQ q (runNetworking mEnc mThresh hdl e))
-  Inject (GetFromNetwork len) -> do
+runNetworking mEnc mThresh hdl = runNat (handleNetworking mEnc mThresh hdl)
+
+handleNetworking :: TVar (Maybe EncryptionCouplet) -> TVar (Maybe VarInt) -> Handle -> Networking a -> IO a
+handleNetworking mEnc mThresh hdl = \case
+  ForkNetwork e -> pure (runNetworking mEnc mThresh hdl e)
+  GetFromNetwork len -> do
     -- We don't want exclusive access here because we will block
-    dat <- send $ BS.hGet hdl len
+    dat <- BS.hGet hdl len
     -- Decrypt the data or don't based on the encryption value
-    clear <- send . atomically $ readTVar mEnc >>= \case
+    atomically $ readTVar mEnc >>= \case
       Nothing -> return dat
       Just (c,e,d) -> do
         -- d' is the updated decrypting shift register
         let (bs',d') = cfb8Decrypt c d dat
         writeTVar mEnc (Just (c,e,d'))
         return bs'
-    runNetworking mEnc mThresh hdl (runTCQ q clear)
-  Inject (PutIntoNetwork bs) -> do
+  PutIntoNetwork bs -> do
     -- Encrypt the data or don't based on the encryption value
-    enc <- send . atomically $ readTVar mEnc >>= \case
+    enc <- atomically $ readTVar mEnc >>= \case
       Nothing -> return bs
       Just (c,e,d) -> do
         -- e' is the updated encrypting shift register
         let (bs',e') = cfb8Encrypt c e bs
         writeTVar mEnc (Just (c,e',d))
         return bs'
-    send $ BS.hPut hdl enc
-    runNetworking mEnc mThresh hdl (runTCQ q ())
-  Inject (SetCompressionLevel thresh) -> do
-    send . atomically $ readTVar mThresh >>= \case
-      -- If there is no pre-existing threshold, set one
-      Nothing -> writeTVar mThresh (Just thresh)
-      -- If there is already compression, don't change it (only one setCompression is allowed)
-      -- Should we throw an error instead of silently failing here?
-      Just _ -> pure ()
-    runNetworking mEnc mThresh hdl (runTCQ q ())
-  Inject (SetupEncryption ss) -> do
-    send . atomically $ readTVar mThresh >>= \case
-      -- If there is no encryption setup yet, set it up
-      Nothing -> writeTVar mEnc (Just (makeEncrypter ss,ss,ss))
-      -- If it is already encrypted, don't do anything
-      Just _ -> pure ()
-    runNetworking mEnc mThresh hdl (runTCQ q ())
-  Inject (AddCompression bs) -> send (readTVarIO mThresh) >>= \case
+    BS.hPut hdl enc
+  SetCompressionLevel thresh -> atomically $ readTVar mThresh >>= \case
+    -- If there is no pre-existing threshold, set one
+    Nothing -> writeTVar mThresh (Just thresh)
+    -- If there is already compression, don't change it (only one setCompression is allowed)
+    -- Should we throw an error instead of silently failing here?
+    Just _ -> pure ()
+  SetupEncryption ss -> atomically $ readTVar mThresh >>= \case
+    -- If there is no encryption setup yet, set it up
+    Nothing -> writeTVar mEnc (Just (makeEncrypter ss,ss,ss))
+    -- If it is already encrypted, don't do anything
+    Just _ -> pure ()
+  AddCompression bs -> readTVarIO mThresh >>= \case
     -- Do not compress; annotate with length only
-    Nothing -> runNetworking mEnc mThresh hdl (runTCQ q (runPutS . withLength $ bs))
+    Nothing -> pure (runPutS . withLength $ bs)
     -- Compress with the threshold `t`
     Just t -> if BS.length bs >= fromIntegral t
       -- Compress data and annotate to match
@@ -141,24 +137,22 @@ runNetworking mEnc mThresh hdl (Eff u q) = case u of
         -- Add the original size annotation
         let origSize = serialize $ ((fromIntegral (BS.length bs)) :: VarInt)
         let ann = withLength (runPutS $ origSize >> compIdAndData)
-        runNetworking mEnc mThresh hdl (runTCQ q (runPutS ann))
+        pure (runPutS ann)
       -- Do not compress; annotate with length only
-      else do
-        -- 0x00 indicates it is not compressed
-        let ann = withLength (runPutS $ putWord8 0x00 >> putByteString bs)
-        runNetworking mEnc mThresh hdl (runTCQ q (runPutS ann))
-  Inject (RemoveCompression bs) -> send (readTVarIO mThresh) >>= \case
+      -- 0x00 indicates it is not compressed
+      else pure . runPutS . withLength . runPutS $ putWord8 0x00 *> putByteString bs
+  RemoveCompression bs -> readTVarIO mThresh >>= \case
     -- Parse an uncompressed packet
     Nothing -> case runGetS parseUncompPkt bs of
       -- TODO: fix this completely ignoring a parse error
-      Left _ -> send (putStrLn "Emergency Parse Error!!!") *> runNetworking mEnc mThresh hdl (runTCQ q bs)
-      Right pktData -> runNetworking mEnc mThresh hdl (runTCQ q pktData)
+      Left _ -> putStrLn "Emergency Parse Error!!!" *> pure bs
+      Right pktData -> pure pktData
     -- Parse a compressed packet (compressed packets have extra metadata)
     Just _ -> case parseOnly parseCompPkt bs of
       -- TODO: fix this completely ignoring a parse error
-      Left _ -> runNetworking mEnc mThresh hdl (runTCQ q bs)
-      Right (dataLen,compressedData) -> if dataLen == 0
+      Left _ -> pure bs
+      Right (dataLen,compressedData) -> pure $ if dataLen == 0
         -- dataLen of 0 means that the packet is actually uncompressed
-        then runNetworking mEnc mThresh hdl (runTCQ q compressedData)
+        then compressedData
         -- If it is indeed compressed, uncompress it
-        else runNetworking mEnc mThresh hdl (runTCQ q (LBS.toStrict . Z.decompress . LBS.fromStrict $ compressedData))
+        else LBS.toStrict . Z.decompress . LBS.fromStrict $ compressedData

@@ -1,4 +1,5 @@
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ConstraintKinds #-}
@@ -12,8 +13,8 @@ module Civskell.Data.Logging
   ,runLogger
   ) where
 
-import Control.Eff
-import Control.Eff.Reader
+import Control.Monad.Freer
+import Control.Monad.Freer.Reader
 import Control.Monad (when)
 import Control.Concurrent.STM
 import Data.Text (Text)
@@ -45,10 +46,12 @@ forkLogger :: (Configured r,Logs q,PerformsIO r) => Eff (Logging ': r) a -> Eff 
 forkLogger = send . ForkLogger
 
 runLogger :: (Configured r,PerformsIO r) => LogQueue -> Eff (Logging ': r) a -> Eff r a
-runLogger _ (Pure x) = return x
-runLogger s@(LogQueue l) (Eff u q) = case u of
-  Inject (ForkLogger e) -> runLogger s (runTCQ q (runLogger s e))
-  Inject (LogText level str) -> do
+runLogger lq = handleRelay return (handleLog lq)
+
+handleLog :: (Configured r,PerformsIO r) => LogQueue -> Logging v -> Arr r v a -> Eff r a
+handleLog (LogQueue l) lg k = case lg of
+  ForkLogger e -> k $ runLogger (LogQueue l) e
+  LogText level str -> do
     -- Apply the configured loggin predicate to see if this message should be logged
     p <- ($ level) . shouldLog <$> ask 
     sName <- serverName <$> ask
@@ -62,5 +65,4 @@ runLogger s@(LogQueue l) (Eff u q) = case u of
       (TaggedLog tag) -> "[\x1b[36m" <> tag <> "\x1b[0m] "
       NormalLog -> "[\x1b[36m" <> sName <> "\x1b[0m] "
     -- Return regardless of log level
-    runLogger s (runTCQ q ())
-  Weaken otherEffects -> Eff otherEffects (Singleton (\x -> runLogger s (runTCQ q x)))
+    k ()

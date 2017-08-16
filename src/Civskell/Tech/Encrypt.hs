@@ -13,7 +13,7 @@ module Civskell.Tech.Encrypt
   ,MCPubKey(..)
   ) where
 
-import Control.Eff (Eff,send,runM)
+import Control.Monad.Freer (Eff,send,runM)
 import System.IO.Unsafe (unsafePerformIO)
 import Crypto.Cipher.AES (AES128)
 import Crypto.Cipher.Types (ecbEncrypt,cipherInit)

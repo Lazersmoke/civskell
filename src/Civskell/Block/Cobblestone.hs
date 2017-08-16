@@ -4,7 +4,7 @@
 module Civskell.Block.Cobblestone where
 
 import Civskell.Data.Types
-import Civskell.Block
+import Civskell.Data.Block
 
 data Cobblestone (t :: AsType) = Cobblestone
 instance Block (Cobblestone 'AsBlock) where

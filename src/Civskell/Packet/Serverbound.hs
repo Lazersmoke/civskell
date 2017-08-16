@@ -12,7 +12,7 @@
 module Civskell.Packet.Serverbound where
 
 import Data.Int
-import Control.Eff
+import Control.Monad.Freer
 import Data.Word
 import Data.Bytes.Put
 import Data.Bytes.Get
@@ -24,7 +24,10 @@ import qualified Data.ByteString as BS
 import Crypto.Hash (hash,Digest,SHA1)
 import Numeric (showHex)
 
-import Civskell.Data.Types hiding (Player)
+import Civskell.Data.Types
+import Civskell.Data.Protocol
+import Civskell.Data.Util
+import Civskell.Item
 
 defaultDescriptor :: Serial p => ServerState -> T.Text -> (p -> [(T.Text,T.Text)]) -> (forall r. CanHandlePackets r => p -> Eff r ()) -> InboundPacketDescriptor p
 defaultDescriptor ss name pret handle = PacketDescriptor

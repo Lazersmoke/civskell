@@ -9,7 +9,7 @@ import Control.Concurrent.MVar (readMVar,modifyMVar,modifyMVar_,MVar)
 import Control.Concurrent.STM.TQueue
 import Control.Concurrent.STM
 import Data.Functor.Identity
-import Control.Eff
+import Control.Monad.Freer
 import Control.Monad (forM)
 import Data.Bits
 import Data.SuchThat
@@ -17,7 +17,37 @@ import qualified Data.ByteString as BS
 import qualified Data.Map.Lazy as Map
 
 import Civskell.Data.Types
-import qualified Civskell.Packet.Clientbound as Client
+import Civskell.Data.Protocol
+import Civskell.Data.Player
+
+-- All the information about a mineman world. Notably, players is a Map of PId's to TVars of player data, not actual player data
+data WorldData = WorldData {chunks :: Map ChunkCoord ChunkSection, entities :: Map EntityId (Some Entity), players :: Map PlayerId (TVar PlayerData), nextEID :: EntityId, nextUUID :: UUID}
+
+-- Having access to the World is an effect
+type HasWorld r = Member World r
+
+data World a where
+  -- Commute a World effect out of a stack
+  ForkWorld :: (Logs r,PerformsIO r) => Eff (World ': r) a -> World (Eff r a)
+  -- TODO: redesign effect to slim down the effect interface to more general combinators, and bulk up the
+  -- outside API interface to do what this is doing right now
+  GetChunk :: ChunkCoord -> World ChunkSection
+  RemoveBlock :: BlockCoord -> World ()
+  SetBlock :: Some Block -> BlockCoord -> World ()
+  SetChunk :: ChunkSection -> ChunkCoord -> World ()
+  SetColumn :: [ChunkSection] -> (Int,Int) -> Maybe BS.ByteString -> World ()
+  WorldSTM :: STM a -> World a
+  FreshEID :: World EntityId
+  FreshUUID :: World UUID
+  SetPlayer :: PlayerId -> PlayerData -> World ()
+  GetPlayer :: PlayerId -> World PlayerData
+  NewPlayer :: TVar PlayerData -> World PlayerId
+  GetEntity :: EntityId -> World (Some Entity)
+  DeleteEntity :: EntityId -> World ()
+  SummonMob :: (Some Mob) -> World ()
+  SummonObject :: (Some Object) -> World ()
+  AllPlayers :: World [PlayerData]
+  BroadcastPacket :: ForAny (DescribedPacket PacketSerializer) -> World ()
 
 
 initWorld :: WorldData
@@ -42,19 +72,6 @@ setBlock b' bc = send $ SetBlock (some b') bc
 {-# INLINE setColumn #-}
 setColumn :: HasWorld r => [ChunkSection] -> (Int,Int) -> Maybe BS.ByteString -> Eff r ()
 setColumn cs cxz mBio = send $ SetColumn cs cxz mBio
-
-{-# INLINE colPacket #-}
-colPacket :: HasWorld r => (Int,Int) -> Maybe BS.ByteString -> Eff r Client.ChunkData
-colPacket (cx,cz) mbio = forM [0..15] (\cy -> getChunk (ChunkCoord (cx,cy,cz))) >>= \cs -> return (chunksToColumnPacket cs (cx,cz) mbio)
-
-chunksToColumnPacket :: [ChunkSection] -> (Int,Int) -> Maybe BS.ByteString -> Client.ChunkData
-chunksToColumnPacket cs (cx,cz) mbio = Client.ChunkData (fromIntegral cx,fromIntegral cz) True (bitMask cs) (filter (not . isAirChunk) cs) mbio (ProtocolList [])
-  where
-    -- [Bool] -> VarInt basically
-    bitMask as = foldr (\b i -> fromBool b .|. shiftL i 1) 0 (map (not . isAirChunk) as)
-    fromBool True = 1
-    fromBool False = 0
-    isAirChunk (ChunkSection m) = Map.null m
 
 {-# INLINE removeBlock #-}
 removeBlock :: HasWorld r => BlockCoord -> Eff r ()
@@ -113,69 +130,4 @@ forkWorld = send . ForkWorld
 
 --data SpawnMob = SpawnMob EntityId String SomeMob (Double,Double,Double) Word8 Word8 Word8 Short Short Short -- Metadata NYI
 
-runWorld :: (Logs r, PerformsIO r) => MVar WorldData -> Eff (World ': r) a -> Eff r a
-runWorld _ (Pure x) = Pure x
-runWorld w' (Eff u q) = case u of
-  Inject (ForkWorld e) -> runWorld w' (runTCQ q (runWorld w' e))
-  Inject (GetChunk chunk) -> runWorld w' . runTCQ q . Map.findWithDefault (ChunkSection Map.empty) chunk . chunks =<< send (readMVar w')
-  Inject (RemoveBlock bc) -> do
-    send $ modifyMVar_ w' $ \w -> do
-      let f = Map.delete (blockToRelative bc)
-      return w {chunks = Map.alter (Just . maybe (ChunkSection $ f Map.empty) (\(ChunkSection c) -> ChunkSection $ f c)) (blockToChunk bc) (chunks w)}
-    runWorld w' $ broadcastPacket (Client.blockChange 0x0B) (Client.BlockChange bc (some Air))
-    runWorld w' (runTCQ q ())
-  Inject (SetBlock b' bc) -> do
-    send $ modifyMVar_ w' $ \w -> do
-      let f = Map.insert (blockToRelative bc) b'
-      return w {chunks = Map.alter (Just . maybe (ChunkSection $ f Map.empty) (\(ChunkSection c) -> ChunkSection $ f c)) (blockToChunk bc) (chunks w)}
-    runWorld w' $ broadcastPacket (Client.blockChange 0x0B) (Client.BlockChange bc b')
-    runWorld w' (runTCQ q ())
-  Inject (SetChunk c' cc@(ChunkCoord (x,y,z))) -> do
-    send $ modifyMVar_ w' $ \w -> return w {chunks = Map.insert cc c' (chunks w)}
-    runWorld w' $ broadcastPacket (Client.chunkData 0x20) (Client.ChunkData (fromIntegral x,fromIntegral z) False (bit y) [c'] Nothing (ProtocolList []))
-    runWorld w' (runTCQ q ())
-  Inject (SetColumn col' (cx,cz) mBio) -> do
-    send $ modifyMVar_ w' $ \w -> return w {chunks = fst $ foldl (\(m,i) c -> (Map.insert (ChunkCoord (cx,i,cz)) c m,i + 1)) (chunks w,0) col'}
-    runWorld w' $ broadcastPacket (Client.chunkData 0x20) $ chunksToColumnPacket col' (cx,cz) mBio
-    runWorld w' (runTCQ q ())
-  Inject FreshEID -> (>>= runWorld w' . runTCQ q) . send . modifyMVar w' $ \w -> return (w {nextEID = succ $ nextEID w},nextEID w)
-  Inject FreshUUID -> (>>= runWorld w' . runTCQ q) . send . modifyMVar w' $ \w -> return (w {nextUUID = incUUID $ nextUUID w},nextUUID w)
-    where
-      incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
-  -- Warning: throws error if player not found
-  Inject (GetPlayer i) -> runWorld w' . runTCQ q =<< send . readTVarIO . flip (Map.!) i . players =<< send (readMVar w')
-  -- Warning: throws error if player not found
-  Inject (SetPlayer i p) -> do
-    send . atomically . flip writeTVar p . flip (Map.!) i . players =<< send (readMVar w')
-    runWorld w' (runTCQ q ())
-  Inject (NewPlayer t) -> do
-    pid <- runWorld w' freshEID
-    send $ modifyMVar_ w' $ \w -> return w {players = Map.insert pid t $ players w}
-    runWorld w' (runTCQ q pid)
-  Inject (GetEntity e) -> send (readMVar w') >>= runWorld w' . runTCQ q . flip (Map.!) e . entities
-  Inject (DeleteEntity e) -> send (modifyMVar_ w' $ \w -> return w {entities = Map.delete e . entities $ w}) >> runWorld w' (runTCQ q ())
-  -- Pattern match on SuchThat to reinfer the constrain `Mob` into the contraint `Entity` for storage in the entities map
-  Inject (SummonMob (SuchThat m)) -> do
-    (eid,uuid) <- send . modifyMVar w' $ \w ->
-      return (w {entities = Map.insert (nextEID w) (SuchThat m) (entities w),nextEID = succ (nextEID w),nextUUID = incUUID (nextUUID w)},(nextEID w,nextUUID w))
-    runWorld w' $ broadcastPacket (Client.spawnMob 0x03) $ Client.makeSpawnMob eid uuid 0 (SuchThat m)
-    runWorld w' (runTCQ q ())
-    where
-      incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
-  Inject (SummonObject (SuchThat m)) -> do
-    (eid,uuid) <- send . modifyMVar w' $ \w ->
-      return (w {entities = Map.insert (nextEID w) (SuchThat m) (entities w),nextEID = succ (nextEID w),nextUUID = incUUID (nextUUID w)},(nextEID w,nextUUID w))
-    runWorld w' $ broadcastPacket (Client.spawnObject 0x00) $ Client.SpawnObject eid uuid (SuchThat m)
-    runWorld w' $ broadcastPacket (Client.updateMetadata 0x3C) $ Client.UpdateMetadata eid (EntityPropertySet $ map Just $ entityMeta (runIdentity m))
-    runWorld w' (runTCQ q ())
-    where
-      incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
-  Inject AllPlayers -> runWorld w' . runTCQ q =<< send . atomically . traverse readTVar . Map.elems . players =<< send (readMVar w')
-  --Inject (ForallPlayers f) -> do
-    --send $ modifyMVar_ w' $ \w -> return w {players = fmap f (players w)}
-    --runWorld w' (runTCQ q ())
-  Inject (BroadcastPacket pkt) -> do
-    send . atomically . mapM_ (\p -> readTVar p >>= \pd -> case playerState pd of {Playing -> flip writeTQueue pkt . packetQueue $ pd; _ -> pure ()}) . players =<< send (readMVar w')
-    runWorld w' (runTCQ q ())
-  Inject (WorldSTM stm) -> runWorld w' . runTCQ q =<< send (atomically stm)
-  Weaken u' -> Eff u' (Singleton (runWorld w' . runTCQ q))
+
