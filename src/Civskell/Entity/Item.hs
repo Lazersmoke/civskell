@@ -3,21 +3,20 @@ module Civskell.Entity.Item where
 
 import Civskell.Entity.Base
 import Civskell.Data.Types
-import Civskell.Item (SlotData)
 
-data Item = Item BaseEntity SlotData
+data ItemEntity i = ItemEntity BaseEntity (SlotData i)
 
-instance Object Item where
+instance Object (ItemEntity i) where
   objectName = "Item Stack (Slot)"
   objectId = 2
-  objectData (Item e _) = (1,Just (baseEntityVelocity e))
+  objectData (ItemEntity e _) = (1,Just (baseEntityVelocity e))
 
-instance Entity Item where
-  entityName = "Item"
+instance Entity (ItemEntity i) where
+  entityName = "ItemEntity"
   entityType = 1
   entitySize _ = (0.25,0.25,0.25)
-  entityLocation (Item e _) = baseEntityLocation e
-  entityVelocity (Item e _) = baseEntityVelocity e
-  entityMeta (Item e slotData) = baseEntityMeta e ++ [mm slotData]
+  entityLocation (ItemEntity e _) = baseEntityLocation e
+  entityVelocity (ItemEntity e _) = baseEntityVelocity e
+  entityMeta (ItemEntity e slotData) = baseEntityMeta e ++ [mm . toWireSlotData $ Slot (Just slotData)]
 
 

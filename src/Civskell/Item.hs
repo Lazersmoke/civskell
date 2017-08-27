@@ -7,20 +7,16 @@
 {-# LANGUAGE FlexibleContexts #-}
 module Civskell.Item where
 
-import Data.Attoparsec.ByteString (Parser,choice)
-import Data.Word (Word8)
-import qualified Data.Map.Lazy as Map
-import Control.Monad
-import Data.Bytes.Serial
-import Data.Bytes.Put
-import Data.Functor.Identity
-import Control.Monad.Freer
-import Data.SuchThat
-import Data.NBT
-import qualified Data.Serialize as Cereal
+--import Data.Word (Word8)
+--import qualified Data.Map.Lazy as Map
+--import Data.Bytes.Serial
+--import Data.Bytes.Put
+--import Data.Functor.Identity
+--import Control.Monad.Freer
+--import Data.SuchThat
+--import Data.NBT
+--import qualified Data.Serialize as Cereal
 
-import Civskell.Data.Types
-import Civskell.Tech.Parse
 {-
 import Control.Concurrent.STM
 import Data.NBT
@@ -32,7 +28,7 @@ import Civskell.Data.Logging
 import qualified Civskell.Tile as Tile
 -}
 --import Civskell.Block.Stone
-
+{-
 parseSlot :: Parser Slot
 parseSlot = choice
   [emptySlot
@@ -46,7 +42,7 @@ emptySlot = do
   bid <- parseShort
   guard $ bid == -1
   return $ Slot Nothing
-
+-}
 {-
 data Stick = Stick
 instance Item Stick where

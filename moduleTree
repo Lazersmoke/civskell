@@ -1,0 +1,36 @@
+PlayerData:
+- Inventory
+- Window
+- and more
+
+WorldData:
+- Entity
+- PlayerData
+
+Inventory:
+- Slot
+
+Slot:
+- SlotData
+
+SlotData:
+- Item
+
+Item:
+- All effects
+
+Bottom defines:
+- BlockCoord
+- ChunkCoord
+- ChunkSection
+- DescribedPacket
+- EntityId
+- Gamemode
+- PacketDescriptor
+- PacketSerializer
+- PlayerId
+- Short
+- TransactionId
+- UUID
+- VarInt
+- WindowId

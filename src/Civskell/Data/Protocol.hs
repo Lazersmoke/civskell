@@ -24,6 +24,9 @@ type LegacyString = BS.ByteString
 -- A Minecraft "Short" is a Haskell Int16
 type Short = Int16
 
+-- Item ids are shorts
+type ItemId = Short
+
 -- A variably-sized integer, maximum 32 bits
 -- Note that they are serialized differently from a normal Int32, so we need a newtype. 
 newtype VarInt = VarInt {unVarInt :: Int32} deriving (Bits,Enum,Eq,Integral,Num,Ord,Real,Hashable) -- All instances are GND

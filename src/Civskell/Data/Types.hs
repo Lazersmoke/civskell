@@ -34,6 +34,9 @@ import Civskell.Data.Logging
 import Civskell.Data.Networking
 
 import GHC.Generics
+import Data.List (unfoldr)
+import qualified Data.Binary.BitBuilder as BB
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Lazy as Map
 import Data.Map.Lazy (Map)
 import Data.Functor.Identity
@@ -53,6 +56,7 @@ import Data.Bits
 import Data.Int
 import Data.NBT
 import Data.Text (Text)
+--import qualified Data.Text as T
 import Data.SuchThat
 import Data.String
 import qualified GHC.Exts as Exts
@@ -67,13 +71,15 @@ import Data.Bytes.Get
 import qualified Data.Serialize as Cereal
 import qualified Data.Vector as Vector
 import qualified Data.Set as Set
-import Data.Attoparsec.ByteString
+
+initWorld :: WorldData
+initWorld = WorldData {chunks = Map.empty,entities = Map.empty,players = Map.empty,nextEID = 0,nextUUID = UUID (0,1)}
 
 -- All the information about a mineman world. Notably, players is a Map of PId's to TVars of player data, not actual player data
 data WorldData = WorldData 
   {chunks :: Map ChunkCoord ChunkSection
   ,entities :: Map EntityId (Some Entity)
-  ,players :: Map PlayerId (TVar PlayerData)
+  ,players :: Map PlayerId PlayerData
   ,nextEID :: EntityId
   ,nextUUID :: UUID
   }
@@ -93,7 +99,7 @@ data PlayerData = PlayerData
   ,nextKid :: VarInt
   ,nextWid :: WindowId
   -- Map of WindowId's to that window's metadata (including accessor effects)
-  --,windows :: Map.Map WindowId (Some Window)
+  ,windows :: Map.Map WindowId (ForAny Window)
   ,failedTransactions :: Set.Set (WindowId,TransactionId)
   ,holdingSlot :: Short
   ,playerPosition :: (Double,Double,Double)
@@ -112,10 +118,12 @@ data PlayerData = PlayerData
   }
 
 -- This is a natural transformation from modifying a player to modifying a specific player in the world, given the player id of that player.
-modifyPlayerInWorld :: Members '[WorldManipulation,Logging] r => PlayerId -> Eff (State PlayerData ': r) a -> Eff r a
+modifyPlayerInWorld :: Members '[WorldManipulation,Logging] r => PlayerId -> Eff (State (Maybe PlayerData) ': r) a -> Eff r a
 modifyPlayerInWorld pId = generalizedRunNat $ \case
-  Get -> _
-  Put p' -> _
+  Get -> do
+    plas <- players <$> get
+    pure $ Map.lookup pId plas
+  Put p' -> modify (\w -> w {players = Map.update (const p') pId (players w)})
 
 type CanHandlePackets r = Members '[Packeting,IO,Logging] r
 
@@ -162,94 +170,393 @@ defaultConfiguration = Configuration
   ,packetsForState = const Vector.empty
   }
 
-newtype Slot = Slot (Maybe SlotData)
+-- TODO: Reconsider sparsity obligations. This is pretty dumb in terms of invariants we must enforce.
+-- TODO: Reconsider using Map because that is honestly a retarded data structure to use here
+-- TODO: Why isn't this a newtype. This is dumb :(
+-- Maps coords to non-air blocks. BlockState 0 0 doesn't mean anything. Air just doesn't have anything in the map.
+data ChunkSection = ChunkSection (Map BlockOffset (Some Block))
 
-instance Show Slot where
+-- All the relative coords within a chunk
+allCoords :: [BlockOffset]
+allCoords = [BlockLocation (x,y,z) | y <- [0..15], z <- [0..15], x <- [0..15]]
+
+-- A chunk full of air (used in chunk serialization to fill in gaps in the Map)
+airChunk :: Map BlockOffset (Some Block)
+airChunk = Map.fromList [(BlockLocation (x,y,z),{-some Air-} (error "Air is not in airChunks")) | x <- [0..15], z <- [0..15], y <- [0..15]]
+
+{-
+-- Get the block at a location in a chunk
+blockInChunk :: BlockOffset -> ChunkSection -> Some Block
+blockInChunk b (ChunkSection m) = fromMaybe (some Air) (Map.lookup b m)
+-}
+
+-- Derived instance is really long (it shows all the associations of coords and
+-- blocks in a giant list), so we replace it with a short placeholder
+instance Show ChunkSection where
+  show _ = "<Chunk Section>"
+
+-- TODO: Add paletteing. Right now, we send a full 13 bits for *every block*
+-- Lights twice for (((reasons)))
+instance Serial ChunkSection where
+  serialize (ChunkSection bs) = serialize bitsPerBlock >> putWord8 0x00 >> chunkData >> lights >> lights
+    where
+      lights = putLazyByteString . BB.toLazyByteString . createLights $ merged
+
+      -- First 9 bits are the block id, last 4 are the damage
+      bitsPerBlock = 13 :: VarInt
+
+      -- Send 0x00 as the length of the palette since we aren't using it
+      --palette = BS.singleton 0x00
+
+      -- Notify and crash *right away* if this gets fucked up. This only happens if we have a bad Ord instance.
+      -- Note that Map.size is O(1) so we aren't wasting too much time here
+      -- Merge the chunk's blocks with air because air blocks don't exist in the chunk normally
+      merged :: Map BlockOffset (Some Block)
+      merged = if Map.size (Map.union bs airChunk) == 4096 then Map.union bs airChunk else error "Bad Chunksection"
+
+      -- `longChunks` is because Mojang likes to twist their data into weird shapes
+      -- Might need to remove it idk
+      sArray :: LBS.ByteString
+      sArray = longChunks . BB.toLazyByteString $ sBlockStates merged
+
+      -- This should be the final result, but mojang is weird about chunk sections :S
+      sBlockStates :: Map BlockOffset (Some Block) -> BB.BitBuilder
+      sBlockStates m = foldr (\bc bb -> ambiguously (aBlock . runIdentity) (Map.findWithDefault ({-some Air-} (error "Air is not in Types")) bc m) `BB.append` bb) BB.empty allCoords
+
+      -- Annotate the data with its length in Minecraft Longs (should always be a whole number assuming 16^3 blocks/chunk)
+      chunkData :: MonadPut m => m ()
+      chunkData = serialize (fromIntegral (LBS.length sArray) `div` 8 :: VarInt) >> putLazyByteString sArray
+
+      -- Right now we `const 15` the blocks, so all the blocks are fullbright
+      -- TODO: Add lighting information somewhere or derive it here
+      createLights = Map.foldl' (\bb _ -> BB.fromBits 4 (15 :: Word8) `BB.append` bb) BB.empty
+
+      -- Mojang felt like packing chunks into arrays of longs lol
+      longChunks :: LBS.ByteString -> LBS.ByteString
+      longChunks unchunked = LBS.concat . reverse $ bsChunksOf 8 unchunked
+
+      -- Helper function for chunking up the BS
+      bsChunksOf :: Int64 -> LBS.ByteString -> [LBS.ByteString]
+      bsChunksOf x = unfoldr (\a -> if not (LBS.null a) then Just (LBS.splitAt x a) else Nothing)
+
+      -- Serial a single block: 9 bits bid, 4 bits dmg
+      aBlock :: Block b => b -> BB.BitBuilder
+      aBlock (b :: bt) = BB.fromBits 9 (blockId @bt) `BB.append` BB.fromBits 4 (blockMeta b)
+  deserialize = error "Unimplemented: Deserialization of Chunk Sections"
+
+
+class Block b where
+  -- 1
+  blockId :: Short
+  -- "minecraft:stone"
+  blockIdentifier :: String
+  -- Stone -> 0; Granite -> 1
+  blockMeta :: b -> Nibble
+  blockMeta _ = 0
+  -- By default, blocks without meta get 0
+  --blockMeta _ = 0
+  -- Name in notchian english "Stone" or "Granite"
+  blockName :: b -> String
+  -- Some blocks do something when clicked
+  onClick :: forall r. Members '[WorldManipulation,PlayerManipulation,Packeting,Logging] r => Maybe (b -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Eff r ())
+  onClick = Nothing
+  --droppedItem :: Maybe (b -> Some Item)
+
+serializeBlock :: (MonadPut m,Block b) => b -> m ()
+serializeBlock (b :: bt) = serialize $ shiftL (u (blockId @bt)) 4 .|. (v (blockMeta b) .&. 0x0f)
+  where
+    u = unsafeCoerce :: Short -> VarInt
+    v = unsafeCoerce :: Nibble -> VarInt
+
+showBlock :: Block b => b -> String
+showBlock (b :: bt) = "Block [" ++ show (blockId @bt) ++ ":" ++ show (blockMeta b) ++ "]"
+
+{-
+-- Parse an item based on its blockId, assuming no metadata and no nbt
+standardParser :: forall i. Item i => i -> Parser Slot
+standardParser r = do
+  bid <- parseShort
+  guard $ bid == itemId @i
+  cnt <- anyWord8
+  dmg <- parseShort
+  guard $ dmg == 0
+  nbtFlair <- anyWord8
+  guard $ nbtFlair == 0
+  return . Slot . Just $ SlotData (some r) cnt
+-}
+{-
+placeBlock :: Block b => b -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Eff r ()
+placeBlock b bc bf hand _ = do
+  -- Find out what item they are trying to place
+  heldSlot <- if hand == MainHand then (+36) . holdingSlot <$> getPlayer else pure 45
+  getInventorySlot heldSlot >>= \case
+    Slot Nothing -> loge "Fight me; this is not possible! (literally Nothing has a `placeBlock` callback)"
+    Slot (Just (SlotData i icount)) -> do
+      -- Remove item from inventory
+      let newSlot = if icount == 1 then Slot Nothing else Slot $ Just (SlotData i (icount - 1))
+      setInventorySlot heldSlot newSlot
+      setBlock b (blockOnSide bc bf)
+openNewWindow :: (Members '[Packeting,PlayerManipulation] r, Window w) => w -> ProtocolString -> Eff r WindowId
+openNewWindow winType title = do
+  wid <- usingPlayer $ \t -> do
+    p <- readTVar t
+    writeTVar t p {windows = Map.insert (nextWid p) (some winType) (windows p),nextWid = succ (nextWid p)}
+    return (nextWid p)
+  sendPacket (openWindow 0x13) (OpenWindow wid (some winType) title Nothing)
+  return wid
+
+openWindowWithItems :: (Members '[WorldManipulation,Packeting,PlayerManipulation,Logging] r,Window w) => w -> ProtocolString -> TVar Inventory -> Eff r WindowId
+openWindowWithItems (ty :: tyT) name tI = do
+  wid <- openNewWindow ty name
+  playerInv <- Map.mapKeysMonotonic (+(27 - 9)) . playerInventory <$> getPlayer
+  items <- Map.union playerInv <$> (send . WorldSTM $ readTVar tI)
+  logp $ "Sending window " <> T.pack (show wid) <> " of type " <> T.pack (windowIdentifier @tyT) <> " with items " <> T.pack (show items)
+  -- This is wrong because it doesn't pad between items
+  sendPacket (windowItems 0x14) (WindowItems wid (ProtocolList $ Map.elems items) {-(slotCount @tyT)-})
+  return wid
+-}
+{-
+-- Add a new tid to the que
+pendTeleport :: Members '[Packeting,Logging,PlayerManipulation] r => (Double,Double,Double) -> (Float,Float) -> Word8 -> Eff r ()
+pendTeleport xyz yp relFlag = do
+  p <- usingPlayer $ \t -> do
+    p <- readTVar t
+    writeTVar t p {nextTid = 1 + nextTid p,teleportConfirmationQue = Set.insert (nextTid p) $ teleportConfirmationQue p}
+    return p
+  sendPacket (playerPositionAndLook 0x2F) (PlayerPositionAndLook xyz yp relFlag (nextTid p))
+
+-- Check if the tid is in the que. If it is, then clear and return true, else false
+clearTeleport :: Member PlayerManipulation r => VarInt -> Eff r Bool
+clearTeleport tid = usingPlayer $ \t -> do
+  p <- readTVar t 
+  writeTVar t p {teleportConfirmationQue = Set.delete tid $ teleportConfirmationQue p}
+  return (Set.member tid $ teleportConfirmationQue p)
+
+-- Set the player's gamemode
+setGamemode :: Members '[Packeting,Logging,PlayerManipulation] r => Gamemode -> Eff r ()
+setGamemode g = do
+  overPlayer $ \p -> p {gameMode = g}
+  sendPacket (changeGameState 0x1E) (ChangeGameState (ChangeGamemode g))
+  case g of
+    Survival -> sendPacket (playerAbilities 0x2C) (PlayerAbilities (AbilityFlags False False False False) 0 1)
+    Creative -> sendPacket (playerAbilities 0x2C) (PlayerAbilities (AbilityFlags True False True True) 0 1)
+
+-- Ideal version:
+--
+-- sendPacket (ChangeGameState (ChangeGamemode g))
+--
+-- TODO: Semantic slot descriptors
+setInventorySlot :: Members '[Packeting,Logging,PlayerManipulation] r => Short -> Slot -> Eff r ()
+setInventorySlot slotNum slotData = do
+  overPlayer $ \p -> p {playerInventory = setSlot slotNum slotData (playerInventory p)}
+  sendPacket (setSlot 0x16) (SetSlot 0 slotNum slotData)
+-}
+
+-- runWorld is a natural transformation from `State WorldData` to working with actual TVar data
+runWorld :: Members '[Logging,IO] r => TVar WorldData -> Eff (WorldManipulation ': r) a -> Eff r a
+runWorld tWorld = generalizedRunNat $ \case
+  Get -> send $ readTVarIO tWorld
+  Put w' -> send . atomically $ writeTVar tWorld w'
+{-
+runWorld _ (Pure x) = Pure x
+runWorld w' (Eff u q) = case u of
+  Inject (GetChunk chunk) -> runWorld w' . runTCQ q . Map.findWithDefault (ChunkSection Map.empty) chunk . chunks =<< send (readMVar w')
+  Inject (RemoveBlock bc) -> do
+    send $ modifyMVar_ w' $ \w -> do
+      let f = Map.delete (blockToRelative bc)
+      return w {chunks = Map.alter (Just . maybe (ChunkSection $ f Map.empty) (\(ChunkSection c) -> ChunkSection $ f c)) (blockToChunk bc) (chunks w)}
+    runWorld w' $ broadcastPacket (blockChange 0x0B) (BlockChange bc (some Air))
+    runWorld w' (runTCQ q ())
+  Inject (SetBlock b' bc) -> do
+    send $ modifyMVar_ w' $ \w -> do
+      let f = Map.insert (blockToRelative bc) b'
+      return w {chunks = Map.alter (Just . maybe (ChunkSection $ f Map.empty) (\(ChunkSection c) -> ChunkSection $ f c)) (blockToChunk bc) (chunks w)}
+    runWorld w' $ broadcastPacket (blockChange 0x0B) (BlockChange bc b')
+    runWorld w' (runTCQ q ())
+  Inject (SetChunk c' cc@(ChunkCoord (x,y,z))) -> do
+    send $ modifyMVar_ w' $ \w -> return w {chunks = Map.insert cc c' (chunks w)}
+    runWorld w' $ broadcastPacket (chunkData 0x20) (ChunkData (fromIntegral x,fromIntegral z) False (bit y) [c'] Nothing (ProtocolList []))
+    runWorld w' (runTCQ q ())
+  Inject (SetColumn col' (cx,cz) mBio) -> do
+    send $ modifyMVar_ w' $ \w -> return w {chunks = fst $ foldl (\(m,i) c -> (Map.insert (ChunkCoord (cx,i,cz)) c m,i + 1)) (chunks w,0) col'}
+    runWorld w' $ broadcastPacket (chunkData 0x20) $ chunksToColumnPacket col' (cx,cz) mBio
+    runWorld w' (runTCQ q ())
+  Inject FreshEID -> (>>= runWorld w' . runTCQ q) . send . modifyMVar w' $ \w -> return (w {nextEID = succ $ nextEID w},nextEID w)
+  Inject FreshUUID -> (>>= runWorld w' . runTCQ q) . send . modifyMVar w' $ \w -> return (w {nextUUID = incUUID $ nextUUID w},nextUUID w)
+    where
+      incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
+  -- Warning: throws error if player not found
+  Inject (GetPlayer i) -> runWorld w' . runTCQ q =<< send . readTVarIO . flip (Map.!) i . players =<< send (readMVar w')
+  -- Warning: throws error if player not found
+  Inject (SetPlayer i p) -> do
+    send . atomically . flip writeTVar p . flip (Map.!) i . players =<< send (readMVar w')
+    runWorld w' (runTCQ q ())
+  Inject (NewPlayer t) -> do
+    pid <- runWorld w' freshEID
+    send $ modifyMVar_ w' $ \w -> return w {players = Map.insert pid t $ players w}
+    runWorld w' (runTCQ q pid)
+  Inject (GetEntity e) -> send (readMVar w') >>= runWorld w' . runTCQ q . flip (Map.!) e . entities
+  Inject (DeleteEntity e) -> send (modifyMVar_ w' $ \w -> return w {entities = Map.delete e . entities $ w}) >> runWorld w' (runTCQ q ())
+  -- Pattern match on SuchThat to reinfer the constrain `Mob` into the contraint `Entity` for storage in the entities map
+  Inject (SummonMob (SuchThat m)) -> do
+    (eid,uuid) <- send . modifyMVar w' $ \w ->
+      return (w {entities = Map.insert (nextEID w) (SuchThat m) (entities w),nextEID = succ (nextEID w),nextUUID = incUUID (nextUUID w)},(nextEID w,nextUUID w))
+    runWorld w' $ broadcastPacket (spawnMob 0x03) $ makeSpawnMob eid uuid 0 (SuchThat m)
+    runWorld w' (runTCQ q ())
+    where
+      incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
+  Inject (SummonObject (SuchThat m)) -> do
+    (eid,uuid) <- send . modifyMVar w' $ \w ->
+      return (w {entities = Map.insert (nextEID w) (SuchThat m) (entities w),nextEID = succ (nextEID w),nextUUID = incUUID (nextUUID w)},(nextEID w,nextUUID w))
+    runWorld w' $ broadcastPacket (spawnObject 0x00) $ SpawnObject eid uuid (SuchThat m)
+    runWorld w' $ broadcastPacket (updateMetadata 0x3C) $ UpdateMetadata eid (EntityPropertySet $ map Just $ entityMeta (runIdentity m))
+    runWorld w' (runTCQ q ())
+    where
+      incUUID (UUID (a,b)) = if b + 1 == 0 then UUID (succ a, 0) else UUID (a, succ b)
+  Inject AllPlayers -> runWorld w' . runTCQ q =<< send . atomically . traverse readTVar . Map.elems . players =<< send (readMVar w')
+  --Inject (ForallPlayers f) -> do
+    --send $ modifyMVar_ w' $ \w -> return w {players = fmap f (players w)}
+    --runWorld w' (runTCQ q ())
+  Inject (BroadcastPacket pkt) -> do
+    send . atomically . mapM_ (\p -> readTVar p >>= \pd -> case playerState pd of {Playing -> flip writeTQueue pkt . packetQueue $ pd; _ -> pure ()}) . players =<< send (readMVar w')
+    runWorld w' (runTCQ q ())
+  Inject (WorldSTM stm) -> runWorld w' . runTCQ q =<< send (atomically stm)
+  Weaken u' -> Eff u' (Singleton (runWorld w' . runTCQ q))
+-}
+
+data Window w = Window (WindowDescriptor w) w
+
+data WindowDescriptor w = WindowDescriptor
+  -- Chest
+  {windowName :: Text
+  -- minecraft:chest
+  ,windowIdentifier :: String
+  -- 27
+  ,slotCount :: Short
+  -- Bool is transaction success
+  --,onWindowClick :: (HasWorld r,SendsPackets r,Logs r,HasPlayer r) => w -> WindowId -> Short -> TransactionId -> InventoryClickMode -> Eff r Bool
+  --clientToCivskellSlot :: Short -> Short
+  --civskellToClientSlot :: Short -> Short
+  }
+
+newtype Slot i = Slot (Maybe (SlotData i))
+
+instance Show (SlotData i) => Show (Slot i) where
   show (Slot (Just dat)) = "{" ++ show dat ++ "}"
   show (Slot Nothing) = "{}"
 
-data SlotData = SlotData (Some Item) Word8
+data SlotData i = SlotData (Item i) Word8
 
-class Item i where
+instance Eq (Item i) => Eq (SlotData i) where
+  (SlotData a ac) == (SlotData b bc) = ac == bc && a == b
+
+-- Pretty print a slot's data. Perhaps we should let `Item`s provide a fancy name for this instance to use.
+instance Show (SlotData i) where
+  show (SlotData (Item desc i) count) = show count ++ " of [" ++ show (itemId desc) ++ ":" ++ show (itemMeta desc i) ++ "]" ++ n (itemNBT desc i)
+    where
+      -- Only display the NBT if it is actually there
+      n Nothing = ""
+      n (Just nbt) = " with tags: " ++ show nbt
+
+toWireSlotData :: Slot i -> WireSlotData
+toWireSlotData (Slot Nothing) = WireSlotData Nothing
+toWireSlotData (Slot (Just (SlotData (Item d i) c))) = WireSlotData . Just $ (itemId d, c, itemMeta d i, itemNBT d i)
+
+data WireSlotData = WireSlotData (Maybe (ItemId,Word8,Short,Maybe NBT)) deriving (Eq,Show)
+
+-- We can specify exact serialization semantics for this because it is independent of the 
+-- set of actually supported items; it just represents some numbers on the wire
+instance Serial WireSlotData where
+  serialize (WireSlotData Nothing) = serialize @ItemId (-1)
+  serialize (WireSlotData (Just (iId,count,meta,mNbt))) = serialize @ItemId iId *> serialize @Word8 count *> serialize @Short meta *> serNBT mNbt
+    where
+      serNBT Nothing = serialize @Word8 0x00
+      serNBT (Just nbt) = serialize @ProtocolNBT (ProtocolNBT nbt)
+  deserialize = lookAhead (deserialize @ItemId) >>= \case
+    (-1) -> pure (WireSlotData Nothing)
+    _ -> WireSlotData . Just <$> ((,,,) <$> deserialize @ItemId <*> deserialize @Word8 <*> deserialize @Short <*> getNbt)
+    where
+      getNbt = lookAhead getWord8 >>= \case
+        0x00 -> pure Nothing
+        _ -> Just . unProtocolNBT <$> deserialize @ProtocolNBT
+
+data Item i = Item (ItemDescriptor i) i
+
+-- This instances says that items with the same id, meta and NBT, are literally equal, which isn't always true
+instance Eq (Item i) where
+  (Item da a) == (Item db b) = itemId da == itemId db && itemIdentifier da == itemIdentifier db && itemMeta da a == itemMeta db b && itemNBT da a == itemNBT db b
+
+data ItemDescriptor i = ItemDescriptor
   -- TODO: Type level this when we have dependent types
-  itemId :: Short
-  itemIdentifier :: String
-  itemMeta :: i -> Short
-  itemMeta _ = 0
+  {itemId :: ItemId
+  ,itemIdentifier :: String
+  ,itemMeta :: i -> Short
   --itemPlaced :: i -> Maybe (Some Block)
   --itemPlaced _ = Nothing
-  itemNBT :: i -> Maybe NbtContents
-  itemNBT _ = Nothing
+  ,itemNBT :: i -> Maybe NBT
   -- TODO: param Slot i
-  parseItem :: Parser Slot
+  --,parseItem :: Parser Slot
   -- Some items do something when right clicked
-  onItemUse :: forall r. Member Logging r => Maybe (i -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Eff r ())
-  onItemUse = Nothing
+  --,onItemUse :: forall r. Member Logging r => Maybe (i -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Eff r ())
+  --onItemUse = Nothing
+  }
 
 -- An inventory is a mapping from Slot numbers to Slot data (or lack thereof).
 -- TODO: Reconsider sparsity obligations of Map here, and decide on a better
 -- internal representation. Potentially make this abstract after all. There
 -- might be a really fitting purely functional data structure to show off here.
-type Inventory = Map.Map Short Slot
+type Inventory = Map.Map Short (ForAny Slot)
 
 -- Abstraction methods for Inventory, not really needed tbh.
-getSlot :: Short -> Inventory -> Slot
-getSlot = Map.findWithDefault (Slot Nothing)
+getSlot :: Short -> Inventory -> ForAny Slot
+getSlot = Map.findWithDefault (ambiguate $ Slot Nothing)
 
-setSlot :: Short -> Slot -> Inventory -> Inventory
-setSlot i (Slot Nothing) = Map.delete i
-setSlot i s = Map.insert i s
+setSlot :: Short -> Slot i -> Inventory -> Inventory
+setSlot k (Slot Nothing) = Map.delete k
+setSlot k s = Map.insert k (ambiguate s)
 
 -- Sidestep existential nonsense when creating items
-slot :: Item i => i -> Word8 -> Slot
-slot i c = Slot . Just $ SlotData (ambiguate . Identity $ i) c
+slot :: Item i -> Word8 -> Slot i
+slot i c = Slot . Just $ SlotData i c
 
--- This is a rather sketchy instance because itemId uniqueness is not enforced
--- at type level, so we could actually get two different Item instances claiming
--- the same id, meta, and NBT, which would make this `Eq` instance unreliable.
--- In fact, it might be *impossible* to write an `Eq` instance for Slots
--- involving general, open typeclass `Item`s because that would involve deciding
--- equality for a `forall a. c a => p a` sort of thing, which would only be
--- based on the `c` instance.
-instance Eq SlotData where
-  (SlotData (SuchThat (Identity (a :: at))) ac) == (SlotData (SuchThat (Identity (b :: bt))) bc) = itemId @at == itemId @bt && itemMeta a == itemMeta b && itemNBT a == itemNBT b && ac == bc
-
-slotAmount :: Slot -> Word8
+slotAmount :: Slot i -> Word8
 slotAmount (Slot (Just (SlotData _ c))) = c
 slotAmount (Slot Nothing) = 0
 
 -- Remove as many items as possible, up to count, return amount removed
-removeCount :: Word8 -> Slot -> (Word8,Slot)
+removeCount :: Word8 -> Slot i -> (Word8,Slot i)
 removeCount _ (Slot Nothing) = (0,Slot Nothing)
 removeCount c (Slot (Just (SlotData i count))) = if c < count then (c,Slot . Just $ SlotData i (count - c)) else (count,Slot Nothing)
 
 -- Count is how many to put into first stack from second
-splitStack :: Word8 -> Slot -> (Slot,Slot)
+splitStack :: Word8 -> Slot i -> (Slot i,Slot i)
 splitStack _ (Slot Nothing) = (Slot Nothing,Slot Nothing)
 splitStack c s@(Slot (Just (SlotData i _))) = (firstStack,secondStack)
   where
     firstStack = if amtFirstStack == 0 then Slot Nothing else Slot . Just $ SlotData i amtFirstStack
     (amtFirstStack,secondStack) = removeCount c s
 
--- Pretty print a slot's data. Perhaps we should let `Item`s provide a fancy name for this instance to use.
-instance Show SlotData where
-  show (SlotData (SuchThat (Identity (i :: it))) count) = show count ++ " of [" ++ show (itemId @it) ++ ":" ++ show (itemMeta i) ++ "]" ++ n (itemNBT i)
-    where
-      -- Only display the NBT if it is actually there
-      n Nothing = ""
-      n (Just nbt) = " with tags: " ++ show nbt
+type SupportedItems = Map ItemId (ForAny ItemBuilder)
 
-instance Serial Slot where
-  serialize (Slot Nothing) = serialize (-1 :: Short)
-  serialize (Slot (Just sd)) = serialize @SlotData sd
-  deserialize = deserialize @Short >>= \case
-    (-1) -> pure $ Slot Nothing
-    _itemId -> error "Unimplemented: Deserialization of general Slots. May be unimplementable in general :/"
+newtype ItemBuilder i = ItemBuilder {buildItem :: Short -> Maybe NBT -> Item i}
 
-instance Serial SlotData where
-  serialize (SlotData (SuchThat (Identity (i :: it))) count) = serialize (itemId @it) >> serialize count >> serialize (itemMeta i) >> (case itemNBT i of {Just nbt -> putByteString $ Cereal.encode (NBT "" nbt);Nothing -> putWord8 0x00})
-  deserialize = error "Unimplemented: deserialize @SlotData"
+-- This actually has a serializeable normal form given a supported set: http://wiki.vg/Slot_Data
+parseItemFromSet :: SupportedItems -> WireSlotData -> Maybe (ForAny Slot)
+parseItemFromSet _ (WireSlotData Nothing) = Just (ambiguate $ Slot Nothing)
+parseItemFromSet si (WireSlotData (Just (iId,count,meta,mNBT))) = case Map.lookup iId si of
+  Just (SuchThat b) -> Just . ambiguate . Slot . Just $ SlotData (buildItem b meta mNBT) count
+  Nothing -> Nothing -- error $ "No such item: " ++ show itemId
 
+--instance Serial (Slot i) where
+  --serialize (Slot Nothing) = serialize (-1 :: Short)
+  --serialize (Slot (Just sd)) = serialize @(SlotData i) sd
+  --deserialize = deserialize @Short >>= \case
+    --(-1) -> pure $ Slot Nothing
+    --_itemId -> error "Unimplemented: Deserialization of general Slots. May be unimplementable in general :/"
+
+--instance Serial (SlotData i) where
+  --serialize (SlotData (Item desc i) count) = serialize (itemId desc) >> serialize count >> serialize (itemMeta desc i) >> (case itemNBT desc i of {Just nbt -> putByteString $ Cereal.encode (NBT "" nbt);Nothing -> putWord8 0x00})
+  --deserialize = undefined
 
 generalizedRunNat :: (forall x. f x -> Eff r x) -> Eff (f ': r) a -> Eff r a
 generalizedRunNat n = handleRelay pure (\e k -> n e >>= k)
@@ -338,14 +645,11 @@ legacyHandshakePingConstant = BS.pack
 -- A Nibble is a Word8 that we promise (not enforced!!!) to only use the 4 least
 -- significant bits.
 -- TODO: Investigate `(Bool,Bool,Bool,Bool)` or `Vect 4 Bool` as alternative.
---type Nibble = Word8
+type Nibble = Word8
 
 -- An EncrptionCouplet holds the current internal state of the encryption
 -- mechanism, including both directions' shift buffers. (Cipher,Enc,Dec)
 type EncryptionCouplet = (AES128, BS.ByteString, BS.ByteString)
-
--- Verbify this to match all our other type synonyms like `HasWorld`
-type PerformsIO r = Member IO r
 
 -- Auth infrastructure is scary, I hope it doesn't break ever :3
 -- Parsed form of the result of authenticating a player with Mojang
@@ -508,8 +812,8 @@ blockOnSide (BlockLocation (x,y,z)) (SideFace South) = BlockLocation (x,y,z+1)
 blockOnSide (BlockLocation (x,y,z)) (SideFace West) = BlockLocation (x-1,y,z)
 blockOnSide (BlockLocation (x,y,z)) (SideFace East) = BlockLocation (x+1,y,z)
 
---some :: c a => a -> Some c
---some = ambiguate . Identity
+some :: c a => a -> Some c
+some = ambiguate . Identity
 
 -- The state of a block in the world (Block id, damage)
 data BlockState = BlockState Short Word8 deriving Eq
@@ -654,8 +958,8 @@ instance Serial (EntityMeta Float) where {}
 instance EntityMetaType String where entityMetaFlag = 0x03
 instance Serial (EntityMeta String) where {}
 
-instance EntityMetaType SlotData where entityMetaFlag = 0x05
-instance Serial (EntityMeta SlotData) where {}
+instance EntityMetaType WireSlotData where entityMetaFlag = 0x05
+instance Serial (EntityMeta WireSlotData) where {}
 
 instance EntityMetaType Bool where entityMetaFlag = 0x06
 instance Serial (EntityMeta Bool) where {}

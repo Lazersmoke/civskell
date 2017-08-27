@@ -28,17 +28,6 @@ instance Window Container where
   slotCount (Container s) = s
 -}
 
-class Window w where
-  -- Chest
-  windowName :: T.Text
-  -- minecraft:chest
-  windowIdentifier :: String
-  -- 27
-  slotCount :: Short
-  -- Bool is transaction success
-  onWindowClick :: (HasWorld r,SendsPackets r,Logs r,HasPlayer r) => w -> WindowId -> Short -> TransactionId -> InventoryClickMode -> Eff r Bool
-  --clientToCivskellSlot :: Short -> Short
-  --civskellToClientSlot :: Short -> Short
 
 defaultInventoryClick :: (SendsPackets r,Logs r,HasWorld r,HasPlayer r) => (Short -> Eff r Slot) -> (Short -> Slot -> Eff r ()) -> WindowId -> Short -> TransactionId -> InventoryClickMode -> Eff r Bool
 defaultInventoryClick gs ss wid slotNum transId = \case

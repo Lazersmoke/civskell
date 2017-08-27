@@ -171,7 +171,7 @@ handlePacketing = \case
   BeginEncrypting ss -> setupEncryption ss
   BeginCompression thresh -> setCompression thresh
 
-runNetworking :: PerformsIO r => TVar (Maybe EncryptionCouplet) -> TVar (Maybe VarInt) -> Handle -> Eff (Networking ': r) a -> Eff r a
+runNetworking :: Member IO r => TVar (Maybe EncryptionCouplet) -> TVar (Maybe VarInt) -> Handle -> Eff (Networking ': r) a -> Eff r a
 runNetworking mEnc mThresh hdl = runNat (handleNetworking mEnc mThresh hdl)
 
 handleNetworking :: TVar (Maybe EncryptionCouplet) -> TVar (Maybe VarInt) -> Handle -> Networking a -> IO a
