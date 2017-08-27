@@ -23,79 +23,41 @@
 
 -- TODO: This export list is pretty scary. We should make tiered modules or something
 module Civskell.Data.Types
-  -- Constants
-  (legacyHandshakePingConstant,legacyHandshakePongConstant
-  -- Helper functions
-  ,blockToChunk,blockToRelative,blockOnSide,formatPacket,showPacket,withLength,withListLength,indentedHex,comb,moveVec
-  -- Type synonyms
-  ,EncryptionCouplet,PerformsIO,Short,LegacyString
-  -- Blocks
-  ,BlockBreak(..),BlockLocation(..),BlockCoord,BlockOffset,BlockFace(..),CardinalDirection(..),BlockState(..)
-  -- Chunks
-  ,ChunkCoord(..)
-  -- Packet Information
-  ,AnimationAction(..),EntityInteraction(..),AsType(..)
-  ,ClientStatusAction(..),GameStateChange(..),InventoryClickMode(..),PlayerDigAction(..)
-  ,PlayerEntityAction(..),AuthPacket(..),AuthProperty(..),ClientAuthResponse(..),ClientAuthProfile(..)
-  -- Id's and newtypes
-  ,VarInt(..)
-  ,ProtocolOptional(..),ProtocolString(..),ProtocolList(..),ProtocolNBT(..),LengthAnnotatedByteString(..)
-  -- Aux Data Types
-  ,UUID(..)
-  -- Aux Enums
-  ,Difficulty(..),Dimension(..),Gamemode(..),Hand(..),MoveMode(..),AbilityFlags(..),ServerState(..)
-  -- Logging
-  ,Logs,Logging(..),LogLevel(..),LogQueue(..),freshLogQueue
-  -- Network
-  ,Networks,Networking(..)
-  -- Packeting
-  ,SendsPackets,Packeting(..)
-  -- Packet
-  ,PacketDescriptor(..),DescribedPacket(..)
-  ,OutboundPacketDescriptor
-  ,PacketSerializer(..),defaultSerializer
-  ,InboundPacketDescriptor
-  ,CanHandlePackets,PacketHandler(..)
-  ,ThreadingMode(..)
-  ,SupportedPackets
-  -- Configuration
-  ,Configured,Configuration(..),defaultConfiguration,forkConfig
-  -- Entity
-  ,Entity(..)
-  ,EntityMetaType(..)
-  ,EntityMeta(..)
-  ,EntityPropertySet(..)
-  ,EntityMetadata
-  ,EntityLocation(..)
-  ,EntityVelocity(..)
-  ,Mob
-  ,Object(..)
+  (module Civskell.Data.Common
+  ,module Civskell.Data.Logging
+  ,module Civskell.Data.Types
+  ,module Civskell.Data.Networking
   ) where
 
-import Control.Concurrent.STM
+import Civskell.Data.Common
+import Civskell.Data.Logging
+import Civskell.Data.Networking
+
 import GHC.Generics
-import Data.Hashable
+import qualified Data.Map.Lazy as Map
+import Data.Map.Lazy (Map)
 import Data.Functor.Identity
 import Data.Semigroup
 import Data.Foldable
 import Control.Monad.Freer
+import Control.Monad.Freer.Writer
+import Control.Monad.Freer.State
 import Control.Monad.Freer.Reader
+import Control.Concurrent.STM
 import Control.Monad
 import Crypto.Cipher.AES (AES128)
 import Data.Aeson (withObject,(.:),(.:?),(.!=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types
 import Data.Bits
-import Data.Int (Int16,Int32,Int64)
+import Data.Int
 import Data.NBT
+import Data.Text (Text)
 import Data.SuchThat
 import Data.String
-import Data.Text (Text)
-import qualified Data.Text as T
 import qualified GHC.Exts as Exts
-import Data.Word (Word64,Word8)
+import Data.Word
 import Hexdump (prettyHex)
-import Numeric (readHex,showHex)
 import Unsafe.Coerce (unsafeCoerce)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8
@@ -104,6 +66,210 @@ import Data.Bytes.Put
 import Data.Bytes.Get
 import qualified Data.Serialize as Cereal
 import qualified Data.Vector as Vector
+import qualified Data.Set as Set
+import Data.Attoparsec.ByteString
+
+-- All the information about a mineman world. Notably, players is a Map of PId's to TVars of player data, not actual player data
+data WorldData = WorldData 
+  {chunks :: Map ChunkCoord ChunkSection
+  ,entities :: Map EntityId (Some Entity)
+  ,players :: Map PlayerId (TVar PlayerData)
+  ,nextEID :: EntityId
+  ,nextUUID :: UUID
+  }
+
+-- Having transactional access to the World is an effect
+type WorldManipulation = State WorldData
+
+-- Having transactional access to a single Player's data is an effect
+type PlayerManipulation = State PlayerData
+
+-- Stores all the relevant information about a player
+-- TODO: Extensibility?
+data PlayerData = PlayerData
+  {teleportConfirmationQue :: Set.Set VarInt
+  ,nextTid :: VarInt
+  ,keepAliveQue :: Set.Set VarInt
+  ,nextKid :: VarInt
+  ,nextWid :: WindowId
+  -- Map of WindowId's to that window's metadata (including accessor effects)
+  --,windows :: Map.Map WindowId (Some Window)
+  ,failedTransactions :: Set.Set (WindowId,TransactionId)
+  ,holdingSlot :: Short
+  ,playerPosition :: (Double,Double,Double)
+  ,viewAngle :: (Float,Float)
+  ,gameMode :: Gamemode
+  -- player inventory is window 0
+  ,playerInventory :: Inventory
+  ,diggingBlocks :: Map.Map BlockCoord BlockBreak
+  ,moveMode :: MoveMode
+  ,playerState :: ServerState
+  ,clientUsername :: String
+  ,clientBrand :: String
+  ,clientUUID :: UUID
+  ,playerId :: PlayerId
+  ,packetQueue :: TQueue (ForAny (DescribedPacket PacketSerializer))
+  }
+
+-- This is a natural transformation from modifying a player to modifying a specific player in the world, given the player id of that player.
+modifyPlayerInWorld :: Members '[WorldManipulation,Logging] r => PlayerId -> Eff (State PlayerData ': r) a -> Eff r a
+modifyPlayerInWorld pId = generalizedRunNat $ \case
+  Get -> _
+  Put p' -> _
+
+type CanHandlePackets r = Members '[Packeting,IO,Logging] r
+
+-- Reading the configuration is an effect
+type Configured = Reader Configuration
+
+data PacketHandler p = PacketHandler 
+  {packetThreadingMode :: ThreadingMode
+  ,onPacket :: forall r. CanHandlePackets r => p -> Eff r ()
+  ,deserializePacket :: forall m. MonadGet m => m p
+  }
+
+type InboundPacketDescriptor = PacketDescriptor PacketHandler
+
+data Configuration = Configuration
+  {shouldLog :: LogLevel -> Bool
+  ,protocolVersion :: Integer
+  ,serverVersion :: Text
+  ,serverName :: Text
+  ,serverMotd :: Text
+  ,spawnLocation :: BlockCoord
+  ,defaultDifficulty :: Difficulty
+  ,defaultDimension :: Dimension
+  ,defaultGamemode :: Gamemode
+  ,maxPlayers :: Word8
+  ,compressionThreshold :: Maybe VarInt
+  ,packetsForState :: ServerState -> SupportedPackets PacketHandler
+  }
+
+defaultConfiguration :: Configuration
+defaultConfiguration = Configuration
+  {shouldLog = \case {HexDump -> False; _ -> True}
+  ,protocolVersion = 0
+  ,serverVersion = "Default"
+  ,serverName = "Civskell"
+  ,serverMotd = "An Experimental Minecraft server written in Haskell | github.com/Lazersmoke/civskell"
+  ,spawnLocation = BlockLocation (0,64,0)
+  ,defaultDifficulty = Peaceful
+  ,defaultDimension = Overworld
+  ,defaultGamemode = Survival
+  -- TODO: Check against this
+  ,maxPlayers = 100
+  ,compressionThreshold = Just 16
+  ,packetsForState = const Vector.empty
+  }
+
+newtype Slot = Slot (Maybe SlotData)
+
+instance Show Slot where
+  show (Slot (Just dat)) = "{" ++ show dat ++ "}"
+  show (Slot Nothing) = "{}"
+
+data SlotData = SlotData (Some Item) Word8
+
+class Item i where
+  -- TODO: Type level this when we have dependent types
+  itemId :: Short
+  itemIdentifier :: String
+  itemMeta :: i -> Short
+  itemMeta _ = 0
+  --itemPlaced :: i -> Maybe (Some Block)
+  --itemPlaced _ = Nothing
+  itemNBT :: i -> Maybe NbtContents
+  itemNBT _ = Nothing
+  -- TODO: param Slot i
+  parseItem :: Parser Slot
+  -- Some items do something when right clicked
+  onItemUse :: forall r. Member Logging r => Maybe (i -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Eff r ())
+  onItemUse = Nothing
+
+-- An inventory is a mapping from Slot numbers to Slot data (or lack thereof).
+-- TODO: Reconsider sparsity obligations of Map here, and decide on a better
+-- internal representation. Potentially make this abstract after all. There
+-- might be a really fitting purely functional data structure to show off here.
+type Inventory = Map.Map Short Slot
+
+-- Abstraction methods for Inventory, not really needed tbh.
+getSlot :: Short -> Inventory -> Slot
+getSlot = Map.findWithDefault (Slot Nothing)
+
+setSlot :: Short -> Slot -> Inventory -> Inventory
+setSlot i (Slot Nothing) = Map.delete i
+setSlot i s = Map.insert i s
+
+-- Sidestep existential nonsense when creating items
+slot :: Item i => i -> Word8 -> Slot
+slot i c = Slot . Just $ SlotData (ambiguate . Identity $ i) c
+
+-- This is a rather sketchy instance because itemId uniqueness is not enforced
+-- at type level, so we could actually get two different Item instances claiming
+-- the same id, meta, and NBT, which would make this `Eq` instance unreliable.
+-- In fact, it might be *impossible* to write an `Eq` instance for Slots
+-- involving general, open typeclass `Item`s because that would involve deciding
+-- equality for a `forall a. c a => p a` sort of thing, which would only be
+-- based on the `c` instance.
+instance Eq SlotData where
+  (SlotData (SuchThat (Identity (a :: at))) ac) == (SlotData (SuchThat (Identity (b :: bt))) bc) = itemId @at == itemId @bt && itemMeta a == itemMeta b && itemNBT a == itemNBT b && ac == bc
+
+slotAmount :: Slot -> Word8
+slotAmount (Slot (Just (SlotData _ c))) = c
+slotAmount (Slot Nothing) = 0
+
+-- Remove as many items as possible, up to count, return amount removed
+removeCount :: Word8 -> Slot -> (Word8,Slot)
+removeCount _ (Slot Nothing) = (0,Slot Nothing)
+removeCount c (Slot (Just (SlotData i count))) = if c < count then (c,Slot . Just $ SlotData i (count - c)) else (count,Slot Nothing)
+
+-- Count is how many to put into first stack from second
+splitStack :: Word8 -> Slot -> (Slot,Slot)
+splitStack _ (Slot Nothing) = (Slot Nothing,Slot Nothing)
+splitStack c s@(Slot (Just (SlotData i _))) = (firstStack,secondStack)
+  where
+    firstStack = if amtFirstStack == 0 then Slot Nothing else Slot . Just $ SlotData i amtFirstStack
+    (amtFirstStack,secondStack) = removeCount c s
+
+-- Pretty print a slot's data. Perhaps we should let `Item`s provide a fancy name for this instance to use.
+instance Show SlotData where
+  show (SlotData (SuchThat (Identity (i :: it))) count) = show count ++ " of [" ++ show (itemId @it) ++ ":" ++ show (itemMeta i) ++ "]" ++ n (itemNBT i)
+    where
+      -- Only display the NBT if it is actually there
+      n Nothing = ""
+      n (Just nbt) = " with tags: " ++ show nbt
+
+instance Serial Slot where
+  serialize (Slot Nothing) = serialize (-1 :: Short)
+  serialize (Slot (Just sd)) = serialize @SlotData sd
+  deserialize = deserialize @Short >>= \case
+    (-1) -> pure $ Slot Nothing
+    _itemId -> error "Unimplemented: Deserialization of general Slots. May be unimplementable in general :/"
+
+instance Serial SlotData where
+  serialize (SlotData (SuchThat (Identity (i :: it))) count) = serialize (itemId @it) >> serialize count >> serialize (itemMeta i) >> (case itemNBT i of {Just nbt -> putByteString $ Cereal.encode (NBT "" nbt);Nothing -> putWord8 0x00})
+  deserialize = error "Unimplemented: deserialize @SlotData"
+
+
+generalizedRunNat :: (forall x. f x -> Eff r x) -> Eff (f ': r) a -> Eff r a
+generalizedRunNat n = handleRelay pure (\e k -> n e >>= k)
+
+-- logToConsole is a natural transformation from `Writer`ing log messages to logging them to a TQueue for later transactional printing
+logToConsole :: Members '[Configured,IO] r => LogQueue -> Eff (Logging ': r) a -> Eff r a
+logToConsole (LogQueue l) = generalizedRunNat $ \case
+  Writer (LogMessage level str) -> do
+    -- Apply the configured loggin predicate to see if this message should be logged
+    p <- ($ level) . shouldLog <$> ask 
+    sName <- serverName <$> ask
+    -- Select the prefix, then send off the log message
+    when p $ send . atomically . writeTQueue l . (<>str) $ case level of
+      HexDump -> ""
+      ClientboundPacket -> "[\x1b[32mSent\x1b[0m] "
+      ServerboundPacket -> "[\x1b[32mRecv\x1b[0m] "
+      ErrorLog -> "[\x1b[31m\x1b[1mError\x1b[0m] "
+      VerboseLog -> "[\x1b[36m" <> sName <> "/Verbose\x1b[0m] "
+      (TaggedLog tag) -> "[\x1b[36m" <> tag <> "\x1b[0m] "
+      NormalLog -> "[\x1b[36m" <> sName <> "\x1b[0m] "
 
 newtype ProtocolNBT = ProtocolNBT {unProtocolNBT :: NBT}
 
@@ -168,15 +334,6 @@ legacyHandshakePingConstant = BS.pack
 -- Named Types --
 -----------------
 
--- These are types that go by another/more common name in the 
--- Minecraft Protocol, and are easier to understand with synonyms
-
--- A LegacyString is a String that is used in a Legacy Handshake packet
--- It is encoded with UTF-16BE internally
-type LegacyString = BS.ByteString
-
--- A Minecraft "Short" is a Haskell Int16
-type Short = Int16
 
 -- A Nibble is a Word8 that we promise (not enforced!!!) to only use the 4 least
 -- significant bits.
@@ -190,123 +347,6 @@ type EncryptionCouplet = (AES128, BS.ByteString, BS.ByteString)
 -- Verbify this to match all our other type synonyms like `HasWorld`
 type PerformsIO r = Member IO r
 
--- A variably-sized integer, maximum 32 bits
--- Note that they are serialized differently from a normal Int32, so we need a newtype. 
-newtype VarInt = VarInt {unVarInt :: Int32} deriving (Bits,Enum,Eq,Integral,Num,Ord,Real,Hashable) -- All instances are GND
-
--- Deriving this gives "VarInt {unVarInt = <whatever>}"
-instance Show VarInt where show = show . unVarInt
-
--- VarInt format in binary is:
---   
---   iddddddd iddddddd ...
--- 
--- Where when `i` is set, there is still another byte to be read. All the `d`s
--- from all the bytes are concatenated without spacing to form the actual number.
-instance Serial VarInt where
-  serialize n = if n' /= 0
-    -- If there are more, set the msb and recurse
-    then putWord8 (0b10000000 .|. writeNow) >> serialize n'
-    -- Otherwise, just use this one
-    else putWord8 writeNow
-    where
-      -- Write first seven bits
-      writeNow = (unsafeCoerce :: VarInt -> Word8) $ n .&. 0b01111111
-      n' = shiftR n 7
-  -- TODO: verify this
-  deserialize = do
-    b <- getWord8
-    if testBit b 7 
-      then (\rest -> (unsafeCoerce $ b .&. 0b01111111) .|. shiftL rest 7) <$> deserialize @VarInt
-      else pure (unsafeCoerce $ b .&. 0b01111111)
-
-
-----------
--- UUID --
-----------
-
--- TODO: Investigate using a library to provide this type for seperation of concerns
--- There is no native Word128 type, so we role our own here.
-newtype UUID = UUID (Word64,Word64)
-
--- This show instance should match the standard Minecraft display format.
-instance Show UUID where
-  show (UUID (ua,ub)) = reformat $ showHex ua (showHex ub "")
-    where
-      -- Add a hyphen at an index
-      ins i s = let (a,b) = splitAt i s in a ++ "-" ++ b
-      -- Reformat the uuid to what the client expects
-      reformat = ins 8 . ins 12 . ins 16 . ins 20
-
--- A UUID is pretending to be a Word128, so just smoosh all the bits together
-instance Serial UUID where
-  serialize (UUID (a,b)) = putWord64be a >> putWord64be b
-  deserialize = (UUID .) . (,) <$> getWord64be <*> getWord64be
-
-
------------------------
--- Block Coordinates --
------------------------
-
--- A block coordinate, not an entity position. Ord is derivied for use in maps,
--- but does not represent any specific concrete ordering, and should not be
--- relied on for serialization to a given format.
-data BlockLocation (r :: Relativity)
-  = BlockLocation (Int,Int,Int) -- (x,y,z)
-  deriving (Eq,Ord)
-
--- Kind for BlockOffset vs BlockCoord
-data Relativity = Relative | Absolute
-
--- BlockLocations have some weakish dimensionality. `Absolute` means that it is
--- an absolute coord relative to (0,0,0). `Relative` means that it is an offset,
--- often, but not always, relative to a chunk's local (min x,min y = 0, min z)
-type BlockCoord = BlockLocation 'Absolute
-type BlockOffset = BlockLocation 'Relative
-
--- Have different Show instances to respect the difference as well.
-instance Show BlockCoord where
-  show (BlockLocation (x,y,z)) = "(Block)<" ++ show x ++ "," ++ show y ++ "," ++ show z ++ ">"
-
-instance Show BlockOffset where
-  show (BlockLocation (x,y,z)) = "(Offset)<" ++ show x ++ "," ++ show y ++ "," ++ show z ++ ">"
-
-{- This is a bad instance that took almost an hour to debug. It still isn't fixed, just worked around (it's derived, and we don't rely on its ordering in Map.elems)
- - QuickCheck your instances, kids!
-instance Ord BlockCoord where
-  compare a@(BlockCoord (xa,ya,za)) b@(BlockCoord (xb,yb,zb)) = if a == b then EQ else if yb > ya then GT else if zb > za then GT else if xb > xa then GT else LT
--}
-
--- Only absolute coords can be serialized. This uses Minecraft's efficient
--- packing of coords into bits of an Int64 because the Y coord is very limited
--- in range compared to X and Z.
-instance Serial BlockCoord where
-  serialize (BlockLocation (x,y,z)) = serialize $
-    -- 26 MSB
-    (shiftL (u x .&. 0x3FFFFFF) 38) .|.
-    -- 12 middle bits
-    (shiftL (u y .&. 0xFFF) 26) .|.
-    -- 26 LSB
-    (u z .&. 0x3FFFFFF)
-    where
-      u = unsafeCoerce :: Int -> Int64
-  -- Untested
-  deserialize = (\w -> BlockLocation (u $ 0x3FFFFFF .&. (w `shiftR` 38),u $ 0xFFF .&. (w `shiftR` 26),u $ 0x3FFFFFF .&. w)) <$> deserialize @Int64
-    where
-      u = unsafeCoerce :: Int64 -> Int
------------------------
--- Chunk Coordinates --
------------------------
-
--- A Chunk Coord is a coordinate *of* a chunk slice, not *in* a chunk slice.
--- TODO: Investigate not using chunks at all, and only serializing to chunks on
--- demand. This can probably be very lazy and very efficient. Maybe even include
--- lazy chunk generation!
-newtype ChunkCoord = ChunkCoord (Int,Int,Int) deriving (Eq,Ord)
-
--- This mirrors the format of `Show BlockLocation`
-instance Show ChunkCoord where
-  show (ChunkCoord (x,y,z)) = "(Chunk)<" ++ show x ++ "," ++ show y ++ "," ++ show z ++ ">"
 -- Auth infrastructure is scary, I hope it doesn't break ever :3
 -- Parsed form of the result of authenticating a player with Mojang
 data AuthPacket = AuthPacket UUID String [AuthProperty]
@@ -315,11 +355,6 @@ data AuthPacket = AuthPacket UUID String [AuthProperty]
 instance Data.Aeson.Types.FromJSON AuthPacket where
   parseJSON (Aeson.Object o) = AuthPacket <$> o .: "id" <*> o .: "name" <*> o .: "properties"
   parseJSON x = Data.Aeson.Types.typeMismatch "AuthPacket" x
-
-instance Data.Aeson.Types.FromJSON UUID where
-  parseJSON (Aeson.String s) = pure $ (\i -> UUID (fromInteger $ i .&. 0xFFFFFFFFFFFFFFFF,fromInteger $ shiftR i 8)) . fst . head . readHex . T.unpack $ s
-  parseJSON x = Data.Aeson.Types.typeMismatch "UUID" x
-
 -- Helper type to support the arbitrary properties in auth packets
 data AuthProperty = AuthProperty ProtocolString ProtocolString (ProtocolOptional ProtocolString) deriving Generic
 
@@ -340,100 +375,6 @@ data ClientAuthProfile = ClientAuthProfile {clientAuthProfileId :: String, clien
 
 instance Data.Aeson.Types.FromJSON ClientAuthProfile where
   parseJSON = withObject "Client Auth Profile" $ \o -> ClientAuthProfile <$> o .: "id" <*> o .: "name" <*> o .:? "legacy" .!= False
-
--- Packets are ambiguous in the Notchian spec, so we need to carry around a
--- "State" that tells us how to parse the packets. This should eventually be
--- replaced by a config option that contains just a `Set (Parser Packet)` or
--- something like that.
-data ServerState = Handshaking | Playing | LoggingIn | Status deriving (Generic,Eq)
-
-instance Hashable ServerState where {}
-
---------------------
--- Notchian Enums --
---------------------
-
-data Gamemode = Survival | Creative {- | Adventure | Spectator -} deriving Show
-
-instance Serial Gamemode where
-  serialize = putWord8 . \case
-    Survival -> 0x00 
-    Creative -> 0x01 
-  deserialize = getWord8 >>= pure . \case
-    0x00 -> Survival
-    0x01 -> Creative
-    x -> error $ "Deserialization error: deserialize @Gamemode called with " ++ show x
-
-data Difficulty = Peaceful | Easy | Normal | Hard deriving Show
-
-instance Serial Difficulty where
-  serialize = putWord8 . \case
-    Peaceful -> 0x00
-    Easy -> 0x01
-    Normal -> 0x02
-    Hard -> 0x03
-  deserialize = getWord8 >>= pure . \case
-    0x00 -> Peaceful 
-    0x01 -> Easy 
-    0x02 -> Normal 
-    0x03 -> Hard 
-    x -> error $ "Deserialization error: deserialize @Difficulty called with " ++ show x
-
-data Dimension = Nether | Overworld | TheEnd deriving Show
-
-instance Serial Dimension where
-  serialize = serialize . \case
-    Nether -> (-1 :: Int32)
-    Overworld -> (0 :: Int32)
-    TheEnd -> (1 :: Int32)
-  deserialize = getWord8 >>= pure . \case
-    (-1) -> Nether
-    0 -> Overworld
-    1 -> TheEnd
-    x -> error $ "Deserialization error: deserialize @Dimension called with " ++ show x
-
-data Hand = MainHand | OffHand deriving (Show,Eq)
-
-instance Serial Hand where
-  serialize MainHand = serialize @VarInt 0
-  serialize OffHand = serialize @VarInt 1
-  deserialize = flip fmap (deserialize @VarInt) $ \case
-    0 -> MainHand
-    1 -> OffHand
-    x -> error $ "deserialize @Hand: Got (VarInt) " <> show x
-
-data BlockFace = Bottom | Top | SideFace CardinalDirection deriving Show
-
-instance Serial BlockFace where
-  serialize = serialize @VarInt . fromIntegral . fromEnum
-  deserialize = toEnum . fromIntegral <$> deserialize @VarInt
-
-instance Enum BlockFace where
-  toEnum = \case
-    0 -> Bottom
-    1 -> Top
-    n -> SideFace (toEnum n)
-  fromEnum = \case
-    Bottom -> 0
-    Top -> 1
-    SideFace f -> fromEnum f
-
-data CardinalDirection = North | South | West | East deriving Show
-
-instance Enum CardinalDirection where
-  toEnum = \case
-    2 -> North
-    3 -> South
-    4 -> West
-    5 -> East
-    _ -> error "toEnum CardinalDirection"
-  fromEnum = \case
-    North -> 2
-    South -> 3
-    West -> 4
-    East -> 5
-
-data MoveMode = Sprinting | Sneaking | Walking | Gliding | Flying
 
 -------------------------
 -- Packet Helper Types --
@@ -572,36 +513,12 @@ blockOnSide (BlockLocation (x,y,z)) (SideFace East) = BlockLocation (x+1,y,z)
 
 -- The state of a block in the world (Block id, damage)
 data BlockState = BlockState Short Word8 deriving Eq
--- Helper function to format Packets during logging
--- Takes a packet name and a list of properties (name value pairs). Empty values only show the name
-formatPacket :: Text -> [(Text,Text)] -> Text
-formatPacket n [] = "{" <> n <> "}"
-formatPacket n xs = flip (<>) "]" . (<>) ("{" <> n <> "} [") . T.intercalate " | " . map (\(name,val) -> if val == "" then name else name <> ": " <> val) $ xs
 
 -- Used in PlayerData to track the breaking stage of a block the player is mining.
 data BlockBreak 
   = InProgress Word8 -- The block is still being broken, and has been for this many ticks.
   | DoneBreaking -- The block is done breaking and should be removed, and this entry removed.
 
--- Logging to console without overwriting all the other threads that are also logging to console is an effect
-type Logs r = Member Logging r
-
-data Logging a where
-  -- Log a string at a given Log Level
-  LogText :: LogLevel -> Text -> Logging ()
-  -- Commute a Logging effect out of a stack
-  ForkLogger :: (Configured r,PerformsIO r) => Eff (Logging ': r) a -> Logging (Eff r a)
-
--- TODO: replace this with a `data LogSpec = LogSpec {spec :: String -> String,level :: Int}`?
--- Level of verbosity to log at
-data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | VerboseLog | TaggedLog Text | NormalLog deriving Eq
-
--- A thing that shuffles log messages off of running threads and logs that whenever on a dedicated one.
-newtype LogQueue = LogQueue (TQueue Text)
-
--- Make a new, empty LogQueue
-freshLogQueue :: PerformsIO r => Eff r LogQueue
-freshLogQueue = LogQueue <$> send newTQueueIO 
 -- Combinator for serializing Maybes in a Minecrafty way
 --serOpt :: (MonadPut m,Serial s) => Maybe s -> m ()
 --serOpt (Just a) = serialize True >> serialize a
@@ -662,66 +579,6 @@ newtype LengthAnnotatedByteString = LengthAnnotatedByteString {unLengthAnnotated
 instance Serial LengthAnnotatedByteString where
   serialize (LengthAnnotatedByteString bs) = serialize @VarInt (fromIntegral $ BS.length bs) *> putByteString bs
   deserialize = LengthAnnotatedByteString <$> (getByteString . fromIntegral =<< deserialize @VarInt)
-
-data PacketDescriptor h p = PacketDescriptor 
-  {packetPretty :: p -> [(Text,Text)]
-  ,packetName :: Text
-  ,packetState :: ServerState
-  ,packetHandler :: h p
-  }
-
-type InboundPacketDescriptor = PacketDescriptor PacketHandler
-
-type OutboundPacketDescriptor = PacketDescriptor PacketSerializer
-
-data DescribedPacket h p = DescribedPacket (PacketDescriptor h p) p
-
-data ThreadingMode = SerialThreading | ParThreading
-
-data PacketSerializer p = PacketSerializer 
-  {packetId :: VarInt
-  ,serializePacket :: forall m. MonadPut m => p -> m ()
-  }
-
-defaultSerializer :: Serial p => VarInt -> PacketSerializer p
-defaultSerializer pId = PacketSerializer {packetId = pId, serializePacket = serialize}
-
-type CanHandlePackets r = (Configured r,SendsPackets r,PerformsIO r,Logs r) --HasPlayer r,HasWorld r)
-
-data PacketHandler p = PacketHandler 
-  {packetThreadingMode :: ThreadingMode
-  ,onPacket :: forall r. CanHandlePackets r => p -> Eff r ()
-  ,deserializePacket :: forall m. MonadGet m => m p
-  }
-
-type SupportedPackets h = Vector.Vector (SuchThat '[Serial] (PacketDescriptor h))
-
-moveVec :: Int -> Int -> Vector.Vector a -> Vector.Vector a
-moveVec old new v = Vector.concat [before,between,Vector.singleton oldelem,after]
-  where
-    before = Vector.slice 0 old v
-    oldelem = v Vector.! old
-    between = Vector.slice (old + 1) (new - old - 1) v
-    after = Vector.slice (new + 1) (Vector.length v - new - 1) v 
-
--- Ignore the function because nobody likes functions
---instance Hashable (SuchThat x (PacketDescriptor h)) where
-  --hashWithSalt s (SuchThat desc) = s `hashWithSalt` packetName desc `hashWithSalt` packetId desc `hashWithSalt` packetState desc
-
---instance Eq (SuchThat x (PacketDescriptor h)) where
-  --(SuchThat a) == (SuchThat b) = packetName a == packetName b && packetId a == packetId b && packetState a == packetState b
-
--- We can't make this an actual `Show` instance without icky extentions. Also,
--- the instance context is not checked during instance selection, so we would
--- have to make a full on `instance Show a where`, which is obviously bad.
-showPacket :: PacketDescriptor h p -> p -> Text
-showPacket pktDesc p = formatPacket (packetName pktDesc) (packetPretty pktDesc p)
-
--- A `InboundPacket s` is a thing that is a HandledPacket with the given PacketState
---newtype InboundPacket s = InboundPacket (SuchThatStar '[PacketWithState s,HandledPacket])
-
--- A `OutboundPacket s` is a thing with the given PacketState
---newtype OutboundPacket s = OutboundPacket (SuchThatStar '[PacketWithState s,Serial])
 
 -- Entities are things with properties
 class Entity m where
@@ -797,6 +654,9 @@ instance Serial (EntityMeta Float) where {}
 instance EntityMetaType String where entityMetaFlag = 0x03
 instance Serial (EntityMeta String) where {}
 
+instance EntityMetaType SlotData where entityMetaFlag = 0x05
+instance Serial (EntityMeta SlotData) where {}
+
 instance EntityMetaType Bool where entityMetaFlag = 0x06
 instance Serial (EntityMeta Bool) where {}
 
@@ -818,81 +678,9 @@ instance Serial (EntityMeta (Maybe BlockState)) where
     0 -> pure (EntityMeta Nothing)
     x -> pure $ EntityMeta $ Just $ BlockState (unsafeCoerce $ shiftR x 4) (unsafeCoerce $ x .&. 0xf)
 
--- Having access to low-level networking operations is an effect
-type Networks r = Member Networking r
-
-data Networking a where
-  -- Commute a Networking effect off a stack
-  ForkNetwork :: PerformsIO r => Eff (Networking ': r) a -> Networking (Eff r a)
-  -- Turn compression on and set the threshold
-  SetCompressionLevel :: VarInt -> Networking ()
-  -- Add compression (if enabled) and packet metadata. Should be used after adding packetId, but before sending
-  AddCompression :: BS.ByteString -> Networking BS.ByteString
-  -- Remove compression (if enabled) and strip packet metadata. Packets are left with packetId intact
-  RemoveCompression :: BS.ByteString -> Networking BS.ByteString
-  -- Turn encryption on using the given Shared Secret
-  SetupEncryption :: BS.ByteString -> Networking ()
-  -- Send bytes over the network, encrypting if enabled
-  PutIntoNetwork :: BS.ByteString -> Networking ()
-  -- Read bytes from the network, decrypting if enabled
-  GetFromNetwork :: Int -> Networking BS.ByteString
-
--- Having access to a high-level networking interface is an effect
-type SendsPackets r = Member Packeting r
-
-data Packeting a where
-  -- Send a packet for any packet state
-  SendPacket :: ForAny (DescribedPacket PacketSerializer) -> Packeting ()
-  -- Send raw bytes over the network (used in LegacyHandshakePong)
-  UnsafeSendBytes :: BS.ByteString -> Packeting ()
-  -- Use the given shared secret to enable encryption
-  BeginEncrypting :: BS.ByteString -> Packeting ()
-  -- Use the given threshold to enable compression
-  BeginCompression :: VarInt -> Packeting ()
-
 -- Indent the hexdump; helper function
 indentedHex :: BS.ByteString -> String
 indentedHex = init . unlines . map ("  "++) . lines . prettyHex
-
--- Reading the configuration is an effect
-type Configured r = Member (Reader Configuration) r
-
-data Configuration = Configuration
-  {shouldLog :: LogLevel -> Bool
-  ,protocolVersion :: Integer
-  ,serverVersion :: Text
-  ,serverName :: Text
-  ,serverMotd :: Text
-  ,spawnLocation :: BlockCoord
-  ,defaultDifficulty :: Difficulty
-  ,defaultDimension :: Dimension
-  ,defaultGamemode :: Gamemode
-  ,maxPlayers :: Word8
-  ,compressionThreshold :: Maybe VarInt
-  ,packetsForState :: ServerState -> SupportedPackets PacketHandler
-  }
-
-defaultConfiguration :: Configuration
-defaultConfiguration = Configuration
-  {shouldLog = \case {HexDump -> False; _ -> True}
-  ,protocolVersion = 0
-  ,serverVersion = "Default"
-  ,serverName = "Civskell"
-  ,serverMotd = "An Experimental Minecraft server written in Haskell | github.com/Lazersmoke/civskell"
-  ,spawnLocation = BlockLocation (0,64,0)
-  ,defaultDifficulty = Peaceful
-  ,defaultDimension = Overworld
-  ,defaultGamemode = Survival
-  -- TODO: Check against this
-  ,maxPlayers = 100
-  ,compressionThreshold = Just 16
-  ,packetsForState = const Vector.empty
-  }
-
-forkConfig :: Member (Reader Configuration) q => Eff (Reader Configuration ': r) a -> Eff q (Eff r a)
-forkConfig e = do
-  c <- ask
-  pure $ runReader e c
 
 comb :: Some c -> (forall a. c a => r) -> r
 comb (SuchThat (Identity (_ :: a))) f = f @a

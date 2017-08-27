@@ -25,7 +25,6 @@ import Crypto.Hash (hash,Digest,SHA1)
 import Numeric (showHex)
 
 import Civskell.Data.Types
-import Civskell.Data.Protocol
 import Civskell.Data.Util
 import Civskell.Item
 

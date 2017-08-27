@@ -20,12 +20,6 @@ import Civskell.Data.Types
 import Civskell.Data.Protocol
 import Civskell.Data.Player
 
--- All the information about a mineman world. Notably, players is a Map of PId's to TVars of player data, not actual player data
-data WorldData = WorldData {chunks :: Map ChunkCoord ChunkSection, entities :: Map EntityId (Some Entity), players :: Map PlayerId (TVar PlayerData), nextEID :: EntityId, nextUUID :: UUID}
-
--- Having access to the World is an effect
-type HasWorld r = Member World r
-
 data World a where
   -- Commute a World effect out of a stack
   ForkWorld :: (Logs r,PerformsIO r) => Eff (World ': r) a -> World (Eff r a)

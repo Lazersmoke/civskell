@@ -1,68 +1,53 @@
 {-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
-module Civskell.Data.Logging 
-  (logg,loge,logt
-  ,logLevel
-  ,LogLevel(..)
-  ,forkLogger
-  ,runLogger
-  ) where
+module Civskell.Data.Logging where
 
 import Control.Monad.Freer
-import Control.Monad.Freer.Reader
-import Control.Monad (when)
+import Control.Monad.Freer.Writer
 import Control.Concurrent.STM
 import Data.Text (Text)
-import Data.Semigroup ((<>))
 
-import Civskell.Data.Types
+-- Logging to console without overwriting all the other threads that are also logging to console is an effect
+type Logging = Writer LogMessage
+
+-- Log a string at a given Log Level
+data LogMessage = LogMessage LogLevel Text
+
+-- TODO: replace this with a `data LogSpec = LogSpec {spec :: String -> String,level :: Int}`?
+-- Level of verbosity to log at
+data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | VerboseLog | TaggedLog Text | NormalLog deriving Eq
+
+-- A thing that shuffles log messages off of running threads and logs that whenever on a dedicated one.
+newtype LogQueue = LogQueue (TQueue Text)
+
+-- Make a new, empty LogQueue
+freshLogQueue :: Member IO r => Eff r LogQueue
+freshLogQueue = LogQueue <$> send newTQueueIO 
 
 -- Synonym for logging with default precedence
 {-# INLINE logg #-}
-logg :: Logs r => Text -> Eff r ()
-logg = send . LogText NormalLog
+logg :: Member Logging r => Text -> Eff r ()
+logg = logLevel NormalLog
 
 -- Synonym for logging an error
 {-# INLINE loge #-}
-loge :: Logs r => Text -> Eff r ()
-loge = send . LogText ErrorLog
+loge :: Member Logging r => Text -> Eff r ()
+loge = logLevel ErrorLog
 
 -- Synonym for logging something with a special tag
 {-# INLINE logt #-}
-logt :: Logs r => Text -> Text -> Eff r ()
-logt tag msg = send $ LogText (TaggedLog tag) msg
+logt :: Member Logging r => Text -> Text -> Eff r ()
+logt tag = logLevel (TaggedLog tag)
 
 -- Synonym for Logging with a specified log level
 {-# INLINE logLevel #-}
-logLevel :: Logs r => LogLevel -> Text -> Eff r ()
-logLevel l s = send (LogText l s)
+logLevel :: Member Logging r => LogLevel -> Text -> Eff r ()
+logLevel l s = tell (LogMessage l s)
 
-forkLogger :: (Configured r,Logs q,PerformsIO r) => Eff (Logging ': r) a -> Eff q (Eff r a)
-forkLogger = send . ForkLogger
+--forkLogger :: (Configured r,Logs q,PerformsIO r) => Eff (Logging ': r) a -> Eff q (Eff r a)
+--forkLogger = send . ForkLogger
 
-runLogger :: (Configured r,PerformsIO r) => LogQueue -> Eff (Logging ': r) a -> Eff r a
-runLogger lq = handleRelay return (handleLog lq)
-
-handleLog :: (Configured r,PerformsIO r) => LogQueue -> Logging v -> Arr r v a -> Eff r a
-handleLog (LogQueue l) lg k = case lg of
-  ForkLogger e -> k $ runLogger (LogQueue l) e
-  LogText level str -> do
-    -- Apply the configured loggin predicate to see if this message should be logged
-    p <- ($ level) . shouldLog <$> ask 
-    sName <- serverName <$> ask
-    -- Select the prefix, then send off the log message
-    when p $ send . atomically . writeTQueue l . (<>str) $ case level of
-      HexDump -> ""
-      ClientboundPacket -> "[\x1b[32mSent\x1b[0m] "
-      ServerboundPacket -> "[\x1b[32mRecv\x1b[0m] "
-      ErrorLog -> "[\x1b[31m\x1b[1mError\x1b[0m] "
-      VerboseLog -> "[\x1b[36m" <> sName <> "/Verbose\x1b[0m] "
-      (TaggedLog tag) -> "[\x1b[36m" <> tag <> "\x1b[0m] "
-      NormalLog -> "[\x1b[36m" <> sName <> "\x1b[0m] "
-    -- Return regardless of log level
-    k ()
