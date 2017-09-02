@@ -1,32 +1,28 @@
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE PolyKinds #-}
 module Civskell.Block.Stone where
 
+import Unsafe.Coerce (unsafeCoerce)
+
 import Civskell.Data.Types
 import Civskell.Data.Block
---import Civskell.Block.Cobblestone
 
 -- Bool isPolished
 data Stone (t :: AsType) = Stone | Granite Bool | Diorite Bool | Andesite Bool
 
 convStone :: forall b a. Stone a -> Stone b
-convStone = \case
-    Stone -> Stone :: Stone b
-    Granite False -> Granite False :: Stone b
-    Granite True -> Granite True :: Stone b
-    Diorite False -> Diorite False :: Stone b
-    Diorite True -> Diorite True :: Stone b
-    Andesite False -> Andesite False :: Stone b
-    Andesite True -> Andesite True :: Stone b
+convStone = unsafeCoerce
 
-instance Block (Stone 'AsBlock) where
-  blockId = 1
-  blockIdentifier = "minecraft:stone"
-  blockMeta = \case
+stoneToBlock :: Item (Stone 'AsItem) -> Block (Stone 'AsBlock)
+stoneToBlock (Item _itemStone s) = Block stone (convStone s)
+
+stone :: BlockDescriptor (Stone 'AsBlock)
+stone = BlockDescriptor
+  {blockId = 1
+  ,blockIdentifier = "minecraft:stone"
+  ,blockMeta = \case
     Stone -> 0
     Granite False -> 1
     Granite True -> 2
@@ -34,7 +30,7 @@ instance Block (Stone 'AsBlock) where
     Diorite True -> 4
     Andesite False -> 5
     Andesite True -> 6
-  blockName = \case
+  ,blockName = \case
     Stone -> "Stone"
     Granite False -> "Granite"
     Granite True -> "Polished Granite"
@@ -42,10 +38,17 @@ instance Block (Stone 'AsBlock) where
     Diorite True -> "Polished Diorite"
     Andesite False -> "Andesite"
     Andesite True -> "Polished Andesite"
-  droppedItem = Just $ some . convStone @'AsItem
+  ,onClick = Nothing
+  --,droppedItem = Just $ some . convStone @'AsItem
+  }
 
-instance Item (Stone 'AsItem) where
-  itemId = 0x1
-  itemIdentifier = "minecraft:stone"
-  onItemUse = Just (placeBlock . convStone @'AsBlock)
-  parseItem = standardParser (Stone @'AsItem)
+itemStone :: ItemDescriptor (Stone 'AsItem)
+itemStone = ItemDescriptor
+  {itemId = 0x1
+  ,itemIdentifier = "minecraft:stone"
+  ,itemMeta = const 0
+  ,itemNBT = const Nothing
+  ,onItemUse = placeBlock stoneToBlock
+  --,parseItem = standardParser (Stone @'AsItem)
+  }
+

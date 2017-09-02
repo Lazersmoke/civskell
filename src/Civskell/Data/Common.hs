@@ -172,6 +172,20 @@ instance Show ChunkCoord where
 -- There is no native Word128 type, so we role our own here.
 newtype UUID = UUID (Word64,Word64)
 
+instance Enum UUID where
+  succ (UUID (a,b)) 
+    | b /= maxBound = UUID (a, succ b)
+    | otherwise = if a == maxBound 
+      then error "Enum.succ{UUID}: tried to take `succ' of maxBound" 
+      else UUID (succ a, minBound)
+  pred (UUID (a,b)) 
+    | b /= minBound = UUID (a, pred b)
+    | otherwise = if a == minBound 
+      then error "Enum.pred{UUID}: tried to take `pred' of minBound" 
+      else UUID (pred a, maxBound) 
+  toEnum n = UUID (0,fromIntegral n)
+  fromEnum (UUID (_,n)) = fromIntegral n
+
 -- This show instance should match the standard Minecraft display format.
 instance Show UUID where
   show (UUID (ua,ub)) = reformat $ showHex ua (showHex ub "")
@@ -196,7 +210,7 @@ instance Data.Aeson.Types.FromJSON UUID where
 -- Notchian Enums --
 --------------------
 
-data Gamemode = Survival | Creative {- | Adventure | Spectator -} deriving Show
+data Gamemode = Survival | Creative deriving Show
 
 instance Serial Gamemode where
   serialize = putWord8 . \case

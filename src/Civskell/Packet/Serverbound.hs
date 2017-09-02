@@ -115,7 +115,7 @@ enchantItem = defaultDescriptor Playing "EnchantItem" $ \(EnchantItem wid ench) 
 -- Slot Number
 -- THIS SERIAL INSTANCE IS INCORRECT:
 -- Button is in InventoryClickMode but should be before the transaction Id
-data ClickWindow = ClickWindow WindowId Short TransactionId InventoryClickMode WireSlotData
+data ClickWindow = ClickWindow WindowId Short TransactionId InventoryClickMode WireSlot
 instance Serial ClickWindow where
   serialize = error "Unimplemented: serialize @Server.ClickWindow"
   deserialize = error "Unimplemented: deserialize @Server.ClickWindow"
@@ -250,7 +250,7 @@ data HeldItemChange = HeldItemChange Short deriving (Generic,Serial)
 heldItemChange :: (forall r. CanHandlePackets r => HeldItemChange -> Eff r ()) -> InboundPacketDescriptor HeldItemChange
 heldItemChange = defaultDescriptor Playing "HeldItemChange" $ \(HeldItemChange i) -> [("Slot",showText i)]
 
-data CreativeInventoryAction = CreativeInventoryAction Short WireSlotData deriving (Generic,Serial)
+data CreativeInventoryAction = CreativeInventoryAction Short WireSlot deriving (Generic,Serial)
 creativeInventoryAction :: (forall r. CanHandlePackets r => CreativeInventoryAction -> Eff r ()) -> InboundPacketDescriptor CreativeInventoryAction
 creativeInventoryAction = defaultDescriptor Playing "CreativeInventoryAction" $ \(CreativeInventoryAction slotNum item) -> [("Slot",showText slotNum),("New Item", showText item)]
 

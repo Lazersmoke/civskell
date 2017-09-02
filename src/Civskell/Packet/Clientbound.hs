@@ -1,4 +1,7 @@
 {-# LANGUAGE BinaryLiterals #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeInType #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
@@ -14,25 +17,28 @@
 module Civskell.Packet.Clientbound where
 
 import Crypto.Hash (hash,Digest,SHA1)
+import Data.Text (Text)
+import Control.Monad.Freer
+import Control.Monad.Freer.State
+import Control.Monad
+import Control.Lens
 import qualified Data.Text as T
 import Data.Semigroup
-import Data.Functor.Identity
 import Data.Bits
 import Data.Bytes.Serial
 import Data.Bytes.Put
 import Data.Bytes.Get
+import Data.Maybe (fromMaybe)
 import Data.Int
 import Data.SuchThat
 import Data.Word
-import GHC.Generics
+import GHC.Generics (Generic)
 import Numeric (showHex)
 import qualified Data.ByteString as BS
 import Unsafe.Coerce
 
 import Civskell.Data.Types
-import Civskell.Data.Protocol
-import Civskell.Item
-import Civskell.Window
+import Civskell.Data.Util
 
 defaultDescriptor :: Serial p => ServerState -> T.Text -> (p -> [(T.Text,T.Text)]) -> VarInt -> OutboundPacketDescriptor p
 defaultDescriptor ss name pret pktId = PacketDescriptor 
@@ -81,7 +87,7 @@ statusPong :: VarInt -> OutboundPacketDescriptor StatusPong
 statusPong = defaultDescriptor Status "StatusPong" $ \(StatusPong pongTok) -> [("Pong Token",T.pack $ "0x" ++ showHex pongTok "")]
 
 -- EID, UUID, Type of Object, x, y, z, pitch, yaw, Object Data, velx, vely, velz
-data SpawnObject = SpawnObject EntityId UUID (Some Object)
+data SpawnObject = SpawnObject EntityId UUID (Satisfies Object)
 spawnObject :: VarInt -> OutboundPacketDescriptor SpawnObject
 spawnObject = defaultDescriptor Playing "SpawnObject" $ pp
   where
@@ -111,12 +117,12 @@ spawnGlobalEntity :: VarInt -> OutboundPacketDescriptor SpawnGlobalEntity
 spawnGlobalEntity = defaultDescriptor Playing "SpawnGlobalEntity" $ \(SpawnGlobalEntity _ _ _) -> []
 
 -- EID, UUID, Type, x, y, z, yaw, pitch, head pitch, velx, vely, velz, Metadata
---data SpawnMob = SpawnMob EntityId UUID (Some Entity) Word8 EntityPropertySet deriving (Generic,Serial)
+--data SpawnMob = SpawnMob EntityId UUID (Satisfies Entity) Word8 EntityPropertySet deriving (Generic,Serial)
 data SpawnMob = SpawnMob EntityId UUID VarInt (Double,Double,Double) (Word8,Word8,Word8) (Short,Short,Short) EntityPropertySet deriving (Generic,Serial)
 spawnMob :: VarInt -> OutboundPacketDescriptor SpawnMob
 spawnMob = defaultDescriptor Playing "SpawnMob" $ \(SpawnMob eid uuid mobType pos look vel _props) -> [("Entity Id",showText eid),("UUID",showText uuid),("Type",showText mobType),("Position",showText pos),("Looking",showText look),("Velocity",showText vel)]
 
-makeSpawnMob :: EntityId -> UUID -> Word8 -> Some Entity -> SpawnMob
+makeSpawnMob :: EntityId -> UUID -> Word8 -> Satisfies Entity -> SpawnMob
 makeSpawnMob eid uuid headPitch (SuchThat (Identity (e :: m))) = SpawnMob eid uuid (entityType @m) (x,y,z) (yaw,pitch,headPitch) (dx,dy,dz) (EntityPropertySet $ map Just $ entityMeta e)
   where
     EntityVelocity (dx,dy,dz) = entityVelocity e
@@ -162,12 +168,9 @@ blockAction :: VarInt -> OutboundPacketDescriptor BlockAction
 blockAction = defaultDescriptor Playing "BlockAction" $ \(BlockAction _ _ _) -> []
 
 -- Block coord, Block ID (from global palette)
-data BlockChange = BlockChange BlockCoord (Some Block)
+data BlockChange = BlockChange BlockCoord WireBlock deriving (Generic,Serial)
 blockChange :: VarInt -> OutboundPacketDescriptor BlockChange
-blockChange = defaultDescriptor Playing "BlockChange" $ \(BlockChange bc bs) -> [("Block",showText bc),("New State",T.pack $ ambiguously (showBlock . runIdentity) bs)]
-instance Serial BlockChange where
-  serialize (BlockChange bc bs) = serialize bc *> ambiguously (serializeBlock . runIdentity) bs
-  deserialize = error "Unimplemented: deserialize @BlockChange" --BlockChange <$> deserialize @BlockCoord <*> (ambiguate <$> deser
+blockChange = defaultDescriptor Playing "BlockChange" $ \(BlockChange bc bs) -> [("Block",showText bc),("New State",showText bs)]
 
 -- UUID, Action (from enum)
 data BossBar = BossBar String {- BossBarAction NYI -}
@@ -207,15 +210,15 @@ closeWindow :: VarInt -> OutboundPacketDescriptor CloseWindow
 closeWindow = defaultDescriptor Playing "CloseWindow" $ \(CloseWindow _) -> []
 
 -- Window Id, Window Type (Enum), JSON chat string of Window Title, Num of Slots, optionally: EID of horse
-data OpenWindow = OpenWindow WindowId (Some Window) ProtocolString (Maybe EntityId)
+data OpenWindow = OpenWindow WindowId (ForAny Window) ProtocolString (Maybe EntityId)
 openWindow :: VarInt -> OutboundPacketDescriptor OpenWindow
-openWindow = defaultDescriptor Playing "OpenWindow" $ \(OpenWindow wid (SuchThat (Identity (_ :: winT))) title horseEid) -> [("Window Id",showText wid),("Window Type",windowName @winT),("Window Title",showText . unProtocolString $ title)] ++ (case horseEid of {Just eid -> [("Horse EID",showText eid)];Nothing -> []})
+openWindow = defaultDescriptor Playing "OpenWindow" $ \(OpenWindow wid (SuchThat (Window wDesc _)) title horseEid) -> [("Window Id",showText wid),("Window Type",windowName wDesc),("Window Title",showText . unProtocolString $ title)] ++ (case horseEid of {Just eid -> [("Horse EID",showText eid)];Nothing -> []})
 instance Serial OpenWindow where
-  serialize (OpenWindow wid (SuchThat (Identity (_ :: winT))) title horseEid) = serialize wid *> serialize (windowIdentifier @winT) *> serialize title *> serialize ((unsafeCoerce :: Short -> Word8) $ slotCount @winT) *> (case horseEid of {Just eid -> serialize eid;Nothing -> pure ()})
+  serialize (OpenWindow wid (SuchThat (Window wDesc _)) title horseEid) = serialize wid *> serialize (windowIdentifier wDesc) *> serialize title *> serialize ((unsafeCoerce :: Short -> Word8) $ slotCount wDesc) *> (case horseEid of {Just eid -> serialize eid;Nothing -> pure ()})
   deserialize = error "Unimplemented: deserialize @OpenWindow"
 
 -- Window Id, Slots
-data WindowItems = WindowItems WindowId (ProtocolList Short Slot) deriving (Generic,Serial)
+data WindowItems = WindowItems WindowId (ProtocolList Short WireSlot) deriving (Generic,Serial)
 windowItems :: VarInt -> OutboundPacketDescriptor WindowItems
 windowItems = defaultDescriptor Playing "WindowItems" $ \(WindowItems wid _slots) -> [("Window Id",showText wid)]
 {-
@@ -234,7 +237,7 @@ windowProperty :: VarInt -> OutboundPacketDescriptor WindowProperty
 windowProperty = defaultDescriptor Playing "WindowProperty" $ \(WindowProperty _ _ _) -> []
 
 -- Window Id, Slot num, <Slot>
-data SetSlot = SetSlot WindowId Short Slot deriving (Generic,Serial)
+data SetSlot = SetSlot WindowId Short WireSlot deriving (Generic,Serial)
 setSlot :: VarInt -> OutboundPacketDescriptor SetSlot
 setSlot = defaultDescriptor Playing "SetSlot" $ \(SetSlot wid slotNum slotData) -> [("Window Id",showText wid),("Slot Number",showText slotNum),("Slot Data",showText slotData)]
 
@@ -320,7 +323,7 @@ keepAlive :: VarInt -> OutboundPacketDescriptor KeepAlive
 keepAlive = defaultDescriptor Playing "KeepAlive" $ \(KeepAlive kid) -> [("Keep Alive Id",showText kid)]
 
 -- Chunk X, Chunk Z, Full Chunk?, Bitmask of slices present, [Chunk Section], optional: 256 byte array of biome data, [Block entity NBT tag]
-data ChunkData = ChunkData (Int32,Int32) Bool VarInt [ChunkSection] (Maybe BS.ByteString) (ProtocolList VarInt ProtocolNBT)
+data ChunkData = ChunkData (Int32,Int32) Bool VarInt [ChunkSection WireBlock] (Maybe BS.ByteString) (ProtocolList VarInt ProtocolNBT)
 chunkData :: VarInt -> OutboundPacketDescriptor ChunkData
 chunkData = defaultDescriptor Playing "ChunkData" $ \(ChunkData (cx,cz) guCont bitMask cs _mBio _nbt) -> [("Column",showText (cx,cz)),("Bit Mask",showText bitMask)] ++ (if guCont then [("Full Chunk","")] else []) ++ [("Section Count",showText (length cs))]
 instance Serial ChunkData where
@@ -457,23 +460,20 @@ instance Serial SpawnPosition where
   serialize (SpawnPosition pos) = serialize pos
   deserialize = SpawnPosition <$> deserialize @BlockCoord
 
--- All packets have their length and pktId annotated
--- serialize pkt = BS.append (serialize $ ,packetId @PlayerPositionAndLook) $ case pkt of
-
---instance Show Packet where
-  --show pkt = formatPacket (packetName pkt) $ case pkt of
-
 {-# INLINE colPacket #-}
-colPacket :: HasWorld r => (Int,Int) -> Maybe BS.ByteString -> Eff r ChunkData
-colPacket (cx,cz) mbio = forM [0..15] (\cy -> getChunk (ChunkCoord (cx,cy,cz))) >>= \cs -> return (chunksToColumnPacket cs (cx,cz) mbio)
+colPacket :: Member WorldManipulation r => (Int,Int) -> Maybe BS.ByteString -> Eff r ChunkData
+colPacket (cx,cz) mbio = do
+  -- Grab all 15 chunks, and make them in to WireBlocks
+  cs <- forM [0..15] (\cy -> chunkToWireBlock . view (worldChunks . at (ChunkCoord (cx,cy,cz)) . to (fromMaybe emptyChunk)) <$> get) 
+  return (chunksToColumnPacket cs (cx,cz) mbio)
 
-chunksToColumnPacket :: [ChunkSection] -> (Int,Int) -> Maybe BS.ByteString -> ChunkData
+chunksToColumnPacket :: [ChunkSection WireBlock] -> (Int,Int) -> Maybe BS.ByteString -> ChunkData
 chunksToColumnPacket cs (cx,cz) mbio = ChunkData (fromIntegral cx,fromIntegral cz) True (bitMask cs) (filter (not . isAirChunk) cs) mbio (ProtocolList [])
   where
     -- [Bool] -> VarInt basically
     bitMask as = foldr (\b i -> fromBool b .|. shiftL i 1) 0 (map (not . isAirChunk) as)
     fromBool True = 1
     fromBool False = 0
-    isAirChunk (ChunkSection m) = Map.null m
+    isAirChunk (ChunkSection _m) = error "Unimplemented: Clientbound.chunksToColumnPacket.isAirChunk. Reason: Used to be map, now we have to traverse the entire array to see if it is empty" -- Map.null m
 
 

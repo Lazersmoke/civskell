@@ -47,7 +47,3 @@ logt tag = logLevel (TaggedLog tag)
 {-# INLINE logLevel #-}
 logLevel :: Member Logging r => LogLevel -> Text -> Eff r ()
 logLevel l s = tell (LogMessage l s)
-
---forkLogger :: (Configured r,Logs q,PerformsIO r) => Eff (Logging ': r) a -> Eff q (Eff r a)
---forkLogger = send . ForkLogger
-

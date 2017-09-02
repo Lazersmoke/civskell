@@ -1,21 +1,11 @@
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 module Civskell.Data.Block where
 
-import Control.Monad.Freer
-import Data.Attoparsec.ByteString
-import Control.Monad
-import qualified Data.Binary.BitBuilder as BB
-import qualified Data.ByteString.Lazy as LBS
-import Data.Bytes.Serial
+import Control.Lens
+import Data.SuchThat
+import Control.Monad.Freer.State
 
-import Civskell.Tech.Parse
---import Civskell.Data.Player
---import Civskell.Data.World
-import Civskell.Data.Logging
 import Civskell.Data.Types
-import Civskell.Data.Protocol
 
+placeBlock :: (Item i -> Block b) -> ItemUseCallback i
+placeBlock f = Just (\(SlotData i ic) -> Slot . Just $ SlotData i (ic - 1),\i bc bf _hand _blockPart -> modify $ blockInWorld (blockOnSide bc bf) .~ ambiguate (f i))

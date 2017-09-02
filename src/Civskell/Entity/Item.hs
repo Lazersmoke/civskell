@@ -17,6 +17,6 @@ instance Entity (ItemEntity i) where
   entitySize _ = (0.25,0.25,0.25)
   entityLocation (ItemEntity e _) = baseEntityLocation e
   entityVelocity (ItemEntity e _) = baseEntityVelocity e
-  entityMeta (ItemEntity e slotData) = baseEntityMeta e ++ [mm . toWireSlotData $ Slot (Just slotData)]
+  entityMeta (ItemEntity e slotData) = baseEntityMeta e ++ [mm . toWireSlot $ Slot (Just slotData)]
 
 

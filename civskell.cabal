@@ -17,7 +17,7 @@ library
   hs-source-dirs:      src
   exposed-modules:     Civskell, Civskell.Data.Types, Civskell.Data.World, Civskell.Tech.Network, Civskell.Tech.Encrypt,Civskell.Tech.Parse, Civskell.Packet.Serverbound, Civskell.Packet.Clientbound,Civskell.Data.Logging, Civskell.Data.Networking, Civskell.Entity,Civskell.Entity.Object, Civskell.Tile, Civskell.Item, Civskell.Entity.Base,Civskell.Window, Civskell.Data.Block, Civskell.Versions.Vanilla, Civskell.Data.Util, Civskell.Data.Protocol, Civskell.Data.Configuration, Civskell.Data.Common
   other-modules:       Civskell.Entity.Item, Civskell.Entity.Creeper, Civskell.Block.Stone
-  build-depends:       base >= 4.7 && < 5, hashable, network, bytestring, utf8-string, random, cryptonite, pretty-hex, time, http-client, http-client-tls, AES, freer-effects, zlib, bytes, cereal, nbt, containers, binary-strict, attoparsec, ghost-buster, aeson, unordered-containers, text, stm, vector
+  build-depends:       base >= 4.7 && < 5, hashable, network, bytestring, utf8-string, random, cryptonite, pretty-hex, time, http-client, http-client-tls, AES, freer-effects, zlib, bytes, cereal, nbt, containers, binary-strict, attoparsec, ghost-buster, aeson, unordered-containers, text, stm, vector, lens, array
   default-language:    Haskell2010
 
 executable civskell-exe
@@ -27,12 +27,12 @@ executable civskell-exe
   build-depends:       base, HsOpenSSL, civskell
   default-language:    Haskell2010
 
-executable piskell-exe
-  hs-source-dirs:      app-pi
-  main-is:             Main.hs
-  ghc-options:         -threaded -fprof-auto
-  build-depends:       base, HsOpenSSL, civskell
+test-suite test
   default-language:    Haskell2010
+  type: exitcode-stdio-1.0
+  hs-source-dirs: tests
+  main-is: Spec.hs
+  build-depends: base >= 4.7 && < 5, hspec, civskell, QuickCheck
 
 source-repository head
   type:     git
