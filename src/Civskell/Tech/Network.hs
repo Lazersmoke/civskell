@@ -6,15 +6,16 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Civskell.Tech.Network where
+-- | Provides low level networking capabilites.
+module Civskell.Tech.Network 
+  (getPacket 
+  ,serverAuthentication
+  ,clientAuthentication
+  ) where
 
-import Control.Concurrent.STM
 import Control.Monad.Freer
-import qualified Codec.Compression.Zlib as Z
-import System.IO
 import Data.Bits
 import Data.Bytes.Get
-import Data.Bytes.Put
 import Data.Bytes.Serial
 import Data.Semigroup ((<>))
 import Data.Word (Word8)
@@ -32,19 +33,22 @@ import qualified Data.Vector as Vector
 
 import Civskell.Data.Types
 
-import Civskell.Tech.Encrypt
-import Civskell.Tech.Parse
-
+-- | Given a set of @'SupportedPackets'@, make a parser for @'DescribedPacket'@s.
 parseFromSet :: MonadGet m => SupportedPackets PacketHandler -> m (ForAny (DescribedPacket PacketHandler))
-parseFromSet s = deserialize @VarInt >>= \pktId -> case s Vector.!? (fromIntegral pktId) of
-  Just (SuchThat (desc :: PacketDescriptor PacketHandler p)) -> do
-    theP <- deserialize @p
-    return $ ambiguate $ DescribedPacket desc theP
+parseFromSet s = deserialize @VarInt >>= \pktId -> case s Vector.!? (fromIntegral pktId) of -- Parse a VarInt and look it up in the packet vector
+  -- If the item is supported, deserialize the rest of the data and return it
+  Just (SuchThat (desc :: PacketDescriptor PacketHandler p)) -> pure . ambiguate . DescribedPacket desc =<< deserialize @p
+  -- If the item is not supported, error log about it
   Nothing -> error $ "No parser for that packet (Id = " <> show pktId <> ")"
 
--- Takes an effect to decide which parser to use once the packet arrives, and returns the parsed packet when it arrives
-getGenericPacket :: forall r. Members '[Logging,Networking] r => Eff r (SupportedPackets PacketHandler) -> Eff r (Maybe (ForAny (DescribedPacket PacketHandler)))
-getGenericPacket ep = do
+-- | Given a packet set selector, parse a packet from the network and return it if successful.
+-- Note that this will hang until the packet arrives, and run the selector once it has arrived.
+-- It needs to be like this because the @'ServerState'@ might change during the hang due to
+-- parallel packet processing.
+getPacket :: forall r. Members '[Logging,Networking] r 
+  => Eff r (SupportedPackets PacketHandler) -- ^ An effect to run that will select the appropriate @'SupportedPackets'@ set to use
+  -> Eff r (Maybe (ForAny (DescribedPacket PacketHandler)))
+getPacket ep = do
   -- Get the raw data (sans length)
   pkt <- removeCompression =<< getRawPacket
   -- TODO: Take advantage of incremental parsing maybe
@@ -65,8 +69,8 @@ getGenericPacket ep = do
       logLevel ErrorLog . T.pack . indentedHex $ pkt
       return Nothing
 
--- Get an unparsed packet from the network
--- Returns the full, length annotated packet
+-- | Get an unparsed packet from the network.
+-- Returns the full, length annotated packet.
 getRawPacket :: Member Networking r => Eff r BS.ByteString
 getRawPacket = do
   -- Get the length it should be
@@ -77,6 +81,9 @@ getRawPacket = do
   return (lbs <> pktData)
 
 -- TODO: merge with parseVarInt by abstracting the first line
+-- | Parses a @'VarInt'@ off the packet to determine the length.
+-- The output is a pair of that @'VarInt'@ and the bytes representing it,
+-- which are needed to re-assemble the full packet at a later time.
 getPacketLength :: Member Networking r => Eff r (VarInt,BS.ByteString)
 getPacketLength = do
   -- Get the first byte
@@ -94,8 +101,12 @@ getPacketLength = do
     -- If its not set, then this is the last byte, so we return thisPart
     else return (thisPart,BS.singleton l)
 
--- Get the auth info from the mojang server
-serverAuthentication :: Members '[Logging,IO] r => String -> String -> Eff r (Maybe AuthPacket)
+-- | Given the needed information, authenticate a player with Mojang.
+-- This performs a request to the @/hasJoined@ API endpoint.
+serverAuthentication :: Members '[Logging,IO] r 
+  => String -- ^ Player username
+  -> String -- ^ Server hash
+  -> Eff r (Maybe AuthPacket) -- ^ @'Just'@ the auth information, or @'Nothing'@ if something went wrong
 serverAuthentication name hash = do
   -- Use SSL
   manager <- send $ newManager tlsManagerSettings
@@ -122,6 +133,8 @@ serverAuthentication name hash = do
         return Nothing
       Aeson.Success authPacket -> return (Just authPacket)
 
+-- | Performs auth from the client side.
+-- Not used in Civskell right now.
 clientAuthentication :: Members '[Logging,IO] r => (String,String) -> Eff r (Maybe ClientAuthResponse)
 clientAuthentication (user,pass) = do
   -- Use SSL
@@ -148,97 +161,3 @@ clientAuthentication (user,pass) = do
         loge $ "Full response was: " <> T.pack (show resp)
         return Nothing
       Aeson.Success cliAuthResp -> return (Just cliAuthResp)
-
-
--- `Packeting`/`SendsPackets` is a high level interface that explicitly marks raw bytes as unsafe
-runPacketing :: Members '[Logging,Networking] r => Eff (Packeting ': r) a -> Eff r a
-runPacketing = generalizedRunNat handlePacketing
-
-handlePacketing :: Members '[Logging,Networking] r => Packeting a -> Eff r a
-handlePacketing = \case
-  -- Unpack from the existentials to get the type information into a skolem, scoped tyvar
-  SendPacket (SuchThat (DescribedPacket pktDesc pkt)) -> do
-    let pktHandler = packetHandler pktDesc
-    let writePacket = serializePacket pktHandler pkt
-    -- Log its hex dump
-    logLevel ClientboundPacket $ showPacket pktDesc pkt
-    logLevel HexDump . T.pack $ indentedHex (runPutS writePacket)
-    -- Send it
-    rPut =<< addCompression (runPutS $ serialize (packetId pktHandler) *> writePacket)
-  -- "Unsafe" means it doesn't come from a legitimate packet (doesn't have packetId) and doesn't get compressed
-  UnsafeSendBytes bytes -> rPut bytes
-  -- Passthrough for setting up encryption and compression
-  BeginEncrypting ss -> setupEncryption ss
-  BeginCompression thresh -> setCompression thresh
-
-runNetworking :: Member IO r => TVar (Maybe EncryptionCouplet) -> TVar (Maybe VarInt) -> Handle -> Eff (Networking ': r) a -> Eff r a
-runNetworking mEnc mThresh hdl = runNat (handleNetworking mEnc mThresh hdl)
-
-handleNetworking :: TVar (Maybe EncryptionCouplet) -> TVar (Maybe VarInt) -> Handle -> Networking a -> IO a
-handleNetworking mEnc mThresh hdl = \case
-  --ForkNetwork e -> pure (runNetworking mEnc mThresh hdl e)
-  GetFromNetwork len -> do
-    -- We don't want exclusive access here because we will block
-    dat <- BS.hGet hdl len
-    -- Decrypt the data or don't based on the encryption value
-    atomically $ readTVar mEnc >>= \case
-      Nothing -> return dat
-      Just (c,e,d) -> do
-        -- d' is the updated decrypting shift register
-        let (bs',d') = cfb8Decrypt c d dat
-        writeTVar mEnc (Just (c,e,d'))
-        return bs'
-  PutIntoNetwork bs -> do
-    -- Encrypt the data or don't based on the encryption value
-    enc <- atomically $ readTVar mEnc >>= \case
-      Nothing -> return bs
-      Just (c,e,d) -> do
-        -- e' is the updated encrypting shift register
-        let (bs',e') = cfb8Encrypt c e bs
-        writeTVar mEnc (Just (c,e',d))
-        return bs'
-    BS.hPut hdl enc
-  SetCompressionLevel thresh -> atomically $ readTVar mThresh >>= \case
-    -- If there is no pre-existing threshold, set one
-    Nothing -> writeTVar mThresh (Just thresh)
-    -- If there is already compression, don't change it (only one setCompression is allowed)
-    -- Should we throw an error instead of silently failing here?
-    Just _ -> pure ()
-  SetupEncryption ss -> atomically $ readTVar mThresh >>= \case
-    -- If there is no encryption setup yet, set it up
-    Nothing -> writeTVar mEnc (Just (makeEncrypter ss,ss,ss))
-    -- If it is already encrypted, don't do anything
-    Just _ -> pure ()
-  AddCompression bs -> readTVarIO mThresh >>= \case
-    -- Do not compress; annotate with length only
-    Nothing -> pure (runPutS . withLength $ bs)
-    -- Compress with the threshold `t`
-    Just t -> if BS.length bs >= fromIntegral t
-      -- Compress data and annotate to match
-      then do
-        -- Compress the actual data
-        let compIdAndData = putByteString . LBS.toStrict . Z.compress . LBS.fromStrict $ bs
-        -- Add the original size annotation
-        let origSize = serialize $ ((fromIntegral (BS.length bs)) :: VarInt)
-        let ann = withLength (runPutS $ origSize >> compIdAndData)
-        pure (runPutS ann)
-      -- Do not compress; annotate with length only
-      -- 0x00 indicates it is not compressed
-      else pure . runPutS . withLength . runPutS $ putWord8 0x00 *> putByteString bs
-  RemoveCompression bs -> readTVarIO mThresh >>= \case
-    -- Parse an uncompressed packet
-    Nothing -> case runGetS parseUncompPkt bs of
-      -- TODO: fix this completely ignoring a parse error
-      Left _ -> putStrLn "Emergency Parse Error!!!" *> pure bs
-      Right pktData -> pure pktData
-    -- Parse a compressed packet (compressed packets have extra metadata)
-    Just _ -> case parseOnly parseCompPkt bs of
-      -- TODO: fix this completely ignoring a parse error
-      Left _ -> pure bs
-      Right (dataLen,compressedData) -> pure $ if dataLen == 0
-        -- dataLen of 0 means that the packet is actually uncompressed
-        then compressedData
-        -- If it is indeed compressed, uncompress it
-        else LBS.toStrict . Z.decompress . LBS.fromStrict $ compressedData
-
-

@@ -2,6 +2,7 @@
 {-# LANGUAGE BinaryLiterals #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE LambdaCase #-}
+-- | Provides low-level encryption mechanisms
 module Civskell.Tech.Encrypt 
   (globalKeypair
   ,encodedPublicKey

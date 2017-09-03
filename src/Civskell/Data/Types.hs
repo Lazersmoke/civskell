@@ -36,8 +36,10 @@ import Civskell.Data.Networking
 import GHC.Generics hiding (to)
 import Data.List (unfoldr)
 import qualified Data.Binary.BitBuilder as BB
+import qualified Codec.Compression.Zlib as Z
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Lazy as Map
+import System.IO
 import Data.Maybe (fromMaybe)
 import Data.Map.Lazy (Map)
 import Data.Semigroup
@@ -74,7 +76,11 @@ import qualified Data.Vector as Vector
 import qualified Data.Array.IArray as Arr
 import qualified Data.Set as Set
 
--- Having transactional access to the World is an effect
+import Civskell.Tech.Encrypt
+
+-- | Having transactional access to the World is an effect.
+-- We represent world manipulations as @'State' 'WorldData'@ to allow normal @'State'@ functions to be used.
+-- See @'runWorld'@ for how this is translated into STM.
 type WorldManipulation = State WorldData
 
 initWorld :: WorldData
@@ -331,10 +337,10 @@ instance Serial (ChunkSection WireBlock) where
       aBlock (WireBlock bId meta) = BB.fromBits 9 bId `BB.append` BB.fromBits 4 meta
   deserialize = error "Unimplemented: Deserialization of Chunk Sections"
 
--- | A block's data along with its descriptor fully describes a block.
+-- | A @'Block' b@ is a @b@ together with a description of how to interpret it as a Minecraft block.
 data Block b = Block (BlockDescriptor b) b
 
--- | A @BlockDescriptor b@ is a description of how to use a @b@ as a block.
+-- | A @'BlockDescriptor' b@ is a description of how to use a @b@ as a block.
 data BlockDescriptor b = BlockDescriptor
   {blockId :: Short 
   -- ^ The Notchian block id number of this block. Ex: @1@
@@ -343,17 +349,30 @@ data BlockDescriptor b = BlockDescriptor
   ,blockMeta :: b -> Nibble 
   -- ^ Get the Notchian block metadata value from a particular block. @const 0@ is a reasonable default. Ex @\case {Stone -> 0; Granite -> 1}@
   ,blockName :: b -> String
-  -- ^ English name of this particular block. Ex @\case {Stone -> "Stone";Granite -> "Granite"}@
-  ,onClick :: forall r. Members '[WorldManipulation,PlayerManipulation,Packeting,Logging] r => Maybe (b -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Eff r ())
+  -- ^ English name of this particular block. Ex @\case {Stone -> \"Stone";Granite -> \"Granite"}@
+  ,onClick :: forall r. Members '[WorldManipulation,PlayerManipulation,Packeting,Logging] r => Maybe (BlockClickCallback r b)
   -- ^ The callback for this block getting right-clicked
   }
-  --droppedItem :: Maybe (b -> Some Item)
 
-data WireBlock = WireBlock Short Nibble deriving (Eq,Show)
+-- | A callback for when a player right-clicks a block.
+type BlockClickCallback r b 
+  =  b -- ^ The block they clicked
+  -> BlockCoord -- ^ The @'BlockCoord'@ of the block
+  -> BlockFace -- ^ The @'BlockFace'@ they clicked on
+  -> Hand -- ^ The @'Hand'@ they clicked with
+  -> (Float,Float,Float) -- ^ The part of the block they clicked
+  -> Eff r ()
 
+-- | A @'WireBlock'@ is a numerical, type-poor representation of a minecraft block
+-- as a @'BlockId'@ and metadata. It is able to be directly serialized and sent over the network.
+data WireBlock = WireBlock BlockId Nibble deriving (Eq,Show)
+
+-- | Every @'Block'@ can be trivially converted to a @'WireBlock'@.
 toWireBlock :: Block b -> WireBlock
 toWireBlock (Block desc b) = WireBlock (blockId desc) (blockMeta desc b)
 
+-- Note that this is an inefficient serialized normal form. 
+-- See @instance 'Serial' ('ChunkSection' 'WireBlock')@ for a packed and efficient one.
 instance Serial WireBlock where
   serialize (WireBlock bId meta) = serialize $ shiftL (u bId) 4 .|. (v meta .&. 0x0f)
     where
@@ -370,12 +389,15 @@ type SupportedBlocks = Map BlockId (ForAny BlockBuilder)
 -- | A single implemented decoder for a single type of block.
 newtype BlockBuilder b = BlockBuilder {buildBlock :: Short -> Nibble -> Block b}
 
--- This is an inefficient serialized normal form. See `Serial (ChunkSection WireBlock)` for a packed one.
+-- | Given a set of @'SupportedBlocks'@ and a raw @'WireBlock'@ from the network,
+-- parse out a @'Block'@ of some type.
 parseBlockFromSet :: SupportedBlocks -> WireBlock -> Maybe (ForAny Block)
 parseBlockFromSet sb (WireBlock bId meta) = case Map.lookup bId sb of
   Just (SuchThat b) -> Just . ambiguate $ buildBlock b bId meta
   Nothing -> Nothing
 
+-- | Just like @'parseBlockFromSet'@, but it gets the @'SupportedBlocks'@ from the @'Configuration'@.
+-- See @'supportedBlocks'@.
 parseBlockFromContext :: Member Configured r => WireBlock -> Eff r (Maybe (ForAny Block))
 parseBlockFromContext wb = ask >>= \c -> pure $ parseBlockFromSet (supportedBlocks c) wb
 
@@ -423,7 +445,12 @@ openWindowWithItems (ty :: tyT) name tI = do
   sendPacket (windowItems 0x14) (WindowItems wid (ProtocolList $ Map.elems items) {-(slotCount @tyT)-})
   return wid
 -}
+
 -- TODO: Transactional
+
+-- | Clear any pending teleport with the given TPId.
+-- Returns @'True'@ if the given TPId was cleared, 
+-- or @'False'@ if it wasn't there in the first place.
 clearTeleport :: Member PlayerManipulation r => VarInt -> Eff r Bool
 clearTeleport tid = do
   present <- Set.member tid . view playerTPConfirmQueue <$> get
@@ -467,11 +494,111 @@ setInventorySlot slotNum slotData = do
   sendPacket (setSlot 0x16) (SetSlot 0 slotNum slotData)
 -}
 
--- runWorld is a natural transformation from `State WorldData` to working with actual TVar data
+-- | @'runWorld'@ is a natural transformation from @'WorldManipulation'@ to working with actual @'STM'@ (via @'IO'@).
+-- Note that this is *not* really transactional yet because it is only transactional up to the @'Get'@ or @'Put'@,
+-- which is to say not transactional at all.
 runWorld :: Members '[Logging,IO] r => TVar WorldData -> Eff (WorldManipulation ': r) a -> Eff r a
 runWorld tWorld = generalizedRunNat $ \case
   Get -> send $ readTVarIO tWorld
   Put w' -> send . atomically $ writeTVar tWorld w'
+
+-- | @'runPacketing'@ is a natural transformation from @'sendPacket'@ing to low-level @'Networking'@.
+runPacketing :: Members '[Logging,Networking] r => Eff (Packeting ': r) a -> Eff r a
+runPacketing = generalizedRunNat $ \case
+  -- Unpack from the existentials to get the type information into a skolem, scoped tyvar
+  SendPacket (SuchThat (DescribedPacket pktDesc pkt)) -> do
+    let pktHandler = packetHandler pktDesc
+    let writePacket = serializePacket pktHandler pkt
+    -- Log its hex dump
+    logLevel ClientboundPacket $ showPacket pktDesc pkt
+    logLevel HexDump . T.pack $ indentedHex (runPutS writePacket)
+    -- Send it
+    rPut =<< addCompression (runPutS $ serialize (packetId pktHandler) *> writePacket)
+  -- "Unsafe" means it doesn't come from a legitimate packet (doesn't have packetId) and doesn't get compressed
+  UnsafeSendBytes bytes -> rPut bytes
+  -- Passthrough for setting up encryption and compression
+  BeginEncrypting ss -> setupEncryption ss
+  BeginCompression thresh -> setCompression thresh
+
+-- | @'runNetworking'@ is a natural transformation from low-level @'Networking'@ to literally network handles in @'IO'@.
+runNetworking :: Member IO r => TVar (Maybe EncryptionCouplet) -> TVar (Maybe VarInt) -> Handle -> Eff (Networking ': r) a -> Eff r a
+runNetworking mEnc mThresh hdl = runNat @IO $ \case
+  --ForkNetwork e -> pure (runNetworking mEnc mThresh hdl e)
+  GetFromNetwork len -> do
+    -- We don't want exclusive access here because we will block
+    dat <- BS.hGet hdl len
+    -- Decrypt the data or don't based on the encryption value
+    atomically $ readTVar mEnc >>= \case
+      Nothing -> return dat
+      Just (c,e,d) -> do
+        -- d' is the updated decrypting shift register
+        let (bs',d') = cfb8Decrypt c d dat
+        writeTVar mEnc (Just (c,e,d'))
+        return bs'
+  PutIntoNetwork bs -> do
+    -- Encrypt the data or don't based on the encryption value
+    enc <- atomically $ readTVar mEnc >>= \case
+      Nothing -> return bs
+      Just (c,e,d) -> do
+        -- e' is the updated encrypting shift register
+        let (bs',e') = cfb8Encrypt c e bs
+        writeTVar mEnc (Just (c,e',d))
+        return bs'
+    BS.hPut hdl enc
+  SetCompressionLevel thresh -> atomically $ readTVar mThresh >>= \case
+    -- If there is no pre-existing threshold, set one
+    Nothing -> writeTVar mThresh (Just thresh)
+    -- If there is already compression, don't change it (only one setCompression is allowed)
+    -- Should we throw an error instead of silently failing here?
+    Just _ -> pure ()
+  SetupEncryption ss -> atomically $ readTVar mThresh >>= \case
+    -- If there is no encryption setup yet, set it up
+    Nothing -> writeTVar mEnc (Just (makeEncrypter ss,ss,ss))
+    -- If it is already encrypted, don't do anything
+    Just _ -> pure ()
+  AddCompression bs -> readTVarIO mThresh >>= \case
+    -- Do not compress; annotate with length only
+    Nothing -> pure (runPutS . withLength $ bs)
+    -- Compress with the threshold `t`
+    Just t -> if BS.length bs >= fromIntegral t
+      -- Compress data and annotate to match
+      then do
+        -- Compress the actual data
+        let compIdAndData = putByteString . LBS.toStrict . Z.compress . LBS.fromStrict $ bs
+        -- Add the original size annotation
+        let origSize = serialize $ ((fromIntegral (BS.length bs)) :: VarInt)
+        let ann = withLength (runPutS $ origSize >> compIdAndData)
+        pure (runPutS ann)
+      -- Do not compress; annotate with length only
+      -- 0x00 indicates it is not compressed
+      else pure . runPutS . withLength . runPutS $ putWord8 0x00 *> putByteString bs
+  RemoveCompression bs -> readTVarIO mThresh >>= \case
+    -- Parse an uncompressed packet
+    Nothing -> case runGetS parseUncompPkt bs of
+      -- TODO: fix this completely ignoring a parse error
+      Left _ -> putStrLn "Emergency Parse Error!!!" *> pure bs
+      Right pktData -> pure pktData
+    -- Parse a compressed packet (compressed packets have extra metadata)
+    Just _ -> case runGetS parseCompPkt bs of
+      -- TODO: fix this completely ignoring a parse error
+      Left _ -> pure bs
+      Right (dataLen,compressedData) -> pure $ if dataLen == 0
+        -- dataLen of 0 means that the packet is actually uncompressed
+        then compressedData
+        -- If it is indeed compressed, uncompress it
+        else LBS.toStrict . Z.decompress . LBS.fromStrict $ compressedData
+  where
+    -- Parse an uncompressed packet to a @'BS.ByteString'@
+    parseUncompPkt :: MonadGet m => m BS.ByteString
+    parseUncompPkt = getByteString . fromIntegral =<< deserialize @VarInt
+
+    -- | Parse a compressed packet to a pair of its length and its data
+    parseCompPkt :: MonadGet m => m (VarInt,BS.ByteString)
+    parseCompPkt = do
+      _ <- deserialize @VarInt
+      dataLen <- deserialize @VarInt
+      bs <- (getByteString . fromIntegral =<< remaining)
+      pure (dataLen,bs)
 {-
 runWorld _ (Pure x) = Pure x
 runWorld w' (Eff u q) = case u of
@@ -539,41 +666,65 @@ runWorld w' (Eff u q) = case u of
   Weaken u' -> Eff u' (Singleton (runWorld w' . runTCQ q))
 -}
 
-broadcastPacket :: Members '[IO,WorldManipulation] r => ForAny (DescribedPacket PacketSerializer) -> Eff r ()
+-- | Broadcast a packet to all currently @'Playing'@ players.
+broadcastPacket :: Members '[IO,WorldManipulation] r => DescribedPacket PacketSerializer p -> Eff r ()
 broadcastPacket pkt = do
+  -- Get a map of all players in the world
   plas <- view worldPlayers <$> get
+  -- For each player in the list, send the packet to that player
   send . atomically . mapM_ sendPktForPlayer $ plas
   where
     sendPktForPlayer pd = case view playerState pd of
-      Playing -> writeTQueue (view playerPacketQueue pd) pkt
+      -- Only send it to Playing players
+      Playing -> writeTQueue (view playerPacketQueue pd) (ambiguate pkt)
       _ -> pure ()
 
+-- | A @'Window' w@ is a pair of a @w@, representing the data for that window, and an intretation of @w@ as a GUI window.
 data Window w = Window (WindowDescriptor w) w
 
+-- | A description of how to interpret a @w@ as a @'Window'@.
 data WindowDescriptor w = WindowDescriptor
-  -- Chest
   {windowName :: Text
-  -- minecraft:chest
+  -- ^ The Notchian english name for this kind of window. Ex: @\"Chest"@
   ,windowIdentifier :: String
-  -- 27
-  ,slotCount :: Short
-  -- Bool is transaction success
-  ,onWindowClick :: forall r. Members '[IO,WorldManipulation,Packeting,Logging,PlayerManipulation] r => w -> WindowId -> Short -> TransactionId -> InventoryClickMode -> Eff r Bool
+  -- ^ The Notchian identifier for this kind of window. Ex: @\"minecraft:chest"@
+  ,slotCount :: w -> Short
+  -- ^ The number of slots in this kind of window. Ex: @'const' 27@
+  ,onWindowClick :: WindowClickCallback w
+  -- ^ The callback to be invoked when they click on a window of this kind
   }
 
+-- | A callback for when a player clicks a slot in a window.
+type WindowClickCallback w = forall r. Members '[IO,Configured,WorldManipulation,Packeting,Logging,PlayerManipulation] r 
+  => w -- ^ The window they clicked.
+  -> WindowId -- ^ The @'WindowId'@ of the window they clicked.
+  -> Short -- ^ The slot number in the window they clicked.
+  -> TransactionId -- ^ The @'TransactionId'@ of this click.
+  -> InventoryClickMode -- ^ The manner in which they clicked the slot.
+  -> WireSlot -- ^ The client provided @'WireSlot'@ that they think is in the slot they clicked.
+  -> Eff r Bool -- ^ Return @'True'@ if the transaction succeeded, @'False'@ otherwise. They will be required to apologize if the transaction is rejected.
+
+-- We can do this generically because it depends only on information exposed in the WindowDescriptor.
 instance Show (Window w) where
   show (Window desc _w) = T.unpack (windowName desc) <> " (" <> windowIdentifier desc <> ")"
 
-newtype Slot i = Slot (Maybe (SlotData i))
+-- | A @'Slot'@ is a possibly empty @'SlotData'@.
+-- It has a serialized normal form, see @'WireSlot'@ and @'toWireSlot'@.
+newtype Slot i = Slot (Maybe (SlotData i)) deriving (Eq,Generic)
 
+instance Rewrapped (Slot i) t
+instance Wrapped (Slot i) where
+  type Unwrapped (Slot i) = Maybe (SlotData i)
+
+-- We can do this generically, but we can't give specific information from the type variable
+-- because the ItemDescriptor is under the Maybe.
 instance Show (SlotData i) => Show (Slot i) where
   show (Slot (Just dat)) = "{" ++ show dat ++ "}"
   show (Slot Nothing) = "{}"
 
-data SlotData i = SlotData (Item i) Word8
-
-instance Eq (Item i) => Eq (SlotData i) where
-  (SlotData a ac) == (SlotData b bc) = ac == bc && a == b
+-- | A @'SlotData'@ is an @'Item'@ with with an amount.
+-- It represents the contents of a single, non-empty item slot.
+data SlotData i = SlotData (Item i) Word8 deriving Eq
 
 -- Pretty print a slot's data. Perhaps we should let `Item`s provide a fancy name for this instance to use.
 instance Show (SlotData i) where
@@ -583,14 +734,21 @@ instance Show (SlotData i) where
       n Nothing = ""
       n (Just nbt) = " with tags: " ++ show nbt
 
+-- | Every @'Slot'@ can be serialized for free because the serialization depends only 
+-- on the @'itemId'@, @'itemMeta'@, and @'itemNBT'@. We *can not* deserialize from a
+-- @'WireSlot'@ for free because that requires a mapping from item ids to items. See
+-- @'SupportedItems'@ and @'parseItemFromSet'@ for more information.
 toWireSlot :: Slot i -> WireSlot
 toWireSlot (Slot Nothing) = WireSlot Nothing
 toWireSlot (Slot (Just (SlotData (Item d i) c))) = WireSlot . Just $ (itemId d, c, itemMeta d i, itemNBT d i)
 
+-- | A @'WireSlot'@ is a numerical, type-poor representation of a @'Slot'@. It has no
+-- meaning or semantics until it is parsed into a proper @'Slot'@ or serialized into bytes.
 data WireSlot = WireSlot (Maybe (ItemId,Word8,Short,Maybe NBT)) deriving (Eq,Show)
 
 -- We can specify exact serialization semantics for this because it is independent of the 
--- set of actually supported items; it just represents some numbers on the wire
+-- set of actually supported items; it just represents some numbers on the wire.
+-- See [the wiki.vg page](http://wiki.vg/Slot_Data) for the exact specification.
 instance Serial WireSlot where
   serialize (WireSlot Nothing) = serialize @ItemId (-1)
   serialize (WireSlot (Just (iId,count,meta,mNbt))) = serialize @ItemId iId *> serialize @Word8 count *> serialize @Short meta *> serNBT mNbt
@@ -605,80 +763,110 @@ instance Serial WireSlot where
         0x00 -> pure Nothing
         _ -> Just . unProtocolNBT <$> deserialize @ProtocolNBT
 
+-- | A mapping from @'ItemId'@s to ways to construct an item of that type from
+-- metadata and NBT alone (see @'ItemBuilder'@). This is sort of like a set of parsers.
 type SupportedItems = Map ItemId (ForAny ItemBuilder)
 
+-- | A way to construct an @'Item'@ from metadata and NBT. These will be paired
+-- up with @'ItemId'@s from the @'Map'@ in @'SupportedItems'@.
 newtype ItemBuilder i = ItemBuilder {buildItem :: Short -> Maybe NBT -> Item i}
 
--- This actually has a serializeable normal form given a supported set: http://wiki.vg/Slot_Data
+-- | Given a set of items that are supported, and a @'WireSlot'@,
+-- parse out a type-enriched @'Slot'@ of some type, or fail because we don't
+-- support the provided item id.
 parseItemFromSet :: SupportedItems -> WireSlot -> Maybe (ForAny Slot)
 parseItemFromSet _ (WireSlot Nothing) = Just (ambiguate $ Slot Nothing)
 parseItemFromSet si (WireSlot (Just (iId,count,meta,mNBT))) = case Map.lookup iId si of
   Just (SuchThat b) -> Just . ambiguate . Slot . Just $ SlotData (buildItem b meta mNBT) count
-  Nothing -> Nothing -- error $ "No such item: " ++ show itemId
+  Nothing -> Nothing
 
+-- | Just like @'parseItemFromSet'@, but get the @'SupportedItems'@ from the @'Configuration'@'s @'supportedItems'@ field.
 parseItemFromContext :: Member Configured r => WireSlot -> Eff r (Maybe (ForAny Slot))
 parseItemFromContext ws = ask >>= \c -> pure $ parseItemFromSet (supportedItems c) ws
 
+-- | An @'Item'@ is an @i@, together with a description of how to interpret it as a Minecraft item.
 data Item i = Item (ItemDescriptor i) i
 
 -- This instances says that items with the same id, meta and NBT, are literally equal, which isn't always true
 instance Eq (Item i) where
   (Item da a) == (Item db b) = itemId da == itemId db && itemIdentifier da == itemIdentifier db && itemMeta da a == itemMeta db b && itemNBT da a == itemNBT db b
 
+-- | A description of how to interpret an @i@ as a Minecraft item.
 data ItemDescriptor i = ItemDescriptor
   -- TODO: Type level this when we have dependent types
   {itemId :: ItemId
+  -- ^ The @'ItemId'@ of this item. Ex: @280@
   ,itemIdentifier :: String
+  -- ^ The Notchian identifier of this item. Ex: @\"minecraft:stick"@
   ,itemMeta :: i -> Short
-  --itemPlaced :: i -> Maybe (Some Block)
-  --itemPlaced _ = Nothing
+  -- ^ The metadata associated with this particular item.
   ,itemNBT :: i -> Maybe NBT
-  -- TODO: param Slot i
-  --,parseItem :: Parser Slot
-  -- Some items do something when right clicked
+  -- ^ The NBT of this particular item, if present.
   ,onItemUse :: ItemUseCallback i
-  --onItemUse = Nothing
+  -- ^ The callback for when a player right-clicks with this item.
   }
 
+-- | A callback for when a player right-clicks with an @'Item'@. See @'onItemUse'@.
 type ItemUseCallback i = forall r. Members '[Logging,WorldManipulation] r => Maybe (SlotData i -> Slot i,Item i -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Eff r ())
 
--- An inventory is a mapping from Slot numbers to Slot data (or lack thereof).
+-- | Given a function to convert an item into the block to be placed, this is the standard callback for placing an item as a block.
+placeBlock :: (Item i -> Block b) -> ItemUseCallback i
+placeBlock f = Just (\(SlotData i ic) -> Slot . Just $ SlotData i (ic - 1),\i bc bf _hand _blockPart -> modify $ blockInWorld (blockOnSide bc bf) .~ ambiguate (f i))
+
 -- TODO: Reconsider sparsity obligations of Map here, and decide on a better
 -- internal representation. Potentially make this abstract after all. There
 -- might be a really fitting purely functional data structure to show off here.
+-- | An inventory is a mapping from slot numbers to arbitrary @'Slot'@s.
 type Inventory = Map.Map Short (ForAny Slot)
 
 -- Abstraction methods for Inventory, not really needed tbh.
-getSlot :: Short -> Inventory -> ForAny Slot
-getSlot = Map.findWithDefault (ambiguate $ Slot Nothing)
+--getSlot :: Short -> Inventory -> ForAny Slot
+--getSlot = Map.findWithDefault (ambiguate $ Slot Nothing)
 
-setSlot :: Short -> Slot i -> Inventory -> Inventory
-setSlot k (Slot Nothing) = Map.delete k
-setSlot k s = Map.insert k (ambiguate s)
+--inventorySlot :: Short -> Lens' Inventory (ForAny Slot)
+--inventorySlot s = at s . to (fromMaybe (ambiguate $ Slot Nothing))
+
+-- | These types are isomorphic because @'SuchThat' ('Slot' 'Nothing')@ is a default for @'ForAny' 'Slot'@.
+slotMaybe :: Iso' (Maybe (ForAny Slot)) (ForAny Slot)
+slotMaybe = iso mSlotToSlot slotToMSlot
+  where
+    mSlotToSlot :: Maybe (ForAny Slot) -> ForAny Slot
+    mSlotToSlot Nothing = ambiguate $ Slot Nothing
+    mSlotToSlot (Just s) = s
+
+    slotToMSlot :: ForAny Slot -> Maybe (ForAny Slot)
+    slotToMSlot (SuchThat (Slot (Just sd))) = Just (SuchThat (Slot (Just sd)))
+    slotToMSlot (SuchThat (Slot Nothing)) = Nothing
+
+
+--setSlot :: Short -> Slot i -> Inventory -> Inventory
+--setSlot k (Slot Nothing) = Map.delete k
+--setSlot k s = Map.insert k (ambiguate s)
 
 -- Sidestep existential nonsense when creating items
-slot :: Item i -> Word8 -> Slot i
-slot i c = Slot . Just $ SlotData i c
+--slot :: Item i -> Word8 -> Slot i
+--slot i c = Slot . Just $ SlotData i c
 
-slotAmount :: Slot i -> Word8
-slotAmount (Slot (Just (SlotData _ c))) = c
-slotAmount (Slot Nothing) = 0
+--slotAmount :: Slot i -> Word8
+--slotAmount (Slot (Just (SlotData _ c))) = c
+--slotAmount (Slot Nothing) = 0
 
 -- Remove as many items as possible, up to count, return amount removed
-removeCount :: Word8 -> Slot i -> (Word8,Slot i)
-removeCount _ (Slot Nothing) = (0,Slot Nothing)
-removeCount c (Slot (Just (SlotData i count))) = if c < count then (c,Slot . Just $ SlotData i (count - c)) else (count,Slot Nothing)
+--removeCount :: Word8 -> Slot i -> (Word8,Slot i)
+--removeCount _ (Slot Nothing) = (0,Slot Nothing)
+--removeCount c (Slot (Just (SlotData i count))) = if c < count then (c,Slot . Just $ SlotData i (count - c)) else (count,Slot Nothing)
 
 -- Count is how many to put into first stack from second
-splitStack :: Word8 -> Slot i -> (Slot i,Slot i)
-splitStack _ (Slot Nothing) = (Slot Nothing,Slot Nothing)
-splitStack c s@(Slot (Just (SlotData i _))) = (firstStack,secondStack)
-  where
-    firstStack = if amtFirstStack == 0 then Slot Nothing else Slot . Just $ SlotData i amtFirstStack
-    (amtFirstStack,secondStack) = removeCount c s
+--splitStack :: Word8 -> Slot i -> (Slot i,Slot i)
+--splitStack _ (Slot Nothing) = (Slot Nothing,Slot Nothing)
+--splitStack c s@(Slot (Just (SlotData i _))) = (firstStack,secondStack)
+  --where
+    --firstStack = if amtFirstStack == 0 then Slot Nothing else Slot . Just $ SlotData i amtFirstStack
+    --(amtFirstStack,secondStack) = removeCount c s
 
-takeFromSD :: Word8 -> SlotData i -> (SlotData i,Slot i)
-takeFromSD c (SlotData i ic) = if c < ic
+-- | Take the specified number of items out of a @'SlotData'@, and put them into a new @'SlotData'@, leaving a (possibly empty) @'Slot'@
+takeFromSlot :: Word8 -> SlotData i -> (SlotData i,Slot i)
+takeFromSlot c (SlotData i ic) = if c < ic
   then (SlotData i c,Slot (Just (SlotData i (ic - c))))
   else (SlotData i ic,Slot Nothing)
 
@@ -693,10 +881,12 @@ takeFromSD c (SlotData i ic) = if c < ic
   --serialize (SlotData (Item desc i) count) = serialize (itemId desc) >> serialize count >> serialize (itemMeta desc i) >> (case itemNBT desc i of {Just nbt -> putByteString $ Cereal.encode (NBT "" nbt);Nothing -> putWord8 0x00})
   --deserialize = undefined
 
+-- | A generalized version of @'runNat'@ that works with arbitrary effect stacks instead of just a single monad.
 generalizedRunNat :: (forall x. f x -> Eff r x) -> Eff (f ': r) a -> Eff r a
 generalizedRunNat n = handleRelay pure (\e k -> n e >>= k)
 
--- logToConsole is a natural transformation from `Writer`ing log messages to logging them to a TQueue for later transactional printing
+-- | @'logToConsole'@ is a natural transformation from @'Writer'@ing log messages to logging them to a TQueue for later transactional printing.
+-- See @'LogQueue'@.
 logToConsole :: Members '[Configured,IO] r => LogQueue -> Eff (Logging ': r) a -> Eff r a
 logToConsole (LogQueue l) = generalizedRunNat $ \case
   Writer (LogMessage level str) -> do

@@ -4,6 +4,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE FlexibleContexts #-}
+-- | Provides helper functions for defining @'Window'@s as well as several Vanilla @'Window'@s.
 module Civskell.Window where
 
 import qualified Data.Set as Set
@@ -18,29 +19,42 @@ import Data.Semigroup ((<>))
 import Civskell.Data.Types
 
 -- Given a way to get a slot, a way to set a slot, a window to use, a slot number, and a transaction id, click the slot
-defaultInventoryClick :: Members '[Packeting,Logging,WorldManipulation,PlayerManipulation] r => (Short -> Eff r (ForAny Slot)) -> (forall i. Short -> Slot i -> Eff r ()) -> WindowId -> Short -> TransactionId -> InventoryClickMode -> Eff r Bool
-defaultInventoryClick gs ss wid slotNum transId = \case
-  -- Get the current state of affairs, and purely decide what to do with them
+-- | The default way to click a window, given ways to access the slots of the inventory, and information about the click.
+-- Compare with @'onWindowClick'@ and @'WindowClickCallback'@.
+defaultInventoryClick :: Members '[Configured,Packeting,Logging,WorldManipulation,PlayerManipulation] r 
+  => (Short -> Eff r (ForAny Slot)) -- ^ How to get the @'Slot'@ in a specified slot number
+  -> (forall i. Short -> Slot i -> Eff r ()) -- ^ How to set the @'Slot'@ in a specified slot number
+  -> WindowId -- ^ The @'WindowId'@ of the window being clicked
+  -> Short -- ^ The slot number being clicked
+  -> TransactionId -- ^ The @'TransactionId'@ of this click
+  -> InventoryClickMode -- ^ The manner in which the slot is being clicked
+  -> WireSlot -- ^ The client provided @'WireSlot'@ that they think is in the slot they clicked
+  -> Eff r Bool -- ^ @'True'@ if the transaction was successful, @'False'@ otherwise.
+defaultInventoryClick gs ss wid slotNum transId clickMode cliSlot = case clickMode of
   NormalClick rClick -> do
-   slotItem <- gs slotNum
-   handItem <- gs (-1)
-   case ambiguously (\si -> ambiguously (\hi -> doInventoryClick si hi rClick) handItem) slotItem of
-    -- If everything is in order
-    Just (newSlot,newHand) -> do
-      -- Set the slots to their new values
-      logp $ "Setting slot -1 to " <> T.pack (ambiguously show newHand)
-      ambiguously (ss (-1)) newHand
-      logp $ "Setting slot " <> T.pack (show slotNum) <> " to " <> T.pack (ambiguously show newSlot)
-      ambiguously (ss slotNum) newSlot
-      -- Confirm the transaction was successful
-      return True --sendPacket (Client.ConfirmTransaction wid transId True)
-    -- If something went wrong
-    Nothing -> do
-      -- Log to console
-      loge "Failed to confirm client transaction"
-      modify $ playerFailedTransactions %~ Set.insert (wid,transId)
-      -- And tell the client it should say sorry
-      return False -- sendPacket (Client.ConfirmTransaction wid transId False)
+    -- Get the real item in the slot
+    slotItem <- gs slotNum
+    -- Fast and dirty equality test; do they serialize to the same thing?
+    if ambiguously ((==cliSlot) . toWireSlot) slotItem
+      -- If everything is in order
+      then do
+        -- Get the item in the player's hand
+        handItem <- gs (-1)
+        let (newSlot,newHand) = ambiguously (\si -> ambiguously (\hi -> doInventoryClick si hi rClick) handItem) slotItem
+        -- Set the slots to their new values
+        logp $ "Setting slot -1 to " <> T.pack (ambiguously show newHand)
+        ambiguously (ss (-1)) newHand
+        logp $ "Setting slot " <> T.pack (show slotNum) <> " to " <> T.pack (ambiguously show newSlot)
+        ambiguously (ss slotNum) newSlot
+        -- Confirm the transaction was successful
+        return True --sendPacket (Client.ConfirmTransaction wid transId True)
+      -- If the provided slot isn't correct
+      else do
+        -- Log to console
+        loge "Failed to confirm client transaction"
+        modify $ playerFailedTransactions %~ Set.insert (wid,transId)
+        -- And tell the client it should say sorry
+        return False -- sendPacket (Client.ConfirmTransaction wid transId False)
   -- Right click is exactly the same as left when shiftclicking
   -- TODO: implement the rest of the clicking bs that minecraft does
   ShiftClick _rClick -> pure False
@@ -54,13 +68,18 @@ defaultInventoryClick gs ss wid slotNum transId = \case
 
 -- Given what the slot is right now, and what the item held in the hand is, and whether they are left or right clicking
 -- give back a (new slot,new held item) if it worked, or Nothing if it didn't
-doInventoryClick :: Slot i -> Slot j -> Bool -> Maybe (ForAny Slot,ForAny Slot)
+-- | The business logic of a Minecraft inventory click
+doInventoryClick :: 
+  Slot i -- ^ The contents of the slot being clicked
+  -> Slot j -- ^ The contents of the item in the player's cursor
+  -> Bool -- ^ @'True'@ for right-click, @'False'@ for left click
+  -> (ForAny Slot,ForAny Slot) -- ^ The pair of the new slot and the new item in the cursor
 doInventoryClick actualSlot currHeld rClick = case actualSlot of
   Slot Nothing -> case currHeld of
     -- Both empty -> No-op
-    Slot Nothing -> Just (ambiguate actualSlot,ambiguate currHeld)
+    Slot Nothing -> (ambiguate actualSlot,ambiguate currHeld)
     -- Putting something in an empty slot
-    Slot (Just (SlotData curri currcount)) -> Just (ambiguate $ Slot placed,ambiguate $ Slot newHeld)
+    Slot (Just (SlotData curri currcount)) -> (ambiguate $ Slot placed,ambiguate $ Slot newHeld)
       where
         -- If we right click, only place one item, left click places all of them
         delta = if rClick then 1 else 64
@@ -70,7 +89,7 @@ doInventoryClick actualSlot currHeld rClick = case actualSlot of
         placed = Just $ SlotData curri (min delta currcount)
   Slot (Just (SlotData (Item actdesc acti) actcount)) -> case currHeld of
     -- Picking something up into an empty hand
-    Slot Nothing -> Just (ambiguate $ Slot left,ambiguate $ Slot $ Just picked)
+    Slot Nothing -> (ambiguate $ Slot left,ambiguate $ Slot $ Just picked)
       where
         -- If we right click, take half, otherwise take as much as we can
         delta = if rClick then actcount `div` 2 else min actcount 64
@@ -81,7 +100,7 @@ doInventoryClick actualSlot currHeld rClick = case actualSlot of
     -- Two item stacks interacting
     Slot (Just (SlotData (Item currdesc curri) currcount)) -> case itemId currdesc == itemId actdesc && itemMeta currdesc curri == itemMeta actdesc acti && itemNBT currdesc curri == itemNBT actdesc acti of
       -- Like stacks; combine
-      True -> Just (ambiguate $ Slot inSlot,ambiguate $ Slot stillHeld)
+      True -> (ambiguate $ Slot inSlot,ambiguate $ Slot stillHeld)
         where
           -- How many items we can possibly place in the slot
           spaceRemaining = 64 - actcount
@@ -93,7 +112,7 @@ doInventoryClick actualSlot currHeld rClick = case actualSlot of
           -- Put the stuff we put into the slot, into the slot
           inSlot = Just $ SlotData (Item actdesc acti) (actcount + delta)
       -- Unlike stacks; swap
-      False -> Just (ambiguate currHeld,ambiguate actualSlot)
+      False -> (ambiguate currHeld,ambiguate actualSlot)
 
 
 -- Hotbar: 0-8
@@ -102,12 +121,15 @@ doInventoryClick actualSlot currHeld rClick = case actualSlot of
 -- Crafting: output: 40, inputs: tl: 41, tr: 42, bl: 43, br: 44
 -- off hand: 45
 
+-- | A player inventory window
 data Player = Player
+
+-- | Default descriptor for a player inventory window
 player :: WindowDescriptor Player
 player = WindowDescriptor
   {windowName = "Player Inventory"
   ,windowIdentifier = error "No identitifer for Player Inventory (Civskell.Window)"
-  ,slotCount {-(Player _)-} = 45
+  ,slotCount = const 45
   -- TODO: Also send the packet on set
   ,onWindowClick = \Player -> defaultInventoryClick getInventorySlot setInventorySlot
   }
@@ -130,19 +152,23 @@ player = WindowDescriptor
 -}
 -- Chests are numbered *after* the off hand slot (45)
 -- Num rows (9 per row)
+
+-- | A single chest
 data Chest = Chest (TVar Inventory)
+
+-- | Default descriptor for a single chest
 chest :: WindowDescriptor Chest
 chest = WindowDescriptor
   {windowName = "Chest"
   ,windowIdentifier = "minecraft:chest"
-  ,slotCount {-(Chest rows _)-} = 27 -- rows * 9
+  ,slotCount = const 27
   ,onWindowClick = \(Chest i) -> let
     gsChest slotNum = if slotNum > 26 || slotNum == (-1)
       then getInventorySlot (slotNum - 18)
-      else getSlot slotNum <$> send (atomically $ readTVar i)
+      else view (at slotNum . slotMaybe) <$> send (atomically $ readTVar i)
     ssChest slotNum s' = if slotNum > 26 || slotNum == (-1)
       then setInventorySlot (slotNum - 18) s'
-      else send . atomically $ modifyTVar i (setSlot slotNum s')
+      else send . atomically $ modifyTVar i (at slotNum . slotMaybe .~ ambiguate s')
     in defaultInventoryClick gsChest ssChest
   }
  {- clientToCivskellSlot s

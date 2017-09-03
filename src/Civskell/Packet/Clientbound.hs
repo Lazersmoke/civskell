@@ -214,7 +214,7 @@ data OpenWindow = OpenWindow WindowId (ForAny Window) ProtocolString (Maybe Enti
 openWindow :: VarInt -> OutboundPacketDescriptor OpenWindow
 openWindow = defaultDescriptor Playing "OpenWindow" $ \(OpenWindow wid (SuchThat (Window wDesc _)) title horseEid) -> [("Window Id",showText wid),("Window Type",windowName wDesc),("Window Title",showText . unProtocolString $ title)] ++ (case horseEid of {Just eid -> [("Horse EID",showText eid)];Nothing -> []})
 instance Serial OpenWindow where
-  serialize (OpenWindow wid (SuchThat (Window wDesc _)) title horseEid) = serialize wid *> serialize (windowIdentifier wDesc) *> serialize title *> serialize ((unsafeCoerce :: Short -> Word8) $ slotCount wDesc) *> (case horseEid of {Just eid -> serialize eid;Nothing -> pure ()})
+  serialize (OpenWindow wid (SuchThat (Window wDesc w)) title horseEid) = serialize wid *> serialize (windowIdentifier wDesc) *> serialize title *> serialize ((unsafeCoerce :: Short -> Word8) $ slotCount wDesc w) *> (case horseEid of {Just eid -> serialize eid;Nothing -> pure ()})
   deserialize = error "Unimplemented: deserialize @OpenWindow"
 
 -- Window Id, Slots

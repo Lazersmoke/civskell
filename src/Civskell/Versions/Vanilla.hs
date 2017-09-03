@@ -4,6 +4,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+-- | Configurations for running Civskell as a Vanilla Minecraft server.
 module Civskell.Versions.Vanilla where
 
 import qualified Civskell.Packet.Serverbound as Server
@@ -32,9 +33,17 @@ import qualified Data.Text as T
 import qualified Data.Map as Map
 import Data.Semigroup
 
-unhandled :: CanHandlePackets r => T.Text -> p -> Eff r () 
+-- | A default packet handler that just prints an error message. For example:
+--
+-- @
+--   'Server.handshake' $ 'unhandled' "Packet name here"
+-- @
+--
+-- is an @'InboundPacketDescriptor' 'Server.Handshake'@.
+unhandled :: Member Logging r => T.Text -> p -> Eff r () 
 unhandled t _ = loge $ "Unhandled Packet: " <> t
 
+-- | Civskell's recommended configuration for running as a Vanilla 1.12.1 Minecraft server.
 vanilla1_12_1 :: Configuration
 vanilla1_12_1  = defaultConfiguration
   {packetsForState = \case
@@ -159,7 +168,7 @@ vanilla1_12_1  = defaultConfiguration
           --_ <- openWindowWithItems (Window.Chest i) (jsonyText "Test Chest") i
           --pure ()
         _ -> do
-          broadcastPacket . ambiguate $ DescribedPacket (Client.chatMessage 0x0F) (Client.ChatMessage (jsonyText msg) 0)
+          broadcastPacket $ DescribedPacket (Client.chatMessage 0x0F) (Client.ChatMessage (jsonyText msg) 0)
           name <- view playerUsername <$> get
           logt (T.pack name) (T.pack msg)
       ,ambiguate $ Server.clientStatus $ \(Server.ClientStatus status) -> case status of
@@ -184,7 +193,7 @@ vanilla1_12_1  = defaultConfiguration
         False -> loge "Client apologized for non-existant transaction"
       ,ambiguate $ Server.enchantItem $ unhandled "Enchant Item"
       -- This function needs to change items in the window Id it is given
-      ,ambiguate $ Server.clickWindow $ \(Server.ClickWindow wid slotNum transId mode _clientProvidedSlot) -> do
+      ,ambiguate $ Server.clickWindow $ \(Server.ClickWindow wid slotNum transId mode clientProvidedSlot) -> do
         -- Log which window and slot they tried to click
         logp $ "Player clicked window " <> showText wid <> " at slot number " <> showText slotNum
         -- Get the window they are clicking
@@ -197,7 +206,7 @@ vanilla1_12_1  = defaultConfiguration
             -- If they do have failed transactions, log about it 
             False -> loge $ "Failed, but client is still sending clicks to " <> showText (Window desc w)
             -- If they have no failed transactions, then click the window
-            True -> onWindowClick desc w wid slotNum transId mode >>= sendPacket (Client.confirmTransaction 0x11) . Client.ConfirmTransaction wid transId
+            True -> onWindowClick desc w wid slotNum transId mode clientProvidedSlot >>= sendPacket (Client.confirmTransaction 0x11) . Client.ConfirmTransaction wid transId
       ,ambiguate $ Server.closeWindow $ \(Server.CloseWindow w) -> do
         logp $ "Player is closing a window with id: " <> showText w
         case w of
@@ -245,7 +254,7 @@ vanilla1_12_1  = defaultConfiguration
             SuchThat (Slot Nothing) -> logp $ "Tried to drop nothing"
             SuchThat (Slot (Just heldData)) -> do
               -- Drop the entire stack, or at most one item
-              let (dropped,newHeld) = takeFromSD (if isStack then 64 else 1) $ heldData
+              let (dropped,newHeld) = takeFromSlot (if isStack then 64 else 1) $ heldData
               -- Log the SlotData they just dropped
               logp $ "Dropping: " <> showText dropped
               -- Set their inventory to match the new dropped version

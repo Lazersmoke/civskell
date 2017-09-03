@@ -2,22 +2,31 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE PolyKinds #-}
+-- | Provides the @'Stone'@ block type.
 module Civskell.Block.Stone where
 
 import Unsafe.Coerce (unsafeCoerce)
 
 import Civskell.Data.Types
-import Civskell.Data.Block
 
--- Bool isPolished
+-- | Type of Minecraft stone, both for items and for blocks, depending on the type parameter.
+--
+-- The @'Bool'@s in the constructors are @'True'@ if polished or @'False'@ if not.
 data Stone (t :: AsType) = Stone | Granite Bool | Diorite Bool | Andesite Bool
 
+-- TODO: Don't use unsafeCoerce here
+-- | Convert one kind of stone to another.
+-- 
+-- > convStone :: Stone 'AsItem -> Stone 'AsBlock
+-- > convStone :: Stone 'AsBlock -> Stone 'AsItem
 convStone :: forall b a. Stone a -> Stone b
 convStone = unsafeCoerce
 
+-- | Convert a @'Item' ('Stone' ''AsItem')@ to a @'Block' ('Stone' ''AsBlock')@ using the standard @'stone'@ descriptor.
 stoneToBlock :: Item (Stone 'AsItem) -> Block (Stone 'AsBlock)
 stoneToBlock (Item _itemStone s) = Block stone (convStone s)
 
+-- | Standard descriptor for Minecraft stone block.
 stone :: BlockDescriptor (Stone 'AsBlock)
 stone = BlockDescriptor
   {blockId = 1
@@ -39,9 +48,9 @@ stone = BlockDescriptor
     Andesite False -> "Andesite"
     Andesite True -> "Polished Andesite"
   ,onClick = Nothing
-  --,droppedItem = Just $ some . convStone @'AsItem
   }
 
+-- | Standard descriptor for Minecraft stone item.
 itemStone :: ItemDescriptor (Stone 'AsItem)
 itemStone = ItemDescriptor
   {itemId = 0x1
@@ -49,6 +58,5 @@ itemStone = ItemDescriptor
   ,itemMeta = const 0
   ,itemNBT = const Nothing
   ,onItemUse = placeBlock stoneToBlock
-  --,parseItem = standardParser (Stone @'AsItem)
   }
 

@@ -5,6 +5,8 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+-- | Civskell is a highly-configurable Minecraft server.
+-- To use it, create a @'Configuration'@ and pass it in to @'runServer'@ to start the server.
 module Civskell (module Civskell.Data.Types, runServer) where
 
 import Control.Concurrent (forkIO,threadDelay)
@@ -32,19 +34,19 @@ import qualified Civskell.Block.Stone as Stone
 import qualified Civskell.Window as Window
 import qualified Civskell.Packet.Clientbound as Client
 
--- Top level entry point to the server. Drops us from IO into a Configured Eff
+-- | Top level entry point to the server. 
+-- Run this command from your executable to run a Civskell server.
+-- Note that this will *not* return until the server dies, so you should fork
+-- if you want to do anything else on the main thread.
 runServer :: Configuration -> IO ()
 runServer c = runM . flip runReader c $ do
   -- This TQueue will live on its own thread and eat up all the log messages we send it from other threads.
-  -- TODO: Add configuration for variable logging outputs here. (To console, to file, etc)
-  -- TODO: Change log messages to use Text instead of String
   logger <- freshLogQueue
-  -- Fork a thread to continuously log every log message
   _ <- send $ forkIO (loggingThread logger)
   -- Start listening for incoming connections, now with logging
   logToConsole logger (startListening logger)
 
--- Initial world for testing so we don't have to chunk gen or do persistence yet.
+-- | Initial world for testing so we don't have to chunk gen or do persistence yet.
 -- This is a world with stone in the 7 chunk square around 0,0 from bedrock to halfway up.
 testInitWorld :: WorldData
 testInitWorld = worldChunks .~ Map.fromList [(ChunkCoord (cx,cy,cz),exampleChunk) | cx <- [-3..3], cz <- [-3..3], cy <- [0..7]] $ initWorld
@@ -112,7 +114,7 @@ keepAliveThread i = do
   -- Wait 20 seconds
   send (threadDelay 20000000)
   -- Send everyone a keep alive packet
-  broadcastPacket . ambiguate $ DescribedPacket (Client.keepAlive 0x1F) (Client.KeepAlive i)
+  broadcastPacket $ DescribedPacket (Client.keepAlive 0x1F) (Client.KeepAlive i)
   logLevel VerboseLog "Broadcasting Keepalives"
   -- Do it again with the next keep alive id
   keepAliveThread (succ i)
@@ -159,7 +161,7 @@ packetLoop :: Members '[Configured,IO,PlayerManipulation,WorldManipulation,Loggi
 packetLoop = do
   -- TODO: Fork new thread on every packet
   -- Block until a packet arrives, then deal with it
-  getGenericPacket getPacketParsers >>= \case
+  getPacket getPacketParsers >>= \case
     Nothing -> loge "Failed to parse incoming packet"
     Just (SuchThat (DescribedPacket pktDesc (q :: qt))) -> case packetThreadingMode (packetHandler pktDesc) of
       -- Invariant: If a packet handler is capable of changing the ServeState,
