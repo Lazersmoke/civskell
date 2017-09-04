@@ -911,8 +911,7 @@ instance Serial ProtocolNBT where
     Left e -> error e
     Right a -> pure (ProtocolNBT a)
 
--- Legacy Handshake packet constant. This is what we send when we get a legacy
--- ping from a client.
+-- | Legacy Handshake packet constant. This is what we send when we get a legacy ping from a client.
 legacyHandshakePongConstant :: BS.ByteString
 legacyHandshakePongConstant = BS.pack [0xFF,0x00,0x1b,0x00,0xa7
   ,0x00,0x31 -- 1
@@ -1109,6 +1108,35 @@ instance Serial AbilityFlags where
 
 -- Used in Client.ChangeGameState
 data GameStateChange = InvalidBed | Raining Bool | ChangeGamemode Gamemode | ExitTheEnd Bool | DemoMessage | ArrowHitOtherPlayer | FadeValue Float | FadeTime Float | ElderGuardian
+
+instance Serial GameStateChange where
+  serialize InvalidBed = putWord8 0x00 *> serialize (0 :: Float)
+  serialize (Raining isStarting) = putWord8 (if isStarting then 0x01 else 0x02) *> serialize (0 :: Float)
+  serialize (ChangeGamemode g) = putWord8 0x03 *> serialize (case g of {Survival -> 0; Creative -> 1;} :: Float)
+  serialize (ExitTheEnd showCredits) = putWord8 0x04 *> if showCredits then serialize (1 :: Float) else serialize (0 :: Float)
+  serialize DemoMessage = putWord8 0x05 *> serialize (0 :: Float)
+  serialize ArrowHitOtherPlayer = putWord8 0x06 *> serialize (0 :: Float)
+  serialize (FadeValue f) = putWord8 0x07 *> serialize f
+  serialize (FadeTime f) = putWord8 0x08 *> serialize f
+  serialize ElderGuardian = putWord8 0x09 *> serialize (0 :: Float)
+  deserialize = getWord8 >>= \case
+    0x00 -> deserialize @Float >> pure InvalidBed
+    0x01 -> deserialize @Float >> pure (Raining True)
+    0x02 -> deserialize @Float >> pure (Raining False)
+    0x03 -> deserialize @Float >>= pure . ChangeGamemode . \case
+      0 -> Survival
+      1 -> Creative
+      x -> error $ "Invalid Gamemode in ChangeGameState: " <> show x
+    0x04 -> deserialize @Float >>= pure . ExitTheEnd . \case
+      0 -> False
+      1 -> True
+      x -> error $ "Invalid showCredits in GameStateChange: " <> show x
+    0x05 -> deserialize @Float >> pure DemoMessage
+    0x06 -> deserialize @Float >> pure ArrowHitOtherPlayer
+    0x07 -> deserialize @Float >>= pure . FadeValue
+    0x08 -> deserialize @Float >>= pure . FadeTime
+    0x09 -> deserialize @Float >> pure ElderGuardian
+    x -> error $ "Invalid ChangeGameState with flag: " <> show x
 
 -- Used in Server.ClientAction
 data ClientStatusAction = PerformRespawn | RequestStats | OpenInventory deriving (Show,Enum)

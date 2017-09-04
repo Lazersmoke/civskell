@@ -52,9 +52,6 @@ data PacketSerializer p = PacketSerializer
   ,serializePacket :: forall m. MonadPut m => p -> m ()
   }
 
-defaultSerializer :: Serial p => VarInt -> PacketSerializer p
-defaultSerializer pId = PacketSerializer {packetId = pId, serializePacket = serialize}
-
 type SupportedPackets h = Vector.Vector (SuchThat '[Serial] (PacketDescriptor h))
 
 moveVec :: Int -> Int -> Vector.Vector a -> Vector.Vector a
