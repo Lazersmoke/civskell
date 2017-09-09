@@ -39,7 +39,7 @@ import qualified Civskell.Packet.Clientbound as Client
 -- Note that this will *not* return until the server dies, so you should fork
 -- if you want to do anything else on the main thread.
 runServer :: Configuration -> IO ()
-runServer c = runM . flip runReader c $ do
+runServer c = runM . runReader c $ do
   -- This TQueue will live on its own thread and eat up all the log messages we send it from other threads.
   logger <- freshLogQueue
   _ <- send $ forkIO (loggingThread logger)
@@ -63,7 +63,7 @@ initPlayer pq e = do
 
 -- This is a natural transformation from modifying a player to modifying a specific player in the world, given the player id of that player.
 modifyPlayerInWorld :: Members '[WorldManipulation,Logging] r => TQueue (ForAny (DescribedPacket PacketSerializer)) -> PlayerId -> Eff (PlayerManipulation ': r) a -> Eff r a
-modifyPlayerInWorld pq pId = generalizedRunNat $ \case
+modifyPlayerInWorld pq pId = runNat $ \case
   Get -> fromMaybe playerData . view (worldPlayers . at pId) <$> get
   Put p' -> modify $ worldPlayers . at pId .~ Just p'
   where
@@ -102,9 +102,9 @@ startListening lq = do
   -- bad fork
   (c :: Configuration) <- ask
   -- Fork a new thread to wait for incoming connections, and send the Socket from each new connection to `connLoop`.
-  _ <- send . forkIO . runM . flip runReader c . logToConsole lq . runWorld wor . connLoop wor lq =<< send (Net.listenOn (Net.PortNumber 25565))
+  _ <- send . forkIO . runM . runReader c . logToConsole lq . runWorld wor . connLoop wor lq =<< send (Net.listenOn (Net.PortNumber 25565))
   -- Fork a thread to periodically send keep alives to everyone
-  _ <- send . forkIO . runM . flip runReader c . logToConsole lq . runWorld wor $ keepAliveThread 0
+  _ <- send . forkIO . runM . runReader c . logToConsole lq . runWorld wor $ keepAliveThread 0
   -- Listen for the console to say to quit. The main thread is retired to terminal duty
   send terminal
 
@@ -146,9 +146,9 @@ connLoop wor lq sock = do
   pq <- send $ newTQueueIO
   (c :: Configuration) <- ask
   -- Getting thread
-  _ <- send . forkIO . runM . flip runReader c . logToConsole lq . runNetworking mEnc mThresh handle . runWorld wor . runPacketing . initPlayer pq $ packetLoop
+  _ <- send . forkIO . runM . runReader c . logToConsole lq . runNetworking mEnc mThresh handle . runWorld wor . runPacketing . initPlayer pq $ packetLoop
   -- Sending thread
-  _ <- send . forkIO . runM . flip runReader c . logToConsole lq . runNetworking mEnc mThresh handle . runPacketing $ flushPackets pq
+  _ <- send . forkIO . runM . runReader c . logToConsole lq . runNetworking mEnc mThresh handle . runPacketing $ flushPackets pq
   -- Wait for another connection
   connLoop wor lq sock
 

@@ -15,7 +15,8 @@
 # resolver:
 #  name: custom-snapshot
 #  location: "./custom-snapshot.yaml"
-resolver: lts-9.2
+resolver: nightly-2017-09-07
+# ^ First stackage nightly with ghost-buster :D
 
 # User packages to be built.
 # Various formats can be used as shown in the example below.
@@ -37,15 +38,16 @@ resolver: lts-9.2
 # will not be run. This is useful for tweaking upstream packages.
 packages:
 - '.'
-
+- location:
+    git: git@github.com:Lazersmoke/freer-effects.git
+    commit: 6a86ee32e5b869a877151f74064572225e1a0398
+  extra-dep: true
 # Dependency packages to be pulled from upstream that are not in the resolver
 # (e.g., acme-missiles-0.3)
 extra-deps:
 - AES-0.2.9
 - nbt-0.6
 - binary-strict-0.4.8.3
-- freer-effects-0.3.0.1
-- ghost-buster-0.1.1.0
 
 # Override default flag values for local packages and extra-deps
 flags: {}

@@ -1,2 +1,2 @@
-stack build --pedantic --file-watch --test --haddock # --executable-profiling --library-profiling 
+stack build --pedantic --file-watch --test --haddock --install-ghc # --executable-profiling --library-profiling 
 # --ghc-options="-fprof-auto -rtsopts"

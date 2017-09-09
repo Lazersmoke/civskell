@@ -5,9 +5,9 @@ description:         Please see README.md
 homepage:            https://github.com/Lazersmoke/civskell
 license:             BSD3
 license-file:        LICENSE
-author:              Lazersmoke
+author:              Sam Quinn
 maintainer:          lazersmoke@gmail.com
-copyright:           2017 Lazersmoke :P
+copyright:           2017 Sam Quinn
 category:            Mineman
 build-type:          Simple
 extra-source-files:  README.md

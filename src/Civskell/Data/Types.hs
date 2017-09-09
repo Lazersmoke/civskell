@@ -498,13 +498,13 @@ setInventorySlot slotNum slotData = do
 -- Note that this is *not* really transactional yet because it is only transactional up to the @'Get'@ or @'Put'@,
 -- which is to say not transactional at all.
 runWorld :: Members '[Logging,IO] r => TVar WorldData -> Eff (WorldManipulation ': r) a -> Eff r a
-runWorld tWorld = generalizedRunNat $ \case
+runWorld tWorld = runNat $ \case
   Get -> send $ readTVarIO tWorld
   Put w' -> send . atomically $ writeTVar tWorld w'
 
 -- | @'runPacketing'@ is a natural transformation from @'sendPacket'@ing to low-level @'Networking'@.
 runPacketing :: Members '[Logging,Networking] r => Eff (Packeting ': r) a -> Eff r a
-runPacketing = generalizedRunNat $ \case
+runPacketing = runNat $ \case
   -- Unpack from the existentials to get the type information into a skolem, scoped tyvar
   SendPacket (SuchThat (DescribedPacket pktDesc pkt)) -> do
     let pktHandler = packetHandler pktDesc
@@ -522,41 +522,41 @@ runPacketing = generalizedRunNat $ \case
 
 -- | @'runNetworking'@ is a natural transformation from low-level @'Networking'@ to literally network handles in @'IO'@.
 runNetworking :: Member IO r => TVar (Maybe EncryptionCouplet) -> TVar (Maybe VarInt) -> Handle -> Eff (Networking ': r) a -> Eff r a
-runNetworking mEnc mThresh hdl = runNat @IO $ \case
+runNetworking mEnc mThresh hdl = runNat $ \case
   --ForkNetwork e -> pure (runNetworking mEnc mThresh hdl e)
   GetFromNetwork len -> do
     -- We don't want exclusive access here because we will block
-    dat <- BS.hGet hdl len
+    dat <- send $ BS.hGet hdl len
     -- Decrypt the data or don't based on the encryption value
-    atomically $ readTVar mEnc >>= \case
-      Nothing -> return dat
+    send . atomically $ readTVar mEnc >>= \case
+      Nothing -> pure dat
       Just (c,e,d) -> do
         -- d' is the updated decrypting shift register
         let (bs',d') = cfb8Decrypt c d dat
         writeTVar mEnc (Just (c,e,d'))
-        return bs'
+        pure bs'
   PutIntoNetwork bs -> do
     -- Encrypt the data or don't based on the encryption value
-    enc <- atomically $ readTVar mEnc >>= \case
-      Nothing -> return bs
+    enc <- send . atomically $ readTVar mEnc >>= \case
+      Nothing -> pure bs
       Just (c,e,d) -> do
         -- e' is the updated encrypting shift register
         let (bs',e') = cfb8Encrypt c e bs
         writeTVar mEnc (Just (c,e',d))
-        return bs'
-    BS.hPut hdl enc
-  SetCompressionLevel thresh -> atomically $ readTVar mThresh >>= \case
+        pure bs'
+    send $ BS.hPut hdl enc
+  SetCompressionLevel thresh -> send . atomically $ readTVar mThresh >>= \case
     -- If there is no pre-existing threshold, set one
     Nothing -> writeTVar mThresh (Just thresh)
     -- If there is already compression, don't change it (only one setCompression is allowed)
     -- Should we throw an error instead of silently failing here?
     Just _ -> pure ()
-  SetupEncryption ss -> atomically $ readTVar mThresh >>= \case
+  SetupEncryption ss -> send . atomically $ readTVar mThresh >>= \case
     -- If there is no encryption setup yet, set it up
     Nothing -> writeTVar mEnc (Just (makeEncrypter ss,ss,ss))
     -- If it is already encrypted, don't do anything
     Just _ -> pure ()
-  AddCompression bs -> readTVarIO mThresh >>= \case
+  AddCompression bs -> send (readTVarIO mThresh) >>= \case
     -- Do not compress; annotate with length only
     Nothing -> pure (runPutS . withLength $ bs)
     -- Compress with the threshold `t`
@@ -572,11 +572,11 @@ runNetworking mEnc mThresh hdl = runNat @IO $ \case
       -- Do not compress; annotate with length only
       -- 0x00 indicates it is not compressed
       else pure . runPutS . withLength . runPutS $ putWord8 0x00 *> putByteString bs
-  RemoveCompression bs -> readTVarIO mThresh >>= \case
+  RemoveCompression bs -> send (readTVarIO mThresh) >>= \case
     -- Parse an uncompressed packet
     Nothing -> case runGetS parseUncompPkt bs of
       -- TODO: fix this completely ignoring a parse error
-      Left _ -> putStrLn "Emergency Parse Error!!!" *> pure bs
+      Left _ -> send (putStrLn "Emergency Parse Error!!!") *> pure bs
       Right pktData -> pure pktData
     -- Parse a compressed packet (compressed packets have extra metadata)
     Just _ -> case runGetS parseCompPkt bs of
@@ -882,14 +882,14 @@ takeFromSlot c (SlotData i ic) = if c < ic
   --deserialize = undefined
 
 -- | A generalized version of @'runNat'@ that works with arbitrary effect stacks instead of just a single monad.
-generalizedRunNat :: (forall x. f x -> Eff r x) -> Eff (f ': r) a -> Eff r a
-generalizedRunNat n = handleRelay pure (\e k -> n e >>= k)
+--generalizedRunNat :: (forall x. f x -> Eff r x) -> Eff (f ': r) a -> Eff r a
+--generalizedRunNat n = handleRelay pure (\e k -> n e >>= k)
 
 -- | @'logToConsole'@ is a natural transformation from @'Writer'@ing log messages to logging them to a TQueue for later transactional printing.
 -- See @'LogQueue'@.
 logToConsole :: Members '[Configured,IO] r => LogQueue -> Eff (Logging ': r) a -> Eff r a
-logToConsole (LogQueue l) = generalizedRunNat $ \case
-  Writer (LogMessage level str) -> do
+logToConsole (LogQueue l) = runNat $ \case
+  Tell (LogMessage level str) -> do
     -- Apply the configured loggin predicate to see if this message should be logged
     p <- ($ level) . shouldLog <$> ask 
     sName <- serverName <$> ask
