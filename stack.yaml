@@ -40,7 +40,7 @@ packages:
 - '.'
 - location:
     git: git@github.com:Lazersmoke/freer-effects.git
-    commit: 6a86ee32e5b869a877151f74064572225e1a0398
+    commit: d20d08005ce3d54c6cf3fe364f6944253d56845f
   extra-dep: true
 # Dependency packages to be pulled from upstream that are not in the resolver
 # (e.g., acme-missiles-0.3)
