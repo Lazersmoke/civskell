@@ -157,7 +157,7 @@ flushPackets :: Members '[Logging,Packeting,IO] r => TQueue (ForAny (DescribedPa
 flushPackets q = send (atomically $ readTQueue q) >>= (\(SuchThat (DescribedPacket d p)) -> sendPacket d p) >> flushPackets q
 
 -- Get packet -> Spawn thread -> Repeat loop for players
-packetLoop :: Members '[Configured,IO,PlayerManipulation,WorldManipulation,Logging,Networking] r => Eff r ()
+packetLoop :: Members '[Packeting,IO,Configured,PlayerManipulation,WorldManipulation,Logging,Networking] r => Eff r ()
 packetLoop = do
   -- TODO: Fork new thread on every packet
   -- Block until a packet arrives, then deal with it
@@ -168,7 +168,7 @@ packetLoop = do
       -- it must also be marked as SerialThreading. Otherwise, it might get a
       -- forked thread, and we get a packet from the new ServerState before the
       -- original packet finishes processing and updating the ServerState.
-      SerialThreading -> runPacketing $ (onPacket . packetHandler $ pktDesc) q
+      SerialThreading -> (onPacket . packetHandler $ pktDesc) q
       _ -> error "Unimplemented: ParThreading"
       --ParThreading -> send . (>> pure ()) . forkIO =<< (runM <$>) . forkConfig =<< forkLogger =<< forkNetwork =<< forkWorld =<< (runPacketing <$> forkPlayer ((onPacket . packetHandler $ pktDesc) q))
   packetLoop
