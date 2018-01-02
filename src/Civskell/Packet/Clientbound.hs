@@ -169,9 +169,8 @@ module Civskell.Packet.Clientbound
   ) where
 import Crypto.Hash (hash,Digest,SHA1)
 import Data.Text (Text)
-import Control.Monad.Freer
-import Control.Monad.Freer.State
 import Control.Monad
+import Control.Monad.Reader
 import Control.Lens
 import qualified Data.Text as T
 import Data.Semigroup
@@ -187,6 +186,7 @@ import GHC.Generics (Generic)
 import Numeric (showHex)
 import qualified Data.ByteString as BS
 import Unsafe.Coerce
+import Control.Concurrent.STM
 
 import Civskell.Data.Types
 import Civskell.Data.Util
@@ -753,10 +753,11 @@ spawnPosition :: VarInt -> OutboundPacketDescriptor SpawnPosition
 spawnPosition = defaultDescriptor Playing "Spawn Position" $ \(SpawnPosition bc) -> [("Spawn",showText bc)]
 
 -- | Generate a @'ChunkData'@ packet given a chunk (x,y) coordinate and some biome information.
-colPacket :: Member WorldManipulation r => (Int,Int) -> Maybe BS.ByteString -> Eff r ChunkData
+colPacket :: (Int,Int) -> Maybe BS.ByteString -> Civskell ChunkData
 colPacket (cx,cz) mbio = do
+  wor <- asks worldData
   -- Grab all 15 chunks, and make them in to WireBlocks
-  cs <- forM [0..15] (\cy -> chunkToWireBlock . view (worldChunks . at (ChunkCoord (cx,cy,cz)) . to (fromMaybe emptyChunk)) <$> get) 
+  cs <- forM [0..15] (\cy -> chunkToWireBlock . view (worldChunks . at (ChunkCoord (cx,cy,cz)) . to (fromMaybe emptyChunk)) <$> lift (readTVarIO wor))
   return (chunksToColumnPacket cs (cx,cz) mbio)
 
 -- | Generate a @'ChunkData'@ packet given some @'ChunkSection'@s that are in a serializable form, as

@@ -9,7 +9,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ExistentialQuantification #-}
--- | This module provides utilities for writing serverbound packets @'InboundPacketDescriptor'@s to go with them,
+-- | This module provides utilities for writing serverbound packets and @'InboundPacketDescriptor'@s to go with them,
 -- as well as an extensive library of vanilla Minecraft packets and descriptors.
 module Civskell.Packet.Serverbound 
   (
@@ -107,7 +107,6 @@ module Civskell.Packet.Serverbound
   ) where
 
 import Data.Int
-import Control.Monad.Freer
 import Data.Word
 import Data.Bytes.Put
 import Data.Bytes.Get
@@ -127,7 +126,7 @@ import Civskell.Data.Util
 -- their @'supportedPackets'@ when they write custom servers. It's much more convienient than having
 -- to rewrite the entire @'InboundPacketDescriptor'@ every time you want a custom handler. All vanilla
 -- packets in this module are provided as @'ServerboundPacketDescriptor'@s
-type ServerboundPacketDescriptor p = (forall r. CanHandlePackets r => p -> Eff r ()) -> InboundPacketDescriptor p
+type ServerboundPacketDescriptor p = (p -> Civskell ()) -> InboundPacketDescriptor p
 
 -- | A reasonable default for making @'ServerPacketDescriptor'@s. 
 -- It uses @'ParThreading'@ for @'packetThreadingMode'@, and the @'Serial'@ instance's @'deserialize'@ for @'deserializePacket'@.

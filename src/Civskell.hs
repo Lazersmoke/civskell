@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TypeOperators #-}
@@ -16,10 +17,7 @@ import Data.Semigroup
 import qualified Data.Set as Set
 import Control.Concurrent.STM
 import qualified Data.Map as Map
-import Data.Maybe (fromMaybe)
-import Control.Monad.Freer
-import Control.Monad.Freer.State
-import Control.Monad.Freer.Reader
+import Control.Monad.Reader
 import System.Exit (exitSuccess)
 import System.IO (hSetBuffering,BufferMode(NoBuffering))
 import qualified Network as Net
@@ -29,6 +27,7 @@ import Control.Lens
 
 import Civskell.Data.Logging
 import Civskell.Data.Types
+import Civskell.Data.Networking
 import Civskell.Tech.Network
 import qualified Civskell.Block.Stone as Stone
 import qualified Civskell.Window as Window
@@ -39,12 +38,20 @@ import qualified Civskell.Packet.Clientbound as Client
 -- Note that this will *not* return until the server dies, so you should fork
 -- if you want to do anything else on the main thread.
 runServer :: Configuration -> IO ()
-runServer c = runM . runReader c $ do
+runServer c = do
   -- This TQueue will live on its own thread and eat up all the log messages we send it from other threads.
   logger <- freshLogQueue
-  _ <- send $ forkIO (loggingThread logger)
-  -- Start listening for incoming connections, now with logging
-  logToConsole logger (startListening logger)
+  _ <- forkIO (loggingThread logger)
+  -- Make a new TVar for the World, starting with the test world
+  -- TODO: Add config option for world-gen vs set world
+  wor <- newTVarIO testInitWorld
+  -- Note for testing: Use virtualbox port forwarding to test locally
+  -- Fork a new thread to wait for incoming connections, and send the Socket from each new connection to `connLoop`.
+  _ <- forkIO . connLoop c wor logger =<< Net.listenOn (Net.PortNumber 25565)
+  -- Fork a thread to periodically send keep alives to everyone
+  _ <- forkIO $ runReaderT (keepAliveThread 0) (fakeGlobalContext c wor logger)
+  -- Listen for the console to say to quit. The main thread is retired to terminal duty
+  terminal
 
 -- | Initial world for testing so we don't have to chunk gen or do persistence yet.
 -- This is a world with stone in the 7 chunk square around 0,0 from bedrock to halfway up.
@@ -54,65 +61,42 @@ testInitWorld = worldChunks .~ Map.fromList [(ChunkCoord (cx,cy,cz),exampleChunk
     -- A chunk section full of stone
     exampleChunk = ChunkSection $ Arr.array ((0,0,0),(15,15,15)) [((x,y,z),ambiguate $ Block Stone.stone (Stone.Stone :: Stone.Stone 'AsBlock)) | x <- [0..15], y <- [0..15], z <- [0..15]]
 
--- Create a new player and jump into their player thread. Default player information is given here
--- We need the TQueue here to be the same one that is running in the sending thread
-initPlayer :: Members '[Packeting,IO,WorldManipulation,Logging] r => TQueue (ForAny (DescribedPacket PacketSerializer)) -> Eff (PlayerManipulation ': r) a -> Eff r a
-initPlayer pq e = do
-  pid <- view worldNextEID <$> get
-  modifyPlayerInWorld pq pid e
-
+defaultPlayerData :: TQueue (ForAny (DescribedPacket PacketSerializer)) -> PlayerData
+defaultPlayerData pq = PlayerData
+  {_playerTPConfirmQueue = Set.empty
+  ,_playerNextTid = 0
+  ,_playerKeepAliveQue = Set.empty
+  ,_playerNextKid = 0
+  ,_playerNextWid = 1
+  ,_playerWindows = Map.fromList [(0,ambiguate $ Window Window.player Window.Player)]
+  ,_playerInventory = Map.empty
+  ,_playerFailedTransactions = Set.empty
+  ,_playerHoldingSlot = 0
+  ,_playerPosition = (0,0,0)
+  ,_playerViewAngle = (0,0)
+  ,_playerGamemode = Survival
+  ,_playerDiggingBlocks = Map.empty
+  ,_playerMoveMode = Walking
+  ,_playerState = Handshaking
+  -- TODO: undefined is bad, don't use it
+  ,_playerUsername = ""
+  ,_playerClientBrand = undefined
+  ,_playerClientUUID = undefined
+  ,_playerId = undefined
+  ,_playerPacketQueue = pq
+  }
+{-
 -- This is a natural transformation from modifying a player to modifying a specific player in the world, given the player id of that player.
-modifyPlayerInWorld :: Members '[WorldManipulation,Logging] r => TQueue (ForAny (DescribedPacket PacketSerializer)) -> PlayerId -> Eff (PlayerManipulation ': r) a -> Eff r a
+modifyPlayerInWorld :: TQueue (ForAny (DescribedPacket PacketSerializer)) -> PlayerId -> Eff (PlayerManipulation ': r) a -> Civskell a
 modifyPlayerInWorld pq pId = runNat $ \case
   Get -> fromMaybe playerData . view (worldPlayers . at pId) <$> get
   Put p' -> modify $ worldPlayers . at pId .~ Just p'
-  where
-    playerData = PlayerData
-      {_playerTPConfirmQueue = Set.empty
-      ,_playerNextTid = 0
-      ,_playerKeepAliveQue = Set.empty
-      ,_playerNextKid = 0
-      ,_playerNextWid = 1
-      ,_playerWindows = Map.fromList [(0,ambiguate $ Window Window.player Window.Player)]
-      ,_playerInventory = Map.empty
-      ,_playerFailedTransactions = Set.empty
-      ,_playerHoldingSlot = 0
-      ,_playerPosition = (0,0,0)
-      ,_playerViewAngle = (0,0)
-      ,_playerGamemode = Survival
-      ,_playerDiggingBlocks = Map.empty
-      ,_playerMoveMode = Walking
-      ,_playerState = Handshaking
-      -- TODO: undefined is bad, don't use it
-      ,_playerUsername = ""
-      ,_playerClientBrand = undefined
-      ,_playerClientUUID = undefined
-      ,_playerId = undefined
-      ,_playerPacketQueue = pq
-      }
-
-
--- Note for testing: Use virtualbox port forwarding to test locally
--- Start up the server
-startListening :: Members '[Logging,Configured,IO] r => LogQueue -> Eff r ()
-startListening lq = do
-  -- Make a new MVar for the World, starting with the test world
-  -- TODO: Add config option for world-gen vs set world
-  wor <- send $ newTVarIO testInitWorld
-  -- bad fork
-  (c :: Configuration) <- ask
-  -- Fork a new thread to wait for incoming connections, and send the Socket from each new connection to `connLoop`.
-  _ <- send . forkIO . runM . runReader c . logToConsole lq . runWorld wor . connLoop wor lq =<< send (Net.listenOn (Net.PortNumber 25565))
-  -- Fork a thread to periodically send keep alives to everyone
-  _ <- send . forkIO . runM . runReader c . logToConsole lq . runWorld wor $ keepAliveThread 0
-  -- Listen for the console to say to quit. The main thread is retired to terminal duty
-  send terminal
-
+-}
 -- Send a keep alive packet to every player every 2 seconds
-keepAliveThread :: Members '[Logging,WorldManipulation,IO] r => KeepAliveId -> Eff r ()
-keepAliveThread i = do
+keepAliveThread :: KeepAliveId -> Civskell ()
+keepAliveThread !i = do
   -- Wait 20 seconds
-  send (threadDelay 20000000)
+  lift (threadDelay 20000000)
   -- Send everyone a keep alive packet
   broadcastPacket $ DescribedPacket (Client.keepAlive 0x1F) (Client.KeepAlive i)
   logLevel VerboseLog "Broadcasting Keepalives"
@@ -130,34 +114,52 @@ terminal = do
   if l == "quit" then exitSuccess else terminal
 
 -- Spawns a new thread to deal with each new client
-connLoop :: Members '[Logging,WorldManipulation,Configured,IO] r => TVar WorldData -> LogQueue -> Net.Socket -> Eff r ()
-connLoop wor lq sock = do
+connLoop :: Configuration -> TVar WorldData -> LogQueue -> Net.Socket -> IO ()
+connLoop c wor lq sock = do
   -- Accept every connection
   -- TODO: Timeout handlers or something here
-  (handle, cliHost, cliPort) <- send $ Net.accept sock
+  (handle, cliHost, cliPort) <- Net.accept sock
   -- Log that we got a connection
-  logg $ "Got Client connection: " <> T.pack (show cliHost) <> ":" <> T.pack (show cliPort)
+  logToQueue c lq NormalLog $ "Got Client connection: " <> T.pack (show cliHost) <> ":" <> T.pack (show cliPort)
   -- Don't line buffer the network
-  send $ hSetBuffering handle NoBuffering
-  -- Make new networking TVars for this client
-  mEnc <- send $ newTVarIO Nothing
-  mThresh <- send $ newTVarIO Nothing
-  -- Packet TQueue PLTs to send outgoing packets to. They will be fired off asynchronously in another thread
-  pq <- send $ newTQueueIO
-  (c :: Configuration) <- ask
+  hSetBuffering handle NoBuffering
+
+  -- Setup the client in a single transaction:
+  context <- atomically $ do
+    -- Make a fresh context for this client:
+    -- Networking TVars
+    mThresh <- newTVar Nothing
+    mEnc <- newTVar Nothing
+    -- Packet Queue
+    pq <- newTQueue
+    -- Player Data TVar
+    pTvar <- newTVar $ defaultPlayerData pq
+    -- Add this player to the world with a fresh Player Id
+    pid <- view worldNextEID <$> readTVar wor
+    modifyTVar wor $ (worldPlayers . at pid) .~ Just pTvar
+    pure CivskellContext
+      {configuration = c
+      ,worldData = wor
+      ,globalLogQueue = lq
+      ,playerData = pTvar
+      ,networkCompressionThreshold = mThresh
+      ,networkEncryptionCouplet = mEnc
+      ,networkHandle = handle
+      }
+
   -- Getting thread
-  _ <- send . forkIO . runM . runReader c . logToConsole lq . runNetworking mEnc mThresh handle . runWorld wor . runPacketing . initPlayer pq $ packetLoop
+  _ <- forkIO $ runReaderT packetLoop context
   -- Sending thread
-  _ <- send . forkIO . runM . runReader c . logToConsole lq . runNetworking mEnc mThresh handle . runPacketing $ flushPackets pq
+  _ <- forkIO $ runReaderT (flushPackets =<< view playerPacketQueue <$> fromContext playerData) context
   -- Wait for another connection
-  connLoop wor lq sock
+  connLoop c wor lq sock
 
 -- TODO: remove PerformsIO constraint in favor of special STM effects or something
-flushPackets :: Members '[Logging,Packeting,IO] r => TQueue (ForAny (DescribedPacket PacketSerializer)) -> Eff r ()
-flushPackets q = send (atomically $ readTQueue q) >>= (\(SuchThat (DescribedPacket d p)) -> sendPacket d p) >> flushPackets q
+flushPackets :: TQueue (ForAny (DescribedPacket PacketSerializer)) -> Civskell ()
+flushPackets q = lift (atomically $ readTQueue q) >>= (\(SuchThat (DescribedPacket d p)) -> sendPacket d p) >> flushPackets q
 
 -- Get packet -> Spawn thread -> Repeat loop for players
-packetLoop :: Members '[Packeting,IO,Configured,PlayerManipulation,WorldManipulation,Logging,Networking] r => Eff r ()
+packetLoop :: Civskell ()
 packetLoop = do
   -- TODO: Fork new thread on every packet
   -- Block until a packet arrives, then deal with it
@@ -177,6 +179,6 @@ packetLoop = do
     -- the player could change states *while we are waiting* for the next packet to arrive.
     -- This design ensures that the correct parser is always used.
     getPacketParsers = do
-      ss <- view playerState <$> get
-      getPackets <- packetsForState <$> ask
+      ss <- view playerState <$> fromContext playerData
+      getPackets <- packetsForState <$> asks configuration
       pure (getPackets ss)

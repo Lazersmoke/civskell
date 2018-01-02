@@ -14,7 +14,6 @@ module Civskell.Tech.Encrypt
   ,MCPubKey(..)
   ) where
 
-import Control.Monad.Freer
 import System.IO.Unsafe (unsafePerformIO)
 import Crypto.Cipher.AES (AES128)
 import Crypto.Cipher.Types (ecbEncrypt,cipherInit)
@@ -33,13 +32,13 @@ import qualified Data.ByteString.UTF8
 
 -- 128 is 128 bytes, so 1024 bit key
 -- We need to specify the type here because RSA.generate works in any MonadRandom
-getAKeypair :: Member IO r => Eff r (RSA.PublicKey,RSA.PrivateKey)
-getAKeypair = send (RSA.generate 128 65537 :: IO (RSA.PublicKey,RSA.PrivateKey))
+getAKeypair :: IO (RSA.PublicKey,RSA.PrivateKey)
+getAKeypair = RSA.generate 128 65537 :: IO (RSA.PublicKey,RSA.PrivateKey)
 
 -- unsafePerformIO ourselves a keypair because we can save computation by using the same key for every client
 {-# NOINLINE globalKeypair #-} -- If this is inlined, it is rerun at every call site
 globalKeypair :: (RSA.PublicKey,RSA.PrivateKey)
-globalKeypair = unsafePerformIO $ runM getAKeypair
+globalKeypair = unsafePerformIO getAKeypair
 
 -- Convieniently encoe the public part of it
 encodedPublicKey :: BS.ByteString
@@ -132,10 +131,10 @@ encodePubKey k = asnSequence <> withLengthAsn (algIdentifier <> pubKeyBitstring)
     bytesOfExponent = intBytesRaw $ RSA.public_e k
 
 -- public key, VT, and shared secret to encrypted (verify token, shared secret)
-genEncryptionResponse :: Member IO r => MCPubKey -> BS.ByteString -> BS.ByteString -> Eff r (BS.ByteString,BS.ByteString)
-genEncryptionResponse (MCPubKey pubKey) vt ss = send (RSA.encrypt @IO pubKey vt) >>= \case
+genEncryptionResponse :: MCPubKey -> BS.ByteString -> BS.ByteString -> IO (BS.ByteString,BS.ByteString)
+genEncryptionResponse (MCPubKey pubKey) vt ss = RSA.encrypt pubKey vt >>= \case
   Left e -> error (show e)
-  Right encVT -> send (RSA.encrypt @IO pubKey ss) >>= \case
+  Right encVT -> RSA.encrypt pubKey ss >>= \case
     Left e -> error (show e)
     Right encSS -> return (encVT,encSS)
 

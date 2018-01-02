@@ -11,25 +11,25 @@ import qualified Data.Set as Set
 import Control.Concurrent.STM
 import Control.Lens
 import Data.SuchThat
-import Control.Monad.Freer
-import Control.Monad.Freer.State
 import qualified Data.Text as T
 import Data.Semigroup ((<>))
+import Control.Monad.Reader
 
 import Civskell.Data.Types
+import Civskell.Data.Logging
 
 -- Given a way to get a slot, a way to set a slot, a window to use, a slot number, and a transaction id, click the slot
 -- | The default way to click a window, given ways to access the slots of the inventory, and information about the click.
 -- Compare with @'onWindowClick'@ and @'WindowClickCallback'@.
-defaultInventoryClick :: Members '[Configured,Packeting,Logging,WorldManipulation,PlayerManipulation] r 
-  => (Short -> Eff r (ForAny Slot)) -- ^ How to get the @'Slot'@ in a specified slot number
-  -> (forall i. Short -> Slot i -> Eff r ()) -- ^ How to set the @'Slot'@ in a specified slot number
+defaultInventoryClick
+  :: (Short -> Civskell (ForAny Slot)) -- ^ How to get the @'Slot'@ in a specified slot number
+  -> (forall i. Short -> Slot i -> Civskell ()) -- ^ How to set the @'Slot'@ in a specified slot number
   -> WindowId -- ^ The @'WindowId'@ of the window being clicked
   -> Short -- ^ The slot number being clicked
   -> TransactionId -- ^ The @'TransactionId'@ of this click
   -> InventoryClickMode -- ^ The manner in which the slot is being clicked
   -> WireSlot -- ^ The client provided @'WireSlot'@ that they think is in the slot they clicked
-  -> Eff r Bool -- ^ @'True'@ if the transaction was successful, @'False'@ otherwise.
+  -> Civskell Bool -- ^ @'True'@ if the transaction was successful, @'False'@ otherwise.
 defaultInventoryClick gs ss wid slotNum transId clickMode cliSlot = case clickMode of
   NormalClick rClick -> do
     -- Get the real item in the slot
@@ -52,7 +52,7 @@ defaultInventoryClick gs ss wid slotNum transId clickMode cliSlot = case clickMo
       else do
         -- Log to console
         loge "Failed to confirm client transaction"
-        modify $ playerFailedTransactions %~ Set.insert (wid,transId)
+        overContext playerData $ playerFailedTransactions %~ Set.insert (wid,transId)
         -- And tell the client it should say sorry
         return False -- sendPacket (Client.ConfirmTransaction wid transId False)
   -- Right click is exactly the same as left when shiftclicking
@@ -165,10 +165,10 @@ chest = WindowDescriptor
   ,onWindowClick = \(Chest i) -> let
     gsChest slotNum = if slotNum > 26 || slotNum == (-1)
       then getInventorySlot (slotNum - 18)
-      else view (at slotNum . slotMaybe) <$> send (atomically $ readTVar i)
+      else view (at slotNum . slotMaybe) <$> (lift . readTVarIO $ i)
     ssChest slotNum s' = if slotNum > 26 || slotNum == (-1)
       then setInventorySlot (slotNum - 18) s'
-      else send . atomically $ modifyTVar i (at slotNum . slotMaybe .~ ambiguate s')
+      else lift . atomically $ modifyTVar i (at slotNum . slotMaybe .~ ambiguate s')
     in defaultInventoryClick gsChest ssChest
   }
  {- clientToCivskellSlot s

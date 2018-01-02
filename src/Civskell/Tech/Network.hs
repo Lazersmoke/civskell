@@ -13,11 +13,11 @@ module Civskell.Tech.Network
   ,clientAuthentication
   ) where
 
-import Control.Monad.Freer
 import Data.Bits
 import Data.Bytes.Get
 import Data.Bytes.Serial
 import Data.Semigroup ((<>))
+import Data.Maybe
 import Data.Word (Word8)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
@@ -30,8 +30,12 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.SuchThat
 import qualified Data.Text as T
 import qualified Data.Vector as Vector
+import Control.Monad.Reader
+import Control.Concurrent.STM
 
 import Civskell.Data.Types
+import Civskell.Data.Logging
+import Civskell.Data.Networking
 
 -- | Given a set of @'SupportedPackets'@, make a parser for @'DescribedPacket'@s.
 parseFromSet :: MonadGet m => SupportedPackets PacketHandler -> m (ForAny (DescribedPacket PacketHandler))
@@ -45,33 +49,39 @@ parseFromSet s = deserialize @VarInt >>= \pktId -> case s Vector.!? (fromIntegra
 -- Note that this will hang until the packet arrives, and run the selector once it has arrived.
 -- It needs to be like this because the @'ServerState'@ might change during the hang due to
 -- parallel packet processing.
-getPacket :: forall r. Members '[Logging,Networking] r 
-  => Eff r (SupportedPackets PacketHandler) -- ^ An effect to run that will select the appropriate @'SupportedPackets'@ set to use
-  -> Eff r (Maybe (ForAny (DescribedPacket PacketHandler)))
-getPacket ep = do
-  -- Get the raw data (sans length)
-  pkt <- removeCompression =<< getRawPacket
-  -- TODO: Take advantage of incremental parsing maybe
-  -- Parse it
-  p <- ep
-  case runGetS (parseFromSet p) pkt of
-    -- If it parsed ok, then
-    Right serverPkt@(SuchThat (DescribedPacket desc thePkt)) -> do
-      -- Return it
-      logLevel ServerboundPacket $ showPacket desc thePkt
-      logLevel HexDump . T.pack . indentedHex $ pkt
-      return $ Just serverPkt
-    -- If it didn't parse correctly, print the error and return Nothing
+getPacket
+  :: Civskell (SupportedPackets PacketHandler) -- ^ An effect to run that will select the appropriate @'SupportedPackets'@ set to use
+  -> Civskell (Maybe (ForAny (DescribedPacket PacketHandler)))
+getPacket ep = getRawPacket >>= \rawPkt -> decompressPacket rawPkt >>= \case
     Left e -> do
-      logLevel ErrorLog "Failed to parse incoming packet"
-      logLevel ErrorLog . T.pack $ show e
-      -- Hex dump is an error
-      logLevel ErrorLog . T.pack . indentedHex $ pkt
+      compd <- fmap isJust . lift . readTVarIO =<< asks networkCompressionThreshold
+      loge $ "Failed to decode incoming " <> (if compd then "compressed" else "uncompressed") <> " packet"
+      loge . T.pack $ show e
+      loge . T.pack . indentedHex $ rawPkt
       return Nothing
+    -- The raw data (sans length)
+    Right pkt -> do
+      -- TODO: Take advantage of incremental parsing maybe
+      -- Parse it
+      p <- ep
+      case runGetS (parseFromSet p) pkt of
+        -- If it parsed ok, then
+        Right serverPkt@(SuchThat (DescribedPacket desc thePkt)) -> do
+          -- Return it
+          logLevel ServerboundPacket "Parsed serverbound packet"
+          logLevel ServerboundPacket $ showPacket desc thePkt
+          logLevel HexDump . T.pack . indentedHex $ pkt
+          return $ Just serverPkt
+        -- If it didn't parse correctly, print the error and return Nothing
+        Left e -> do
+          loge "Failed to parse incoming packet"
+          loge . T.pack $ show e
+          loge . T.pack . indentedHex $ pkt
+          return Nothing
 
 -- | Get an unparsed packet from the network.
 -- Returns the full, length annotated packet.
-getRawPacket :: Member Networking r => Eff r BS.ByteString
+getRawPacket :: Civskell BS.ByteString
 getRawPacket = do
   -- Get the length it should be
   (l,lbs) <- getPacketLength
@@ -84,7 +94,7 @@ getRawPacket = do
 -- | Parses a @'VarInt'@ off the packet to determine the length.
 -- The output is a pair of that @'VarInt'@ and the bytes representing it,
 -- which are needed to re-assemble the full packet at a later time.
-getPacketLength :: Member Networking r => Eff r (VarInt,BS.ByteString)
+getPacketLength :: Civskell (VarInt,BS.ByteString)
 getPacketLength = do
   -- Get the first byte
   l' <- rGet 1
@@ -103,20 +113,20 @@ getPacketLength = do
 
 -- | Given the needed information, authenticate a player with Mojang.
 -- This performs a request to the @/hasJoined@ API endpoint.
-serverAuthentication :: Members '[Logging,IO] r 
-  => String -- ^ Player username
+serverAuthentication
+  :: String -- ^ Player username
   -> String -- ^ Server hash
-  -> Eff r (Maybe AuthPacket) -- ^ @'Just'@ the auth information, or @'Nothing'@ if something went wrong
+  -> Civskell (Maybe AuthPacket) -- ^ @'Just'@ the auth information, or @'Nothing'@ if something went wrong
 serverAuthentication name hash = do
   -- Use SSL
-  manager <- send $ newManager tlsManagerSettings
+  manager <- lift $ newManager tlsManagerSettings
   let reqURL = "https://sessionserver.mojang.com/session/minecraft/hasJoined?username=" ++ name ++ "&serverId=" ++ hash
   logg $ "Sending authentication request to Mojang. Name: \"" <> T.pack name <> "\", Hash: \"" <> T.pack hash <> "\"."
   logg $ "Request URL is \"" <> T.pack reqURL <> "\""
   -- Create the request, using sId and username from LoginStart
-  req <- send $ (parseRequest :: String -> IO Request) reqURL 
+  req <- lift $ (parseRequest :: String -> IO Request) reqURL 
   -- Actually make the request and store it
-  resp <- send $ httpLbs req manager
+  resp <- lift $ httpLbs req manager
   let respJSON = LBS.toStrict . responseBody $ resp
   -- Parse the response into something useful
   case parseOnly Aeson.json respJSON of
@@ -135,18 +145,18 @@ serverAuthentication name hash = do
 
 -- | Performs auth from the client side.
 -- Not used in Civskell right now.
-clientAuthentication :: Members '[Logging,IO] r => (String,String) -> Eff r (Maybe ClientAuthResponse)
+clientAuthentication :: (String,String) -> Civskell (Maybe ClientAuthResponse)
 clientAuthentication (user,pass) = do
   -- Use SSL
-  manager <- send $ newManager tlsManagerSettings
+  manager <- lift $ newManager tlsManagerSettings
   let reqURL = "https://authserver.mojang.com/authenticate"
   logg $ "Sending authentication request to Mojang. Name: \"" <> T.pack user <> "\", Password: ********" -- Super secret
   logg $ "Request URL is \"" <> T.pack reqURL <> "\""
   let reqJSON = Aeson.object ["agent" .= Aeson.object ["name" .= ("Minecraft" :: T.Text), "version" .= (1 :: Integer)], "username" .= T.pack user, "password" .= T.pack pass, "requestUser" .= True]
   logg $ "Request JSON is " <> T.pack (show reqJSON)
-  reqSansJSON <- send $ (parseRequest :: String -> IO Request) reqURL
+  reqSansJSON <- lift $ (parseRequest :: String -> IO Request) reqURL
   let req = reqSansJSON {method = "POST",requestBody = RequestBodyLBS $ Aeson.encode reqJSON}
-  resp <- send $ httpLbs req manager
+  resp <- lift $ httpLbs req manager
   let respJSON = LBS.toStrict . responseBody $ resp
   case parseOnly Aeson.json respJSON of
     Left e -> do

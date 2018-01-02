@@ -6,44 +6,55 @@
 {-# LANGUAGE FlexibleContexts #-}
 module Civskell.Data.Logging where
 
-import Control.Monad.Freer
-import Control.Monad.Freer.Writer
 import Control.Concurrent.STM
 import Data.Text (Text)
+import qualified Data.Text as T
+import Data.Semigroup
+import Control.Monad
+import Control.Monad.Reader
+import Control.Lens
 
--- Logging to console without overwriting all the other threads that are also logging to console is an effect
-type Logging = Writer LogMessage
-
--- Log a string at a given Log Level
-data LogMessage = LogMessage LogLevel Text
-
--- TODO: replace this with a `data LogSpec = LogSpec {spec :: String -> String,level :: Int}`?
--- Level of verbosity to log at
-data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | VerboseLog | TaggedLog Text | NormalLog deriving Eq
-
--- A thing that shuffles log messages off of running threads and logs that whenever on a dedicated one.
-newtype LogQueue = LogQueue (TQueue Text)
+import Civskell.Data.Types
 
 -- Make a new, empty LogQueue
-freshLogQueue :: Member IO r => Eff r LogQueue
-freshLogQueue = LogQueue <$> send newTQueueIO 
+freshLogQueue :: IO LogQueue
+freshLogQueue = LogQueue <$> newTQueueIO 
 
 -- Synonym for logging with default precedence
 {-# INLINE logg #-}
-logg :: Member Logging r => Text -> Eff r ()
+logg :: Text -> Civskell ()
 logg = logLevel NormalLog
 
 -- Synonym for logging an error
 {-# INLINE loge #-}
-loge :: Member Logging r => Text -> Eff r ()
+loge :: Text -> Civskell ()
 loge = logLevel ErrorLog
 
 -- Synonym for logging something with a special tag
 {-# INLINE logt #-}
-logt :: Member Logging r => Text -> Text -> Eff r ()
+logt :: Text -> Text -> Civskell ()
 logt tag = logLevel (TaggedLog tag)
 
--- Synonym for Logging with a specified log level
-{-# INLINE logLevel #-}
-logLevel :: Member Logging r => LogLevel -> Text -> Eff r ()
-logLevel l s = tell (LogMessage l s)
+logp :: Text -> Civskell ()
+logp msg = do
+  pla <- asks playerData
+  flip logt msg =<< (T.pack . view playerUsername <$> lift (readTVarIO pla))
+
+-- Logging with a specified log level, based on configured logging level
+logLevel :: LogLevel -> Text -> Civskell ()
+logLevel level str = do
+  c <- asks configuration
+  l <- asks globalLogQueue
+  lift $ logToQueue c l level str
+
+-- Log the given message at the given log level, using the given configuration
+-- Apply the configured logging predicate to see if this message should be logged
+logToQueue :: Configuration -> LogQueue -> LogLevel -> Text -> IO ()
+logToQueue c (LogQueue l) level str = when (shouldLog c level) . atomically . writeTQueue l . (<>str) $ case level of
+  HexDump -> ""
+  ClientboundPacket -> "[\x1b[32mSent\x1b[0m] "
+  ServerboundPacket -> "[\x1b[32mRecv\x1b[0m] "
+  ErrorLog -> "[\x1b[31m\x1b[1mError\x1b[0m] "
+  VerboseLog -> "[\x1b[36m" <> serverName c <> "/Verbose\x1b[0m] "
+  (TaggedLog tag) -> "[\x1b[36m" <> tag <> "\x1b[0m] "
+  NormalLog -> "[\x1b[36m" <> serverName c <> "\x1b[0m] "

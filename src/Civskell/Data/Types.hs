@@ -24,19 +24,14 @@
 -- TODO: This export list is pretty scary. We should make tiered modules or something
 module Civskell.Data.Types
   (module Civskell.Data.Common
-  ,module Civskell.Data.Logging
   ,module Civskell.Data.Types
-  ,module Civskell.Data.Networking
   ) where
 
 import Civskell.Data.Common
-import Civskell.Data.Logging
-import Civskell.Data.Networking
 
 import GHC.Generics hiding (to)
 import Data.List (unfoldr)
 import qualified Data.Binary.BitBuilder as BB
-import qualified Codec.Compression.Zlib as Z
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Lazy as Map
 import System.IO
@@ -45,12 +40,9 @@ import Data.Map.Lazy (Map)
 import Data.Semigroup
 import Data.Foldable
 import Control.Lens
-import Control.Monad.Freer
-import Control.Monad.Freer.Writer
-import Control.Monad.Freer.State
-import Control.Monad.Freer.Reader
+import Control.Monad.Reader
 import Control.Concurrent.STM
-import Control.Monad
+--import Control.Monad
 import Crypto.Cipher.AES (AES128)
 import Data.Aeson (withObject,(.:),(.:?),(.!=))
 import qualified Data.Aeson as Aeson
@@ -76,12 +68,37 @@ import qualified Data.Vector as Vector
 import qualified Data.Array.IArray as Arr
 import qualified Data.Set as Set
 
-import Civskell.Tech.Encrypt
+-- | The base monad for Civskell
+type Civskell a = ReaderT CivskellContext IO a
 
--- | Having transactional access to the World is an effect.
--- We represent world manipulations as @'State' 'WorldData'@ to allow normal @'State'@ functions to be used.
--- See @'runWorld'@ for how this is translated into STM.
-type WorldManipulation = State WorldData
+data CivskellContext = CivskellContext
+  {configuration :: Configuration
+  ,worldData :: TVar WorldData
+  ,globalLogQueue :: LogQueue
+  ,playerData :: TVar PlayerData
+  ,networkCompressionThreshold :: TVar (Maybe VarInt)
+  ,networkEncryptionCouplet :: TVar (Maybe EncryptionCouplet)
+  ,networkHandle :: Handle
+  }
+
+fromContext :: (CivskellContext -> TVar a) -> Civskell a
+fromContext n = asks n >>= lift . readTVarIO
+
+overContext :: (CivskellContext -> TVar a) -> (a -> a) -> Civskell ()
+overContext n f = asks n >>= lift . atomically . flip modifyTVar f
+
+-- This is a massive hack in need of a better solution.
+-- We probably need to parameterize CivskellContext and Civskell over their scope.
+fakeGlobalContext :: Configuration -> TVar WorldData -> LogQueue -> CivskellContext
+fakeGlobalContext c wor lq = CivskellContext
+  {configuration = c
+  ,worldData = wor
+  ,globalLogQueue = lq
+  ,playerData = undefined
+  ,networkCompressionThreshold = undefined
+  ,networkEncryptionCouplet = undefined
+  ,networkHandle = undefined
+  }
 
 initWorld :: WorldData
 initWorld = WorldData {_chunks = Map.empty,_entities = Map.empty,_players = Map.empty,_nextEID = 0,_nextUUID = UUID (0,1)}
@@ -90,7 +107,7 @@ initWorld = WorldData {_chunks = Map.empty,_entities = Map.empty,_players = Map.
 data WorldData = WorldData 
   {_chunks :: Map ChunkCoord (ChunkSection (ForAny Block))
   ,_entities :: Map EntityId (Satisfies Entity)
-  ,_players :: Map PlayerId PlayerData
+  ,_players :: Map PlayerId (TVar PlayerData)
   ,_nextEID :: EntityId
   ,_nextUUID :: UUID
   }
@@ -101,7 +118,7 @@ worldChunks f wd = (\x -> wd {_chunks = x}) <$> f (_chunks wd)
 worldEntities :: Lens' WorldData (Map EntityId (Satisfies Entity))
 worldEntities f wd = (\x -> wd {_entities = x}) <$> f (_entities wd)
 
-worldPlayers :: Lens' WorldData (Map PlayerId PlayerData)
+worldPlayers :: Lens' WorldData (Map PlayerId (TVar PlayerData))
 worldPlayers f wd = (\x -> wd {_players = x}) <$> f (_players wd)
 
 worldNextEID :: Lens' WorldData EntityId
@@ -110,11 +127,8 @@ worldNextEID f wd = (\x -> wd {_nextEID = x}) <$> f (_nextEID wd)
 worldNextUUID :: Lens' WorldData UUID
 worldNextUUID f wd = (\x -> wd {_nextUUID = x}) <$> f (_nextUUID wd)
 
-summonObject :: Member WorldManipulation r => Satisfies Entity -> Eff r ()
-summonObject e' = modify $ \w -> (worldEntities . at (view worldNextEID w) .~ Just e') . (worldNextEID %~ succ) . (worldNextUUID %~ succ) $ w
-
--- Having transactional access to a single Player's data is an effect
-type PlayerManipulation = State PlayerData
+summonObject :: Satisfies Entity -> Civskell ()
+summonObject e' = asks worldData >>= \wor -> lift . atomically . modifyTVar wor $ \w -> (worldEntities . at (view worldNextEID w) .~ Just e') . (worldNextEID %~ succ) . (worldNextUUID %~ succ) $ w
 
 -- Stores all the relevant information about a player
 -- TODO: Extensibility?
@@ -143,11 +157,11 @@ data PlayerData = PlayerData
   ,_playerPacketQueue :: TQueue (ForAny (DescribedPacket PacketSerializer))
   }
 
-getInventorySlot :: Member PlayerManipulation r => Short -> Eff r (ForAny Slot)
-getInventorySlot i = (\(Just x) -> x) . view (playerInventory . at i) <$> get
+getInventorySlot :: Short -> Civskell (ForAny Slot)
+getInventorySlot i = asks playerData >>= \pla -> (\(Just x) -> x) . view (playerInventory . at i) <$> lift (readTVarIO pla)
 
-setInventorySlot :: Member PlayerManipulation r => Short -> Slot i -> Eff r ()
-setInventorySlot i s = modify $ (playerInventory . at i) .~ Just (ambiguate s)
+setInventorySlot :: Short -> Slot i -> Civskell ()
+setInventorySlot i s = asks playerData >>= \pla -> lift . atomically . modifyTVar pla $ (playerInventory . at i) .~ Just (ambiguate s)
 
 playerTPConfirmQueue :: Lens' PlayerData (Set.Set VarInt)
 playerTPConfirmQueue = lens _playerTPConfirmQueue (\p x -> p {_playerTPConfirmQueue = x})
@@ -194,17 +208,13 @@ playerClientUUID = lens _playerClientUUID (\p x -> p {_playerClientUUID = x})
 playerPacketQueue :: Lens' PlayerData (TQueue (ForAny (DescribedPacket PacketSerializer)))
 playerPacketQueue = lens _playerPacketQueue (\p x -> p {_playerPacketQueue = x})
 
-logp :: Members '[PlayerManipulation,Logging] r => Text -> Eff r ()
-logp msg = flip logt msg =<< T.pack . view playerUsername <$> get
-
-type CanHandlePackets r = Members '[Configured,PlayerManipulation,WorldManipulation,Packeting,IO,Logging] r
-
--- Reading the configuration is an effect
-type Configured = Reader Configuration
+-- TODO: replace this with a `data LogSpec = LogSpec {spec :: String -> String,level :: Int}`?
+-- Level of verbosity to log at
+data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | VerboseLog | TaggedLog Text | NormalLog deriving Eq
 
 data PacketHandler p = PacketHandler 
   {packetThreadingMode :: ThreadingMode
-  ,onPacket :: forall r. CanHandlePackets r => p -> Eff r ()
+  ,onPacket :: p -> Civskell ()
   ,deserializePacket :: forall m. MonadGet m => m p
   }
 
@@ -246,6 +256,8 @@ defaultConfiguration = Configuration
   ,supportedBlocks = Map.empty
   }
 
+-- A thing that shuffles log messages off of running threads and logs that whenever on a dedicated one.
+newtype LogQueue = LogQueue (TQueue Text)
 -- TODO: Reconsider sparsity obligations. This is pretty dumb in terms of invariants we must enforce.
 -- TODO: Reconsider using Map because that is honestly a retarded data structure to use here.
 -- TODO: Why isn't this a newtype. This is dumb :(
@@ -350,18 +362,18 @@ data BlockDescriptor b = BlockDescriptor
   -- ^ Get the Notchian block metadata value from a particular block. @const 0@ is a reasonable default. Ex @\case {Stone -> 0; Granite -> 1}@
   ,blockName :: b -> String
   -- ^ English name of this particular block. Ex @\case {Stone -> \"Stone";Granite -> \"Granite"}@
-  ,onClick :: forall r. Members '[WorldManipulation,PlayerManipulation,Packeting,Logging] r => Maybe (BlockClickCallback r b)
+  ,onClick :: Maybe (BlockClickCallback b)
   -- ^ The callback for this block getting right-clicked
   }
 
 -- | A callback for when a player right-clicks a block.
-type BlockClickCallback r b 
+type BlockClickCallback b 
   =  b -- ^ The block they clicked
   -> BlockCoord -- ^ The @'BlockCoord'@ of the block
   -> BlockFace -- ^ The @'BlockFace'@ they clicked on
   -> Hand -- ^ The @'Hand'@ they clicked with
   -> (Float,Float,Float) -- ^ The part of the block they clicked
-  -> Eff r ()
+  -> Civskell ()
 
 -- | A @'WireBlock'@ is a numerical, type-poor representation of a minecraft block
 -- as a @'BlockId'@ and metadata. It is able to be directly serialized and sent over the network.
@@ -398,8 +410,8 @@ parseBlockFromSet sb (WireBlock bId meta) = case Map.lookup bId sb of
 
 -- | Just like @'parseBlockFromSet'@, but it gets the @'SupportedBlocks'@ from the @'Configuration'@.
 -- See @'supportedBlocks'@.
-parseBlockFromContext :: Member Configured r => WireBlock -> Eff r (Maybe (ForAny Block))
-parseBlockFromContext wb = ask >>= \c -> pure $ parseBlockFromSet (supportedBlocks c) wb
+parseBlockFromContext :: WireBlock -> Civskell (Maybe (ForAny Block))
+parseBlockFromContext wb = asks configuration >>= \c -> pure $ parseBlockFromSet (supportedBlocks c) wb
 
 {-
 -- Parse an item based on its blockId, assuming no metadata and no nbt
@@ -415,7 +427,7 @@ standardParser r = do
   return . Slot . Just $ SlotData (some r) cnt
 -}
 {-
-placeBlock :: Block b => b -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Eff r ()
+placeBlock :: Block b => b -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Civskell ()
 placeBlock b bc bf hand _ = do
   -- Find out what item they are trying to place
   heldSlot <- if hand == MainHand then (+36) . holdingSlot <$> getPlayer else pure 45
@@ -426,7 +438,7 @@ placeBlock b bc bf hand _ = do
       let newSlot = if icount == 1 then Slot Nothing else Slot $ Just (SlotData i (icount - 1))
       setInventorySlot heldSlot newSlot
       setBlock b (blockOnSide bc bf)
-openNewWindow :: (Members '[Packeting,PlayerManipulation] r, Window w) => w -> ProtocolString -> Eff r WindowId
+openNewWindow :: (Members '[Packeting,PlayerManipulation] r, Window w) => w -> ProtocolString -> Civskell WindowId
 openNewWindow winType title = do
   wid <- usingPlayer $ \t -> do
     p <- readTVar t
@@ -435,7 +447,7 @@ openNewWindow winType title = do
   sendPacket (openWindow 0x13) (OpenWindow wid (some winType) title Nothing)
   return wid
 
-openWindowWithItems :: (Members '[WorldManipulation,Packeting,PlayerManipulation,Logging] r,Window w) => w -> ProtocolString -> TVar Inventory -> Eff r WindowId
+openWindowWithItems :: (Members '[WorldManipulation,Packeting,PlayerManipulation,Logging] r,Window w) => w -> ProtocolString -> TVar Inventory -> Civskell WindowId
 openWindowWithItems (ty :: tyT) name tI = do
   wid <- openNewWindow ty name
   playerInv <- Map.mapKeysMonotonic (+(27 - 9)) . playerInventory <$> getPlayer
@@ -451,15 +463,17 @@ openWindowWithItems (ty :: tyT) name tI = do
 -- | Clear any pending teleport with the given TPId.
 -- Returns @'True'@ if the given TPId was cleared, 
 -- or @'False'@ if it wasn't there in the first place.
-clearTeleport :: Member PlayerManipulation r => VarInt -> Eff r Bool
+clearTeleport :: VarInt -> Civskell Bool
 clearTeleport tid = do
-  present <- Set.member tid . view playerTPConfirmQueue <$> get
-  modify $ playerTPConfirmQueue %~ Set.delete tid
-  pure present
+  pla <- playerData <$> ask
+  lift . atomically $ do
+    present <- Set.member tid . view playerTPConfirmQueue <$> readTVar pla
+    modifyTVar pla $ playerTPConfirmQueue %~ Set.delete tid
+    pure present
 {-
 
 -- Add a new tid to the que
-pendTeleport :: Members '[Packeting,Logging,PlayerManipulation] r => (Double,Double,Double) -> (Float,Float) -> Word8 -> Eff r ()
+pendTeleport :: Members '[Packeting,Logging,PlayerManipulation] r => (Double,Double,Double) -> (Float,Float) -> Word8 -> Civskell ()
 pendTeleport xyz yp relFlag = do
   p <- usingPlayer $ \t -> do
     p <- readTVar t
@@ -468,14 +482,14 @@ pendTeleport xyz yp relFlag = do
   sendPacket (playerPositionAndLook 0x2F) (PlayerPositionAndLook xyz yp relFlag (nextTid p))
 
 -- Check if the tid is in the que. If it is, then clear and return true, else false
-clearTeleport :: Member PlayerManipulation r => VarInt -> Eff r Bool
+clearTeleport :: Member PlayerManipulation r => VarInt -> Civskell Bool
 clearTeleport tid = usingPlayer $ \t -> do
   p <- readTVar t 
   writeTVar t p {teleportConfirmationQue = Set.delete tid $ teleportConfirmationQue p}
   return (Set.member tid $ teleportConfirmationQue p)
 
 -- Set the player's gamemode
-setGamemode :: Members '[Packeting,Logging,PlayerManipulation] r => Gamemode -> Eff r ()
+setGamemode :: Members '[Packeting,Logging,PlayerManipulation] r => Gamemode -> Civskell ()
 setGamemode g = do
   overPlayer $ \p -> p {gameMode = g}
   sendPacket (changeGameState 0x1E) (ChangeGameState (ChangeGamemode g))
@@ -488,7 +502,7 @@ setGamemode g = do
 -- sendPacket (ChangeGameState (ChangeGamemode g))
 --
 -- TODO: Semantic slot descriptors
-setInventorySlot :: Members '[Packeting,Logging,PlayerManipulation] r => Short -> Slot -> Eff r ()
+setInventorySlot :: Members '[Packeting,Logging,PlayerManipulation] r => Short -> Slot -> Civskell ()
 setInventorySlot slotNum slotData = do
   overPlayer $ \p -> p {playerInventory = setSlot slotNum slotData (playerInventory p)}
   sendPacket (setSlot 0x16) (SetSlot 0 slotNum slotData)
@@ -497,108 +511,12 @@ setInventorySlot slotNum slotData = do
 -- | @'runWorld'@ is a natural transformation from @'WorldManipulation'@ to working with actual @'STM'@ (via @'IO'@).
 -- Note that this is *not* really transactional yet because it is only transactional up to the @'Get'@ or @'Put'@,
 -- which is to say not transactional at all.
-runWorld :: Members '[Logging,IO] r => TVar WorldData -> Eff (WorldManipulation ': r) a -> Eff r a
+{-
+runWorld :: Members '[Logging,IO] r => TVar WorldData -> Eff (WorldManipulation ': r) a -> Civskell a
 runWorld tWorld = runNat $ \case
   Get -> send $ readTVarIO tWorld
   Put w' -> send . atomically $ writeTVar tWorld w'
-
--- | @'runPacketing'@ is a natural transformation from @'sendPacket'@ing to low-level @'Networking'@.
-runPacketing :: Members '[Logging,Networking] r => Eff (Packeting ': r) a -> Eff r a
-runPacketing = runNat $ \case
-  -- Unpack from the existentials to get the type information into a skolem, scoped tyvar
-  SendPacket (SuchThat (DescribedPacket pktDesc pkt)) -> do
-    let pktHandler = packetHandler pktDesc
-    let writePacket = serializePacket pktHandler pkt
-    -- Log its hex dump
-    logLevel ClientboundPacket $ showPacket pktDesc pkt
-    logLevel HexDump . T.pack $ indentedHex (runPutS writePacket)
-    -- Send it
-    rPut =<< addCompression (runPutS $ serialize (packetId pktHandler) *> writePacket)
-  -- "Unsafe" means it doesn't come from a legitimate packet (doesn't have packetId) and doesn't get compressed
-  UnsafeSendBytes bytes -> rPut bytes
-  -- Passthrough for setting up encryption and compression
-  BeginEncrypting ss -> setupEncryption ss
-  BeginCompression thresh -> setCompression thresh
-
--- | @'runNetworking'@ is a natural transformation from low-level @'Networking'@ to literally network handles in @'IO'@.
-runNetworking :: Member IO r => TVar (Maybe EncryptionCouplet) -> TVar (Maybe VarInt) -> Handle -> Eff (Networking ': r) a -> Eff r a
-runNetworking mEnc mThresh hdl = runNat $ \case
-  --ForkNetwork e -> pure (runNetworking mEnc mThresh hdl e)
-  GetFromNetwork len -> do
-    -- We don't want exclusive access here because we will block
-    dat <- send $ BS.hGet hdl len
-    -- Decrypt the data or don't based on the encryption value
-    send . atomically $ readTVar mEnc >>= \case
-      Nothing -> pure dat
-      Just (c,e,d) -> do
-        -- d' is the updated decrypting shift register
-        let (bs',d') = cfb8Decrypt c d dat
-        writeTVar mEnc (Just (c,e,d'))
-        pure bs'
-  PutIntoNetwork bs -> do
-    -- Encrypt the data or don't based on the encryption value
-    enc <- send . atomically $ readTVar mEnc >>= \case
-      Nothing -> pure bs
-      Just (c,e,d) -> do
-        -- e' is the updated encrypting shift register
-        let (bs',e') = cfb8Encrypt c e bs
-        writeTVar mEnc (Just (c,e',d))
-        pure bs'
-    send $ BS.hPut hdl enc
-  SetCompressionLevel thresh -> send . atomically $ readTVar mThresh >>= \case
-    -- If there is no pre-existing threshold, set one
-    Nothing -> writeTVar mThresh (Just thresh)
-    -- If there is already compression, don't change it (only one setCompression is allowed)
-    -- Should we throw an error instead of silently failing here?
-    Just _ -> pure ()
-  SetupEncryption ss -> send . atomically $ readTVar mThresh >>= \case
-    -- If there is no encryption setup yet, set it up
-    Nothing -> writeTVar mEnc (Just (makeEncrypter ss,ss,ss))
-    -- If it is already encrypted, don't do anything
-    Just _ -> pure ()
-  AddCompression bs -> send (readTVarIO mThresh) >>= \case
-    -- Do not compress; annotate with length only
-    Nothing -> pure (runPutS . withLength $ bs)
-    -- Compress with the threshold `t`
-    Just t -> if BS.length bs >= fromIntegral t
-      -- Compress data and annotate to match
-      then do
-        -- Compress the actual data
-        let compIdAndData = putByteString . LBS.toStrict . Z.compress . LBS.fromStrict $ bs
-        -- Add the original size annotation
-        let origSize = serialize $ ((fromIntegral (BS.length bs)) :: VarInt)
-        let ann = withLength (runPutS $ origSize >> compIdAndData)
-        pure (runPutS ann)
-      -- Do not compress; annotate with length only
-      -- 0x00 indicates it is not compressed
-      else pure . runPutS . withLength . runPutS $ putWord8 0x00 *> putByteString bs
-  RemoveCompression bs -> send (readTVarIO mThresh) >>= \case
-    -- Parse an uncompressed packet
-    Nothing -> case runGetS parseUncompPkt bs of
-      -- TODO: fix this completely ignoring a parse error
-      Left _ -> send (putStrLn "Emergency Parse Error!!!") *> pure bs
-      Right pktData -> pure pktData
-    -- Parse a compressed packet (compressed packets have extra metadata)
-    Just _ -> case runGetS parseCompPkt bs of
-      -- TODO: fix this completely ignoring a parse error
-      Left _ -> pure bs
-      Right (dataLen,compressedData) -> pure $ if dataLen == 0
-        -- dataLen of 0 means that the packet is actually uncompressed
-        then compressedData
-        -- If it is indeed compressed, uncompress it
-        else LBS.toStrict . Z.decompress . LBS.fromStrict $ compressedData
-  where
-    -- Parse an uncompressed packet to a @'BS.ByteString'@
-    parseUncompPkt :: MonadGet m => m BS.ByteString
-    parseUncompPkt = getByteString . fromIntegral =<< deserialize @VarInt
-
-    -- | Parse a compressed packet to a pair of its length and its data
-    parseCompPkt :: MonadGet m => m (VarInt,BS.ByteString)
-    parseCompPkt = do
-      _ <- deserialize @VarInt
-      dataLen <- deserialize @VarInt
-      bs <- (getByteString . fromIntegral =<< remaining)
-      pure (dataLen,bs)
+-}
 {-
 runWorld _ (Pure x) = Pure x
 runWorld w' (Eff u q) = case u of
@@ -667,14 +585,13 @@ runWorld w' (Eff u q) = case u of
 -}
 
 -- | Broadcast a packet to all currently @'Playing'@ players.
-broadcastPacket :: Members '[IO,WorldManipulation] r => DescribedPacket PacketSerializer p -> Eff r ()
+broadcastPacket :: DescribedPacket PacketSerializer p -> Civskell ()
 broadcastPacket pkt = do
-  -- Get a map of all players in the world
-  plas <- view worldPlayers <$> get
-  -- For each player in the list, send the packet to that player
-  send . atomically . mapM_ sendPktForPlayer $ plas
+  worldTvar <- worldData <$> ask
+  -- For each player in the world, send the packet to that player
+  lift . atomically $ mapM_ sendPktForPlayer . view worldPlayers =<< readTVar worldTvar
   where
-    sendPktForPlayer pd = case view playerState pd of
+    sendPktForPlayer pdt = readTVar pdt >>= \pd -> case view playerState pd of
       -- Only send it to Playing players
       Playing -> writeTQueue (view playerPacketQueue pd) (ambiguate pkt)
       _ -> pure ()
@@ -695,14 +612,14 @@ data WindowDescriptor w = WindowDescriptor
   }
 
 -- | A callback for when a player clicks a slot in a window.
-type WindowClickCallback w = forall r. Members '[IO,Configured,WorldManipulation,Packeting,Logging,PlayerManipulation] r 
-  => w -- ^ The window they clicked.
+type WindowClickCallback w =
+  w -- ^ The window they clicked.
   -> WindowId -- ^ The @'WindowId'@ of the window they clicked.
   -> Short -- ^ The slot number in the window they clicked.
   -> TransactionId -- ^ The @'TransactionId'@ of this click.
   -> InventoryClickMode -- ^ The manner in which they clicked the slot.
   -> WireSlot -- ^ The client provided @'WireSlot'@ that they think is in the slot they clicked.
-  -> Eff r Bool -- ^ Return @'True'@ if the transaction succeeded, @'False'@ otherwise. They will be required to apologize if the transaction is rejected.
+  -> Civskell Bool -- ^ Return @'True'@ if the transaction succeeded, @'False'@ otherwise. They will be required to apologize if the transaction is rejected.
 
 -- We can do this generically because it depends only on information exposed in the WindowDescriptor.
 instance Show (Window w) where
@@ -781,8 +698,8 @@ parseItemFromSet si (WireSlot (Just (iId,count,meta,mNBT))) = case Map.lookup iI
   Nothing -> Nothing
 
 -- | Just like @'parseItemFromSet'@, but get the @'SupportedItems'@ from the @'Configuration'@'s @'supportedItems'@ field.
-parseItemFromContext :: Member Configured r => WireSlot -> Eff r (Maybe (ForAny Slot))
-parseItemFromContext ws = ask >>= \c -> pure $ parseItemFromSet (supportedItems c) ws
+parseItemFromContext :: WireSlot -> Civskell (Maybe (ForAny Slot))
+parseItemFromContext ws = asks configuration >>= \c -> pure $ parseItemFromSet (supportedItems c) ws
 
 -- | An @'Item'@ is an @i@, together with a description of how to interpret it as a Minecraft item.
 data Item i = Item (ItemDescriptor i) i
@@ -807,11 +724,15 @@ data ItemDescriptor i = ItemDescriptor
   }
 
 -- | A callback for when a player right-clicks with an @'Item'@. See @'onItemUse'@.
-type ItemUseCallback i = forall r. Members '[Logging,WorldManipulation] r => Maybe (SlotData i -> Slot i,Item i -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Eff r ())
+type ItemUseCallback i = Maybe (SlotData i -> Slot i,Item i -> BlockCoord -> BlockFace -> Hand -> (Float,Float,Float) -> Civskell ())
 
 -- | Given a function to convert an item into the block to be placed, this is the standard callback for placing an item as a block.
 placeBlock :: (Item i -> Block b) -> ItemUseCallback i
-placeBlock f = Just (\(SlotData i ic) -> Slot . Just $ SlotData i (ic - 1),\i bc bf _hand _blockPart -> modify $ blockInWorld (blockOnSide bc bf) .~ ambiguate (f i))
+placeBlock f = Just (\(SlotData i ic) -> Slot . Just $ SlotData i (ic - 1),setTheBlock)
+  where
+    setTheBlock i bc bf _ _ = do
+      wdTvar <- worldData <$> ask
+      lift $ atomically $ modifyTVar wdTvar (blockInWorld (blockOnSide bc bf) .~ ambiguate (f i))
 
 -- TODO: Reconsider sparsity obligations of Map here, and decide on a better
 -- internal representation. Potentially make this abstract after all. There
@@ -869,39 +790,6 @@ takeFromSlot :: Word8 -> SlotData i -> (SlotData i,Slot i)
 takeFromSlot c (SlotData i ic) = if c < ic
   then (SlotData i c,Slot (Just (SlotData i (ic - c))))
   else (SlotData i ic,Slot Nothing)
-
---instance Serial (Slot i) where
-  --serialize (Slot Nothing) = serialize (-1 :: Short)
-  --serialize (Slot (Just sd)) = serialize @(SlotData i) sd
-  --deserialize = deserialize @Short >>= \case
-    --(-1) -> pure $ Slot Nothing
-    --_itemId -> error "Unimplemented: Deserialization of general Slots. May be unimplementable in general :/"
-
---instance Serial (SlotData i) where
-  --serialize (SlotData (Item desc i) count) = serialize (itemId desc) >> serialize count >> serialize (itemMeta desc i) >> (case itemNBT desc i of {Just nbt -> putByteString $ Cereal.encode (NBT "" nbt);Nothing -> putWord8 0x00})
-  --deserialize = undefined
-
--- | A generalized version of @'runNat'@ that works with arbitrary effect stacks instead of just a single monad.
---generalizedRunNat :: (forall x. f x -> Eff r x) -> Eff (f ': r) a -> Eff r a
---generalizedRunNat n = handleRelay pure (\e k -> n e >>= k)
-
--- | @'logToConsole'@ is a natural transformation from @'Writer'@ing log messages to logging them to a TQueue for later transactional printing.
--- See @'LogQueue'@.
-logToConsole :: Members '[Configured,IO] r => LogQueue -> Eff (Logging ': r) a -> Eff r a
-logToConsole (LogQueue l) = runNat $ \case
-  Tell (LogMessage level str) -> do
-    -- Apply the configured loggin predicate to see if this message should be logged
-    p <- ($ level) . shouldLog <$> ask 
-    sName <- serverName <$> ask
-    -- Select the prefix, then send off the log message
-    when p $ send . atomically . writeTQueue l . (<>str) $ case level of
-      HexDump -> ""
-      ClientboundPacket -> "[\x1b[32mSent\x1b[0m] "
-      ServerboundPacket -> "[\x1b[32mRecv\x1b[0m] "
-      ErrorLog -> "[\x1b[31m\x1b[1mError\x1b[0m] "
-      VerboseLog -> "[\x1b[36m" <> sName <> "/Verbose\x1b[0m] "
-      (TaggedLog tag) -> "[\x1b[36m" <> tag <> "\x1b[0m] "
-      NormalLog -> "[\x1b[36m" <> sName <> "\x1b[0m] "
 
 newtype ProtocolNBT = ProtocolNBT {unProtocolNBT :: NBT}
 
