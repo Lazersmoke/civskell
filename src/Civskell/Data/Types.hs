@@ -210,7 +210,7 @@ playerPacketQueue = lens _playerPacketQueue (\p x -> p {_playerPacketQueue = x})
 
 -- TODO: replace this with a `data LogSpec = LogSpec {spec :: String -> String,level :: Int}`?
 -- Level of verbosity to log at
-data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | VerboseLog | TaggedLog Text | NormalLog deriving Eq
+data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | NYILog | VerboseLog | TaggedLog Text | NormalLog deriving Eq
 
 data PacketHandler p = PacketHandler 
   {packetThreadingMode :: ThreadingMode
@@ -645,11 +645,7 @@ data SlotData i = SlotData (Item i) Word8 deriving Eq
 
 -- Pretty print a slot's data. Perhaps we should let `Item`s provide a fancy name for this instance to use.
 instance Show (SlotData i) where
-  show (SlotData (Item desc i) count) = show count ++ " of [" ++ show (itemId desc) ++ ":" ++ show (itemMeta desc i) ++ "]" ++ n (itemNBT desc i)
-    where
-      -- Only display the NBT if it is actually there
-      n Nothing = ""
-      n (Just nbt) = " with tags: " ++ show nbt
+  show (SlotData i count) = show count ++ " of " ++ show i
 
 -- | Every @'Slot'@ can be serialized for free because the serialization depends only 
 -- on the @'itemId'@, @'itemMeta'@, and @'itemNBT'@. We *can not* deserialize from a
@@ -707,6 +703,13 @@ data Item i = Item (ItemDescriptor i) i
 -- This instances says that items with the same id, meta and NBT, are literally equal, which isn't always true
 instance Eq (Item i) where
   (Item da a) == (Item db b) = itemId da == itemId db && itemIdentifier da == itemIdentifier db && itemMeta da a == itemMeta db b && itemNBT da a == itemNBT db b
+
+instance Show (Item i) where
+  show (Item desc i) = "[" ++ show (itemId desc) ++ ":" ++ show (itemMeta desc i) ++ "]" ++ n (itemNBT desc i)
+    where
+      -- Only display the NBT if it is actually there
+      n Nothing = ""
+      n (Just nbt) = " with tags: " ++ show nbt
 
 -- | A description of how to interpret an @i@ as a Minecraft item.
 data ItemDescriptor i = ItemDescriptor
@@ -933,6 +936,7 @@ instance Serial EntityInteraction where
     x -> error $ "deserialize @EntityInteraction: Got (VarInt) " <> show x
 
 data AsType = AsBlock | AsItem
+
 -- Used in Server.PlayerDigging
 data PlayerDigAction = StartDig BlockCoord BlockFace | StopDig BlockCoord BlockFace | EndDig BlockCoord BlockFace | DropItem Bool | ShootArrowOrFinishEating | SwapHands
 
@@ -954,6 +958,16 @@ instance Serial PlayerDigAction where
     5 -> pure ShootArrowOrFinishEating
     6 -> pure SwapHands
     x -> error $ "deserialize @PlayerDigAction: Got (VarInt) " <> show x
+
+instance Show PlayerDigAction where
+  show = \case
+    StartDig bc bf -> "Start digging the " <> show bf <> " side of " <> show bc
+    StopDig bc bf -> "Stop digging the " <> show bf <> " side of " <> show bc
+    EndDig bc bf -> "End digging the " <> show bf <> " side of " <> show bc
+    DropItem True -> "Dropped item stack"
+    DropItem False -> "Dropped item (not stack)"
+    ShootArrowOrFinishEating -> "Shot arrow *or* finished eating :thinking:"
+    SwapHands -> "Swapped hands"
 
 -- Used in Server.EntityAction
 data PlayerEntityAction = Sneak Bool | Sprint Bool | HorseJumpStart VarInt | HorseJumpStop | LeaveBed | ElytraFly | HorseInventory
@@ -980,6 +994,18 @@ instance Serial PlayerEntityAction where
     7 -> pure HorseInventory
     8 -> pure ElytraFly
     x -> error $ "deserialize @PlayerEntityAction: Got (VarInt) " <> show x
+
+instance Show PlayerEntityAction where
+  show = \case
+    Sneak True -> "Started sneaking"
+    Sneak False -> "Stopped sneaking"
+    LeaveBed -> "Left the bed"
+    Sprint True -> "Start sprinting"
+    Sprint False -> "Stop sprinting"
+    HorseJumpStart jmp -> "Horse jump started with boost " <> show jmp
+    HorseJumpStop -> "Horse jump ended"
+    HorseInventory -> "Horse inventory opened"
+    ElytraFly -> "Started flying with Elytra"
 
 -- Used in Server.ClickWindow
 data InventoryClickMode = NormalClick Bool | ShiftClick Bool | NumberKey Word8 | MiddleClick | ItemDropOut Bool | PaintingMode Word8 | DoubleClick deriving Show
