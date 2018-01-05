@@ -1,4 +1,5 @@
 {-# LANGUAGE LambdaCase #-}
+-- | Tile entities
 module Civskell.Tile where
 
 {-

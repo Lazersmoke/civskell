@@ -1,11 +1,15 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | The creeper entity
 module Civskell.Entity.Creeper where
 
 import Civskell.Entity.Base
 import Civskell.Data.Types
 
+-- | A creeper
 data Creeper = Creeper Insentient VarInt Bool Bool
+-- | Trivial instance
 instance Mob Creeper where {}
+-- | Trivial instance
 instance Entity Creeper where
   entityName = "Creeper"
   entityType = 50

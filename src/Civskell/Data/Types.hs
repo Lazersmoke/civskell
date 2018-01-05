@@ -22,13 +22,14 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE RankNTypes #-}
 
--- TODO: This export list is pretty scary. We should make tiered modules or something
 module Civskell.Data.Types
   (module Civskell.Data.Common
+  ,module Civskell.Data.Protocol
   ,module Civskell.Data.Types
   ) where
 
 import Civskell.Data.Common
+import Civskell.Data.Protocol
 
 import GHC.Generics hiding (to)
 import Data.List
@@ -181,6 +182,12 @@ playerFailedTransactions = lens _playerFailedTransactions (\p x -> p {_playerFai
 playerHoldingSlot :: Lens' PlayerData Short
 playerHoldingSlot = lens _playerHoldingSlot (\p x -> p {_playerHoldingSlot = x})
 
+-- | Gets the slot in a player's hand, accounting for selected hotbar slot
+slotInHand :: Hand -> Civskell Short
+slotInHand = \case
+  MainHand -> (36+) . view playerHoldingSlot <$> fromContext playerData
+  OffHand -> pure 45
+
 playerPosition :: Lens' PlayerData (Double,Double,Double)
 playerPosition = lens _playerPosition (\p x -> p {_playerPosition = x})
 
@@ -215,9 +222,10 @@ playerPacketQueue = lens _playerPacketQueue (\p x -> p {_playerPacketQueue = x})
 -- Level of verbosity to log at
 data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | NYILog | VerboseLog | TaggedLog Text | NormalLog deriving (Show,Eq)
 
+-- | Returns the standard logging prefix for the specitifed log level and configuration
 getLogBadge :: Configuration -> LogLevel -> Text
 getLogBadge c = \case
-  HexDump -> ""
+  HexDump -> "[Hexdump] "
   ClientboundPacket -> "[\x1b[32mSent\x1b[0m] "
   ServerboundPacket -> "[\x1b[32mRecv\x1b[0m] "
   ErrorLog -> "[\x1b[31m\x1b[1mError\x1b[0m] "
@@ -226,12 +234,14 @@ getLogBadge c = \case
   (TaggedLog tag) -> "[\x1b[36m" <> tag <> "\x1b[0m] "
   NormalLog -> "[\x1b[36m" <> serverName c <> "\x1b[0m] "
 
+-- | A @'PacketHandler' p@ is a description of how to deserialize and handle packets of type @p@.
 data PacketHandler p = PacketHandler 
   {packetThreadingMode :: ThreadingMode
   ,onPacket :: p -> Civskell ()
   ,deserializePacket :: forall m. MonadGet m => m p
   }
 
+-- | An @'InboundPacketDescriptor'@ is a 
 type InboundPacketDescriptor = PacketDescriptor PacketHandler
 
 data Configuration = Configuration
@@ -255,7 +265,7 @@ data Configuration = Configuration
 
 defaultConfiguration :: Configuration
 defaultConfiguration = Configuration
-  {shouldLog = \case {HexDump -> False; _ -> True}
+  {shouldLog = \case {HexDump -> False; VerboseLog -> False; _ -> True}
   ,protocolVersion = 0
   ,serverVersion = "Default"
   ,serverName = "Civskell"
@@ -1182,7 +1192,7 @@ instance Serial LengthAnnotatedByteString where
   serialize (LengthAnnotatedByteString bs) = serialize @VarInt (fromIntegral $ BS.length bs) *> putByteString bs
   deserialize = LengthAnnotatedByteString <$> (getByteString . fromIntegral =<< deserialize @VarInt)
 
--- Entities are things with properties
+-- | Entities have 
 class Entity m where
   entityName :: Text
   entityType :: VarInt
@@ -1284,11 +1294,11 @@ instance Serial (EntityMeta (Maybe BlockState)) where
 indentedHex :: BS.ByteString -> String
 indentedHex = init . unlines . map ("  "++) . lines . prettyHex
 
+-- | Literally @'T.pack' . 'show'@.
 showText :: Show a => a -> T.Text
 showText = T.pack . show
 
--- Simple way to inject a text message into a json chat string. No additional
+-- | Simple way to inject a text message into a json chat string. No additional
 -- formatting or checking is done, just raw text.
 jsonyText :: String -> ProtocolString
 jsonyText s = ProtocolString $ "{\"text\":\"" ++ s ++ "\"}"
-

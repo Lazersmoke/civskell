@@ -3,16 +3,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE LambdaCase #-}
 -- | Provides low-level encryption mechanisms
-module Civskell.Tech.Encrypt 
-  (globalKeypair
-  ,encodedPublicKey
-  ,checkVTandSS
-  ,genLoginHash
-  ,cfb8Encrypt,cfb8Decrypt
-  ,makeEncrypter
-  ,genEncryptionResponse
-  ,MCPubKey(..)
-  ) where
+module Civskell.Tech.Encrypt where
 
 import System.IO.Unsafe (unsafePerformIO)
 import Crypto.Cipher.AES (AES128)
@@ -30,22 +21,23 @@ import qualified Crypto.PubKey.RSA.PKCS15 as RSA
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8
 
--- 128 is 128 bytes, so 1024 bit key
--- We need to specify the type here because RSA.generate works in any MonadRandom
+-- | Generates a 1024 bit (128 byte) RSA keypair.
 getAKeypair :: IO (RSA.PublicKey,RSA.PrivateKey)
-getAKeypair = RSA.generate 128 65537 :: IO (RSA.PublicKey,RSA.PrivateKey)
+getAKeypair = RSA.generate 128 65537
 
--- unsafePerformIO ourselves a keypair because we can save computation by using the same key for every client
-{-# NOINLINE globalKeypair #-} -- If this is inlined, it is rerun at every call site
+-- | @'unsafePerformIO'@ ourselves a keypair because we can save computation by using the same key for every client.
+{-# NOINLINE globalKeypair #-} -- If this is inlined, it is rerun at every call site.
 globalKeypair :: (RSA.PublicKey,RSA.PrivateKey)
 globalKeypair = unsafePerformIO getAKeypair
 
--- Convieniently encoe the public part of it
+-- | The public part of the @'globalKeypair'@ encoded as a @'BS.ByteString'@.
 encodedPublicKey :: BS.ByteString
 encodedPublicKey = runPutS . serialize . MCPubKey . fst $ globalKeypair
 
+-- | A Minecraft public key is an RSA public key with a special serialization.
 newtype MCPubKey = MCPubKey {unMCPubKey :: RSA.PublicKey}
 
+-- | A very big @'Serial'@ instance for deserializing Minecraft public keys
 instance Serial MCPubKey where
   serialize = putByteString . encodePubKey . unMCPubKey
   deserialize = do
@@ -78,6 +70,7 @@ instance Serial MCPubKey where
           then unIntBytesRaw <$> getBytes (fromIntegral $ indicator .&. 0b01111111)
           else return (fromIntegral $ indicator .&. 0b01111111)
 
+-- | Encode a public key using Minecraft's scheme (ASN.1).
 -- Observe the cancer, but don't touch it or you'll contract it.
 encodePubKey :: RSA.PublicKey -> BS.ByteString
 encodePubKey k = asnSequence <> withLengthAsn (algIdentifier <> pubKeyBitstring)
@@ -130,7 +123,7 @@ encodePubKey k = asnSequence <> withLengthAsn (algIdentifier <> pubKeyBitstring)
     bytesOfModulus = intBytesRaw $ RSA.public_n k
     bytesOfExponent = intBytesRaw $ RSA.public_e k
 
--- public key, VT, and shared secret to encrypted (verify token, shared secret)
+-- | Encrypt the VT and shared secret using the public key.
 genEncryptionResponse :: MCPubKey -> BS.ByteString -> BS.ByteString -> IO (BS.ByteString,BS.ByteString)
 genEncryptionResponse (MCPubKey pubKey) vt ss = RSA.encrypt pubKey vt >>= \case
   Left e -> error (show e)
@@ -138,18 +131,20 @@ genEncryptionResponse (MCPubKey pubKey) vt ss = RSA.encrypt pubKey vt >>= \case
     Left e -> error (show e)
     Right encSS -> return (encVT,encSS)
 
--- intBytesRaw gets the variable-length byte encoding of a number
+-- | Gets the variable-length byte encoding of a number.
+-- Used in @'encodePubKey'@.
 intBytesRaw :: Integer -> BS.ByteString
 intBytesRaw = BS.reverse . BS.unfoldr (\i -> if i == 0 then Nothing else Just $ (fromIntegral i, shiftR i 8))
 
+-- | The inverse of @'intBytesRaw'@.
 unIntBytesRaw :: BS.ByteString -> Integer
 unIntBytesRaw = BS.foldr (\w i -> shiftL i 8 .|. fromIntegral w) 0 . BS.reverse
 
--- Gets the cipher for a shared secret
+-- | Gets the cipher for a shared secret
 makeEncrypter :: BS.ByteString -> AES128
 makeEncrypter ss = throwCryptoError $ cipherInit ss
 
--- Encrypt a bytestring using the cfb8 aes128 cipher, and the provided shift register
+-- | Encrypt a bytestring using the cfb8 aes128 cipher, and the provided shift register
 cfb8Encrypt :: AES128 -> BS.ByteString -> BS.ByteString -> (BS.ByteString,BS.ByteString)
 cfb8Encrypt c i = BS.foldl magic (BS.empty,i)
   where
@@ -162,7 +157,7 @@ cfb8Encrypt c i = BS.foldl magic (BS.empty,i)
         -- shift the new ciphertext into the shift register
         ivFinal = BS.tail iv `BS.snoc` ct
 
--- Decrypt a bytestring using the cfb8 aes128 cipher, and the provided shift register
+-- | Decrypt a bytestring using the cfb8 aes128 cipher, and the provided shift register
 cfb8Decrypt :: AES128 -> BS.ByteString -> BS.ByteString -> (BS.ByteString,BS.ByteString)
 cfb8Decrypt c i = BS.foldl magic (BS.empty,i)
   where
@@ -172,7 +167,7 @@ cfb8Decrypt c i = BS.foldl magic (BS.empty,i)
         -- snoc on cipher always
         ivFinal = BS.tail iv `BS.snoc` d
 
--- Get a login hash from a sId, shared secret, and public key. This is used for auth with Mojang
+-- | Get a login hash from a server id, shared secret, and public key. This is used for auth with Mojang.
 genLoginHash :: String -> BS.ByteString -> BS.ByteString -> String
 genLoginHash sId ss pubKey =
   -- bit 159 (0-indexed from right) is the negativity bit
@@ -187,8 +182,8 @@ genLoginHash sId ss pubKey =
     -- the hash as a String of and SHA1 hash (this is the only way to export it)
     theHash = show . hashFinalize $ hashUpdates (hashInit :: Context SHA1) [Data.ByteString.UTF8.fromString sId,ss,pubKey]
 
--- Confirm that the given information all jives together, proving that the client got the key correctly
--- At the end, we get the shared secret if everything was gucci
+-- | Confirm that the given information all jives together, proving that the client got the key correctly.
+-- At the end, we get the shared secret if everything went as planned.
 checkVTandSS :: RSA.PrivateKey -> BS.ByteString -> BS.ByteString -> BS.ByteString -> Either String BS.ByteString
 checkVTandSS priv vtFromClient ssFromClient actualVT =
   -- Try to decrypt their vt response

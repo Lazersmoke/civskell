@@ -1,3 +1,4 @@
+-- | Entities
 module Civskell.Entity 
   (module Civskell.Entity.Item
   ,module Civskell.Entity.Base

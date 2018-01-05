@@ -6,7 +6,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
--- | Provides low level networking capabilites.
+-- | Provides high level networking capabilites.
 module Civskell.Tech.Network 
   (getPacket 
   ,serverAuthentication
@@ -68,7 +68,7 @@ getPacket ep = getRawPacket >>= \rawPkt -> decompressPacket rawPkt >>= \case
         -- If it parsed ok, then
         Right serverPkt@(SuchThat (DescribedPacket desc thePkt)) -> do
           -- Return it
-          logLevel ServerboundPacket "Parsed serverbound packet"
+          logLevel VerboseLog "Parsed serverbound packet"
           logLevel ServerboundPacket $ showPacket desc thePkt
           logLevel HexDump . T.pack . indentedHex $ pkt
           return $ Just serverPkt

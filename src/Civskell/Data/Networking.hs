@@ -6,6 +6,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeApplications #-}
+-- | Networking primitives.
 module Civskell.Data.Networking where
 
 import qualified Codec.Compression.Zlib as Z
@@ -23,11 +24,11 @@ import Civskell.Data.Types
 import Civskell.Data.Logging
 import Civskell.Tech.Encrypt
 
--- Parse an uncompressed packet to a @'BS.ByteString'@
+-- | Parse an uncompressed packet to a @'BS.ByteString'@ holding that packet's data with the packet id.
 parseUncompPkt :: MonadGet m => m BS.ByteString
 parseUncompPkt = getByteString . fromIntegral =<< deserialize @VarInt
 
--- | Parse a compressed packet to a pair of its length and its data
+-- | Parse a compressed packet to a pair of its length and its data with the packet id.
 parseCompPkt :: MonadGet m => m (VarInt,BS.ByteString)
 parseCompPkt = do
   _ <- deserialize @VarInt

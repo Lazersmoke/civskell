@@ -32,7 +32,7 @@ import Data.Semigroup
 import Data.Void
 import Control.Concurrent
 
--- Do the action every microseconds timeout.
+-- | @'reapeatedly' s0 a timeout@ does the action @a@ every @timeout@ microseconds, passing the state back into it, starting with @s0@.
 repeatedly :: s -> (s -> Civskell s) -> Int -> Civskell Void
 repeatedly s0 a timeout = loop s0
   where
@@ -40,6 +40,8 @@ repeatedly s0 a timeout = loop s0
       lift (threadDelay timeout)
       a s >>= loop
 
+-- | Sends the specified keep-alive packet if there are any players online, and returns a state one higher than was passed.
+-- This is intended to be used with @'repeatedly'@.
 keepAliveAction :: Enum s => (s -> DescribedPacket PacketSerializer p) -> s -> Civskell s
 keepAliveAction mkPkt s = do
   Map.null . view worldPlayers <$> fromContext worldData >>= \case
@@ -53,6 +55,7 @@ keepAliveAction mkPkt s = do
   -- Return the updated state for next time
   pure (succ s)
 
+-- | Set the player's @'Gamemode'@, and also notify the client that their @'Gamemode'@ has changed.
 setGamemode :: Gamemode -> Civskell ()
 setGamemode gm = do
   overContext playerData $ playerGamemode .~ gm
@@ -61,12 +64,13 @@ setGamemode gm = do
     Survival -> sendPacket (Client.playerAbilities 0x2C) (Client.PlayerAbilities (AbilityFlags False False False False) 0 1)
     Creative -> sendPacket (Client.playerAbilities 0x2C) (Client.PlayerAbilities (AbilityFlags True False True True) 0 1)
 
+-- | Set the given @'Block'@ at the given @'BlockCoord'@, and also notify the client that the block has been set.
 setBlock :: BlockCoord -> ForAny Block -> Civskell ()
 setBlock bc b = do
   overContext worldData $ blockInWorld bc .~ b
   sendPacket (Client.blockChange 0x0B) (Client.BlockChange bc (ambiguously toWireBlock b))
 
--- | Disconnect if they have the wrong version, otherwise set the player state
+-- | Disconnect if they have the wrong version, otherwise set the player state and continue.
 handleHandshake :: Server.Handshake -> Civskell ()
 handleHandshake (Server.Handshake protocol _addr _port newstate) = case newstate of
   -- TODO: Enum for newstate
@@ -168,6 +172,7 @@ handleEncryptionResponse (Server.EncryptionResponse ssFromClient vtFromClient) =
           ps <- mapM (lift . readTVarIO) =<< Map.elems . view worldPlayers <$> fromContext worldData
           sendPacket (Client.playerListItem 0x2E) (Client.PlayerListItem . ProtocolList $ (map (\p -> (p ^. playerClientUUID,Client.PlayerListAdd (ProtocolString $ p ^. playerUsername) (ProtocolList authProps) Survival 0 (ProtocolOptional Nothing))) ps))
 
+-- | Responds to a server list ping with the server's icon, motd, player list, etc.
 handleStatusRequest :: Server.StatusRequest -> Civskell ()
 handleStatusRequest _ = do
   -- Get the list of connected players so we can show info about them in the server menu
@@ -308,12 +313,15 @@ handleKeepAlive (Server.KeepAlive kid) = logp $ "Player sent keep alive pong wit
 handlePlayer :: Server.Player -> Civskell ()
 handlePlayer (Server.Player _grounded) = pure ()
 
+-- | Update the player's position to match the one sent in the packet
 handlePlayerPosition :: Server.PlayerPosition -> Civskell ()
 handlePlayerPosition (Server.PlayerPosition (x,y,z) _grounded) = overContext playerData $ playerPosition .~ (x,y,z)
 
+-- | Update the player's position and looking direction to match the one sent in the packet
 handlePlayerPositionAndLook :: Server.PlayerPositionAndLook -> Civskell ()
 handlePlayerPositionAndLook (Server.PlayerPositionAndLook (x,y,z) (yaw,pitch) _grounded) = overContext playerData $ (playerPosition .~ (x,y,z)) . (playerViewAngle .~ (yaw,pitch))
 
+-- | Update the player's looking direction to match the one sent in the packet
 handlePlayerLook :: Server.PlayerLook -> Civskell ()
 handlePlayerLook (Server.PlayerLook (y,p) _grounded) = overContext playerData $ playerViewAngle .~ (y,p)
 
@@ -325,9 +333,16 @@ handleSteerBoat :: Server.SteerBoat -> Civskell ()
 handleSteerBoat
 -}
 
+-- | Update the player's abilities to match those sent in the packet.
+-- TODO: investigate why this packet even exists.
 handlePlayerAbilities :: Server.PlayerAbilities -> Civskell ()
 handlePlayerAbilities (Server.PlayerAbilities (AbilityFlags _i f _af _c) _flySpeed _fovMod) = overContext playerData $ playerMoveMode .~ if f then Flying else Walking
 
+-- | Depending on the action:
+--
+-- * Instantly break the block for @'StartDig'@.
+-- * Swap the items in their hands for @'SwapHands'@.
+-- * Drop the item they are holding for @'DropItem'@.
 handlePlayerDigging :: Server.PlayerDigging -> Civskell ()
 handlePlayerDigging (Server.PlayerDigging action) = case action of
   StartDig block _side -> do
@@ -336,7 +351,7 @@ handlePlayerDigging (Server.PlayerDigging action) = case action of
     setBlock block $ ambiguate (Block air Air)
   SwapHands -> do
     -- Get the current items
-    heldSlot <- view playerHoldingSlot <$> fromContext playerData
+    heldSlot <- slotInHand MainHand
     heldItem <- getInventorySlot heldSlot
     -- 45 is the off hand slot
     offItem <- getInventorySlot 45
@@ -430,11 +445,8 @@ handlePlayerBlockPlacement (Server.PlayerBlockPlacement block side hand cursorCo
     Just cb -> cb b block side hand cursorCoord
     Nothing -> do
       -- Find out what item they are trying to place
-      heldSlot <- if hand == MainHand then view playerHoldingSlot <$> fromContext playerData else pure 45
-      -- The actual slot is the `heldSlot`th slot in their hotbar, so
-      -- add 36 to bypass the rest of the inventory
-      let actualSlot = heldSlot + 36
-      getInventorySlot actualSlot >>= \case
+      heldSlot <- slotInHand hand
+      getInventorySlot heldSlot >>= \case
         -- If they right click with an empty hand, this will happen
         SuchThat (Slot Nothing) -> logp "No item to use"
         -- If they right click with a real item, check if that item has a usage continuation or consumption action
@@ -444,7 +456,7 @@ handlePlayerBlockPlacement (Server.PlayerBlockPlacement block side hand cursorCo
           -- If they right click with an item that has an action
           Just (dItem,oiu)-> do
             -- Then apply that item's "consumption" action to the inventory slot
-            overContext playerData $ playerInventory . ix (fromIntegral actualSlot) .~ (ambiguate $ dItem theSlotData)
+            overContext playerData $ playerInventory . ix (fromIntegral heldSlot) .~ (ambiguate $ dItem theSlotData)
             -- And run that item's continuation
             -- This should inform the client of the above change
             oiu (Item idesc i) block side hand cursorCoord
@@ -452,7 +464,6 @@ handlePlayerBlockPlacement (Server.PlayerBlockPlacement block side hand cursorCo
 -- | Log that they used the item, but don't do anything about it.
 handleUseItem :: Server.UseItem -> Civskell ()
 handleUseItem (Server.UseItem hand) = do
-  -- Decide which hand they are using, and find the item in that hand
-  usedSlot <- case hand of {MainHand -> view playerHoldingSlot <$> fromContext playerData; OffHand -> pure 45}
+  usedSlot <- slotInHand hand
   usedItem <- getInventorySlot usedSlot
   logp $ "Used: " <> ambiguously showText usedItem
