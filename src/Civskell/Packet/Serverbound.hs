@@ -14,7 +14,7 @@
 module Civskell.Packet.Serverbound 
   (
   -- * Utilties for making packets
-  ServerboundPacketDescriptor,defaultDescriptor
+  ServerboundPacketDescriptor,unhandled,defaultDescriptor
   -- * Vanilla serverbound packets
   -- ** Handshaking
   -- *** Handshake
@@ -119,7 +119,7 @@ import Crypto.Hash (hash,Digest,SHA1)
 import Numeric (showHex)
 
 import Civskell.Data.Types
-import Civskell.Data.Util
+import Civskell.Data.Logging
 
 -- | A template for building an @'InboundPacketDescriptor'@ from an @'onPacket'@ function.
 -- The reason we do this is to allow people to easily write handlers for these packets to put in
@@ -127,6 +127,16 @@ import Civskell.Data.Util
 -- to rewrite the entire @'InboundPacketDescriptor'@ every time you want a custom handler. All vanilla
 -- packets in this module are provided as @'ServerboundPacketDescriptor'@s
 type ServerboundPacketDescriptor p = (p -> Civskell ()) -> InboundPacketDescriptor p
+
+-- | A default packet handler that just prints an error message. For example:
+--
+-- @
+--   'handshake' $ 'unhandled' "Packet name here"
+-- @
+--
+-- is an @'InboundPacketDescriptor' 'Handshake'@.
+unhandled :: T.Text -> p -> Civskell () 
+unhandled t _ = lognyi $ "Unhandled Packet: " <> t
 
 -- | A reasonable default for making @'ServerPacketDescriptor'@s. 
 -- It uses @'ParThreading'@ for @'packetThreadingMode'@, and the @'Serial'@ instance's @'deserialize'@ for @'deserializePacket'@.
@@ -166,7 +176,7 @@ handshake = defaultDescriptor Handshaking "Handshake" $ \(Handshake protocol add
 data LegacyHandshake = LegacyHandshake Word8 LegacyString Int32
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'LegacyHandshake'@ packets.
 legacyHandshake :: ServerboundPacketDescriptor LegacyHandshake
-legacyHandshake = defaultDescriptor Handshaking "LegacyHandshake" $ \(LegacyHandshake _ _ _) -> []  -- Legacy response
+legacyHandshake = defaultDescriptor Handshaking "Legacy Handshake" $ \(LegacyHandshake _ _ _) -> []  -- Legacy response
 
 instance Serial LegacyHandshake where
   serialize (LegacyHandshake proto hostname port) = putByteString legacyHandshakePingConstant *> serialize @Int16 (fromIntegral $ 7 + BS.length hostname) *> putWord8 proto *> serialize hostname *> serialize @Int32 port
@@ -185,7 +195,7 @@ instance Serial LegacyHandshake where
 data TPConfirm = TPConfirm VarInt deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'TPConfirm'@ packets.
 tpConfirm :: ServerboundPacketDescriptor TPConfirm
-tpConfirm = defaultDescriptor Playing "TPConfirm" $ \(TPConfirm i) -> [("Teleport Id",showText i)]
+tpConfirm = defaultDescriptor Playing "T P Confirm" $ \(TPConfirm i) -> [("Teleport Id",showText i)]
 
 --Legacy buggy type
 --data PrepareCraftingGrid = WindowId Short TransactionId (ProtocolList Short (Slot,Word8,Word8)) (ProtocolList Short (Slot,Word8,Word8)) deriving (Generic,Serial)
@@ -193,32 +203,32 @@ tpConfirm = defaultDescriptor Playing "TPConfirm" $ \(TPConfirm i) -> [("Telepor
 data CraftRecipeRequest = WindowId VarInt Bool deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'CraftRecipeRequest'@ packets.
 craftRecipeRequest :: ServerboundPacketDescriptor CraftRecipeRequest
-craftRecipeRequest = defaultDescriptor Playing "CraftRecipeRequest" $ const []
+craftRecipeRequest = defaultDescriptor Playing "Craft Recipe Request" $ const []
 
 -- | The vanilla Minecraft serverbound [Tab Complete](http://wiki.vg/Protocol#Tab-Complete_.28serverbound.29) packet.
 data TabComplete = TabComplete ProtocolString Bool (ProtocolOptional BlockCoord) deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'TabComplete'@ packets.
 tabComplete :: ServerboundPacketDescriptor TabComplete
-tabComplete = defaultDescriptor Playing "TabComplete" $ \(TabComplete textSoFar forceCommand (ProtocolOptional mBlockLookingAt)) -> [("Text so far",showText textSoFar),("Force command",showText forceCommand)] ++ (case mBlockLookingAt of {Just b -> [("Looking At",showText b)]; Nothing -> []})
+tabComplete = defaultDescriptor Playing "Tab Complete" $ \(TabComplete textSoFar forceCommand (ProtocolOptional mBlockLookingAt)) -> [("Text so far",showText textSoFar),("Force command",showText forceCommand)] ++ (case mBlockLookingAt of {Just b -> [("Looking At",showText b)]; Nothing -> []})
 
 -- | The vanilla Minecraft serverbound [Chat Message](http://wiki.vg/Protocol#Chat_Message_.28serverbound.29) packet.
 data ChatMessage = ChatMessage ProtocolString deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'ChatMessage '@ packets.
 chatMessage :: ServerboundPacketDescriptor ChatMessage 
-chatMessage = defaultDescriptor Playing "ChatMessage " $ \(ChatMessage msg) -> [("Message",T.pack $ unProtocolString msg)]
+chatMessage = defaultDescriptor Playing "Chat Message" $ \(ChatMessage msg) -> [("Message",T.pack $ show $ unProtocolString msg)]
 
 -- | The vanilla Minecraft serverbound [Client Status](http://wiki.vg/Protocol#Client_Status) packet.
 data ClientStatus = ClientStatus ClientStatusAction deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'ClientStatus'@ packets.
 clientStatus :: ServerboundPacketDescriptor ClientStatus
-clientStatus = defaultDescriptor Playing "ClientStatus" $ \(ClientStatus status) -> [("Status",showText status)]
+clientStatus = defaultDescriptor Playing "Client Status" $ \(ClientStatus status) -> [("Status",showText status)]
 
 -- TODO: type synonyms or newtypes or whatever
 -- | The vanilla Minecraft serverbound [Client Settings](http://wiki.vg/Protocol#Client_Settings) packet.
 data ClientSettings = ClientSettings ProtocolString Word8 VarInt Bool Word8 VarInt deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'ClientSettings'@ packets.
 clientSettings :: ServerboundPacketDescriptor ClientSettings
-clientSettings = defaultDescriptor Playing "ClientSettings" $ \(ClientSettings (ProtocolString loc) viewDist chatMode chatColors skin hand) ->
+clientSettings = defaultDescriptor Playing "Client Settings" $ \(ClientSettings (ProtocolString loc) viewDist chatMode chatColors skin hand) ->
     [("Locale",T.pack loc)
     ,("View Distance",showText viewDist)
     ,("Chat Mode",showText chatMode)
@@ -231,14 +241,14 @@ clientSettings = defaultDescriptor Playing "ClientSettings" $ \(ClientSettings (
 data ConfirmTransaction = ConfirmTransaction WindowId TransactionId Bool deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'ConfirmTransaction'@ packets.
 confirmTransaction :: ServerboundPacketDescriptor ConfirmTransaction
-confirmTransaction = defaultDescriptor Playing "ConfirmTransaction" $ \(ConfirmTransaction wid transId acc) -> [("Window Id",showText wid),("Transaction Id",showText transId),("Accepted",if acc then "Yes" else "No")]
+confirmTransaction = defaultDescriptor Playing "Confirm Transaction" $ \(ConfirmTransaction wid transId acc) -> [("Window Id",showText wid),("Transaction Id",showText transId),("Accepted",if acc then "Yes" else "No")]
 
 
 -- | The vanilla Minecraft serverbound [Enchant Item](http://wiki.vg/Protocol#Enchant_Item) packet.
 data EnchantItem = EnchantItem WindowId Word8 deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'EnchantItem'@ packets.
 enchantItem :: ServerboundPacketDescriptor EnchantItem
-enchantItem = defaultDescriptor Playing "EnchantItem" $ \(EnchantItem wid ench) -> [("Window Id",showText wid),("Enchantment Selected",showText ench)]
+enchantItem = defaultDescriptor Playing "Enchant Item" $ \(EnchantItem wid ench) -> [("Window Id",showText wid),("Enchantment Selected",showText ench)]
 
 -- Slot Number
 -- THIS SERIAL INSTANCE IS INCORRECT:
@@ -246,11 +256,11 @@ enchantItem = defaultDescriptor Playing "EnchantItem" $ \(EnchantItem wid ench) 
 -- | The vanilla Minecraft serverbound [Click Window](http://wiki.vg/Protocol#Click_Window) packet.
 data ClickWindow = ClickWindow WindowId Short TransactionId InventoryClickMode WireSlot
 instance Serial ClickWindow where
-  serialize = error "Unimplemented: serialize @Server.ClickWindow"
-  deserialize = error "Unimplemented: deserialize @Server.ClickWindow"
+  serialize = error "Unimplemented: serialize @Server.Click Window"
+  deserialize = error "Unimplemented: deserialize @Server.Click Window"
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'ClickWindow'@ packets.
 clickWindow :: ServerboundPacketDescriptor ClickWindow
-clickWindow = defaultDescriptor Playing "ClickWindow" $ \(ClickWindow wid slotNum transId invMode item) -> [("Window Id",showText wid),("Slot Number",showText slotNum),("Transaction Id",showText transId),("Inventory Mode",showText invMode),("Subject Item",showText item)]
+clickWindow = defaultDescriptor Playing "Click Window" $ \(ClickWindow wid slotNum transId invMode item) -> [("Window Id",showText wid),("Slot Number",showText slotNum),("Transaction Id",showText transId),("Inventory Mode",showText invMode),("Subject Item",showText item)]
 
  {- This code kept as reference for when we write `instance Serial ClickWindow`
    -
@@ -277,14 +287,14 @@ clickWindow = defaultDescriptor Playing "ClickWindow" $ \(ClickWindow wid slotNu
 data CloseWindow = CloseWindow WindowId deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'CloseWindow'@ packets.
 closeWindow :: ServerboundPacketDescriptor CloseWindow
-closeWindow = defaultDescriptor Playing "CloseWindow" $ \(CloseWindow wid) -> [("Window Id", showText wid)]
+closeWindow = defaultDescriptor Playing "Close Window" $ \(CloseWindow wid) -> [("Window Id", showText wid)]
 
 -- | The vanilla Minecraft serverbound [Plugin Message](http://wiki.vg/Protocol#Plugin_Message_.28serverbound.29) packet.
 data PluginMessage = PluginMessage ProtocolString BS.ByteString
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'PluginMessage'@ packets.
 pluginMessage :: ServerboundPacketDescriptor PluginMessage
-pluginMessage = defaultDescriptor Playing "PluginMessage" $ \case
-    (PluginMessage "MC|Brand" cliBrand) -> [("Client Brand",showText (BS.tail cliBrand))]
+pluginMessage = defaultDescriptor Playing "Plugin Message" $ \case
+    (PluginMessage "M C|Brand" cliBrand) -> [("Client Brand",showText (BS.tail cliBrand))]
     (PluginMessage chan bs) -> [("Channel",showText chan),("Payload",showText bs)]
 instance Serial PluginMessage where
   serialize (PluginMessage ch dat) = serialize ch *> putByteString dat
@@ -294,13 +304,13 @@ instance Serial PluginMessage where
 data UseEntity = UseEntity EntityId EntityInteraction deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'UseEntity'@ packets.
 useEntity :: ServerboundPacketDescriptor UseEntity
-useEntity = defaultDescriptor Playing "UseEntity" $ \(UseEntity targetEID action) -> [("Target",showText targetEID),("Action",showText action)]
+useEntity = defaultDescriptor Playing "Use Entity" $ \(UseEntity targetEID action) -> [("Target",showText targetEID),("Action",showText action)]
 
 -- | The vanilla Minecraft serverbound [Keep Alive](http://wiki.vg/Protocol#Keep_Alive_.28serverbound.29) packet.
-data KeepAlive = KeepAlive KeepAliveId deriving (Generic,Serial)
+data KeepAlive a = KeepAlive a deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'KeepAlive'@ packets.
-keepAlive :: ServerboundPacketDescriptor KeepAlive
-keepAlive = defaultDescriptor Playing "KeepAlive" $ \(KeepAlive i) -> [("Keep Alive Id",showText i)]
+keepAlive :: (Serial a,Show a) => ServerboundPacketDescriptor (KeepAlive a)
+keepAlive = defaultDescriptor Playing "Keep Alive" $ \(KeepAlive i) -> [("Keep Alive Id",showText i)]
 
 -- | The vanilla Minecraft serverbound [Player](http://wiki.vg/Protocol#Player) packet.
 data Player = Player Bool deriving (Generic,Serial)
@@ -312,37 +322,37 @@ player = defaultDescriptor Playing "Player" $ \(Player grounded) -> [("On Ground
 data PlayerPosition = PlayerPosition (Double,Double,Double) Bool deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'PlayerPosition'@ packets.
 playerPosition :: ServerboundPacketDescriptor PlayerPosition
-playerPosition = defaultDescriptor Playing "PlayerPosition" $ \(PlayerPosition (x,y,z) grounded) -> [("Positon",showText (x,y,z)),("On Ground",showText grounded)]
+playerPosition = defaultDescriptor Playing "Player Position" $ \(PlayerPosition (x,y,z) grounded) -> [("Positon",showText (x,y,z)),("On Ground",showText grounded)]
 
 -- | The vanilla Minecraft serverbound [Player Position And Look](http://wiki.vg/Protocol#Player_Position_And_Look_.28serverbound.29) packet.
 data PlayerPositionAndLook = PlayerPositionAndLook (Double,Double,Double) (Float,Float) Bool deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'PlayerPositionAndLook'@ packets.
 playerPositionAndLook :: ServerboundPacketDescriptor PlayerPositionAndLook
-playerPositionAndLook = defaultDescriptor Playing "PlayerPositionAndLook" $ \(PlayerPositionAndLook (x,y,z) (yaw,pitch) grounded) -> [("Positon",showText (x,y,z)),("Looking",showText (yaw,pitch)),("On Ground",showText grounded)]
+playerPositionAndLook = defaultDescriptor Playing "Player PositionAnd Look" $ \(PlayerPositionAndLook (x,y,z) (yaw,pitch) grounded) -> [("Positon",showText (x,y,z)),("Looking",showText (yaw,pitch)),("On Ground",showText grounded)]
 
 -- | The vanilla Minecraft serverbound [Player Look](http://wiki.vg/Protocol#Player_Look) packet.
 data PlayerLook = PlayerLook (Float,Float) Bool deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'PlayerLook'@ packets.
 playerLook :: ServerboundPacketDescriptor PlayerLook
-playerLook = defaultDescriptor Playing "PlayerLook" $ \(PlayerLook  (yaw,pitch) grounded) -> [("Looking",showText (yaw,pitch)),("On Ground",showText grounded)]
+playerLook = defaultDescriptor Playing "Player Look" $ \(PlayerLook  (yaw,pitch) grounded) -> [("Looking",showText (yaw,pitch)),("On Ground",showText grounded)]
 
 -- | The vanilla Minecraft serverbound [Vehicle Move](http://wiki.vg/Protocol#Vehicle_Move_.28serverbound.29) packet.
 data VehicleMove = VehicleMove (Double,Double,Double) (Float,Float) deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'VehicleMove'@ packets.
 vehicleMove :: ServerboundPacketDescriptor VehicleMove
-vehicleMove = defaultDescriptor Playing "VehicleMove" $ \(VehicleMove _ _) -> []
+vehicleMove = defaultDescriptor Playing "Vehicle Move" $ \(VehicleMove _ _) -> []
 
 -- | The vanilla Minecraft serverbound [Steer Boat](http://wiki.vg/Protocol#Steer_Boat) packet.
 data SteerBoat = SteerBoat Bool Bool deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'SteerBoat'@ packets.
 steerBoat :: ServerboundPacketDescriptor SteerBoat
-steerBoat = defaultDescriptor Playing "SteerBoat" $ \(SteerBoat _ _) -> []
+steerBoat = defaultDescriptor Playing "Steer Boat" $ \(SteerBoat _ _) -> []
 
 -- | The vanilla Minecraft serverbound [Player Abilities](http://wiki.vg/Protocol#Player_Abilities_.28serverbound.29) packet.
 data PlayerAbilities = PlayerAbilities AbilityFlags Float Float deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'PlayerAbilities'@ packets.
 playerAbilities :: ServerboundPacketDescriptor PlayerAbilities
-playerAbilities = defaultDescriptor Playing "PlayerAbilities" $ \(PlayerAbilities (AbilityFlags i f af c) flySpeed fovMod) -> u i "Invulnerable" <> u f "Flying" <> u af "Allow Flying" <> u c "Creative" <> [("Flying Speed",showText flySpeed),("FOV Modifier",showText fovMod)]
+playerAbilities = defaultDescriptor Playing "Player Abilities" $ \(PlayerAbilities (AbilityFlags i f af c) flySpeed fovMod) -> u i "Invulnerable" <> u f "Flying" <> u af "Allow Flying" <> u c "Creative" <> [("Flying Speed",showText flySpeed),("F OV Modifier",showText fovMod)]
   where
     u b s = if b then [(s,"")] else []
 
@@ -350,7 +360,7 @@ playerAbilities = defaultDescriptor Playing "PlayerAbilities" $ \(PlayerAbilitie
 data PlayerDigging = PlayerDigging PlayerDigAction deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'PlayerDigging'@ packets.
 playerDigging :: ServerboundPacketDescriptor PlayerDigging
-playerDigging = defaultDescriptor Playing "PlayerDigging" $ \(PlayerDigging action) -> case action of
+playerDigging = defaultDescriptor Playing "Player Digging" $ \(PlayerDigging action) -> case action of
     StartDig bc side -> [("Action","Start Digging"),("Block",showText bc),("Side",showText side)]
     StopDig bc side -> [("Action","Stop Digging"),("Block",showText bc),("Side",showText side)]
     EndDig bc side -> [("Action","Finished Digging"),("Block",showText bc),("Side",showText side)]
@@ -362,7 +372,7 @@ playerDigging = defaultDescriptor Playing "PlayerDigging" $ \(PlayerDigging acti
 data EntityAction = EntityAction PlayerId PlayerEntityAction deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'EntityAction'@ packets.
 entityAction :: ServerboundPacketDescriptor EntityAction
-entityAction = defaultDescriptor Playing "EntityAction" $ \(EntityAction eid fire) -> (("Entity Id",showText eid):) $ let u b = if b then id else ("Stop "<>) in case fire of
+entityAction = defaultDescriptor Playing "Entity Action" $ \(EntityAction eid fire) -> (("Entity Id",showText eid):) $ let u b = if b then id else ("Stop "<>) in case fire of
     Sneak b -> [("Action",u b "Sneak")]
     Sprint b -> [("Action",u b "Sprint")]
     HorseJumpStart s -> [("Action","Horse Jump"),("Horse Jump Strength",showText s)]
@@ -375,7 +385,7 @@ entityAction = defaultDescriptor Playing "EntityAction" $ \(EntityAction eid fir
 data SteerVehicle = SteerVehicle Float Float Word8 deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'SteerVehicle'@ packets.
 steerVehicle :: ServerboundPacketDescriptor SteerVehicle
-steerVehicle = defaultDescriptor Playing "SteerVehicle" $ \(SteerVehicle _ _ _) -> []
+steerVehicle = defaultDescriptor Playing "Steer Vehicle" $ \(SteerVehicle _ _ _) -> []
 
 -- | The vanilla Minecraft serverbound [Crafting Book Data](http://wiki.vg/Protocol#Crafting_Book_Data) packet.
 data CraftingBookData = CraftingBookDisplayedRecipe Int32 | CraftingBookStatus Bool Bool
@@ -388,13 +398,13 @@ instance Serial CraftingBookData where
     x -> error $ "deserialize @CraftingBookData: Bad 'Type' indicator " <> show x
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'CraftingBookData'@ packets.
 craftingBookData :: ServerboundPacketDescriptor CraftingBookData
-craftingBookData = defaultDescriptor Playing "CraftingBookData" $ const []
+craftingBookData = defaultDescriptor Playing "Crafting Book Data" $ const []
 
 -- | The vanilla Minecraft serverbound [Resource Pack Status](http://wiki.vg/Protocol#Resource_Pack_Status) packet.
 data ResourcePackStatus = ResourcePackStatus VarInt deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'ResourcePackStatus'@ packets.
 resourcePackStatus :: ServerboundPacketDescriptor ResourcePackStatus
-resourcePackStatus = defaultDescriptor Playing "ResourcePackStatus" $ \(ResourcePackStatus _) -> []
+resourcePackStatus = defaultDescriptor Playing "Resource Pack Status" $ \(ResourcePackStatus _) -> []
 
 -- Nothing means tab closed, Just a means tab a was opened
 -- | The vanilla Minecraft serverbound [Advancement Tab](http://wiki.vg/Protocol#Advancement_Tab) packet.
@@ -408,25 +418,25 @@ instance Serial AdvancementTab where
     x -> error $ "deserialize @AdvancementTab: Bad 'Action' indicator " <> show x
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'AdvancementTab'@ packets.
 advancementTab :: ServerboundPacketDescriptor AdvancementTab
-advancementTab = defaultDescriptor Playing "AdvancementTab" $ \_ -> []
+advancementTab = defaultDescriptor Playing "Advancement Tab" $ \_ -> []
 
 -- | The vanilla Minecraft serverbound [Held Item Change](http://wiki.vg/Protocol#Held_Item_Change_.28serverbound.29) packet.
 data HeldItemChange = HeldItemChange Short deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'HeldItemChange'@ packets.
 heldItemChange :: ServerboundPacketDescriptor HeldItemChange
-heldItemChange = defaultDescriptor Playing "HeldItemChange" $ \(HeldItemChange i) -> [("Slot",showText i)]
+heldItemChange = defaultDescriptor Playing "Held Item Change" $ \(HeldItemChange i) -> [("Slot",showText i)]
 
 -- | The vanilla Minecraft serverbound [Creative Inventory Action](http://wiki.vg/Protocol#Creative_Inventory_Action) packet.
 data CreativeInventoryAction = CreativeInventoryAction Short WireSlot deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'CreativeInventoryAction'@ packets.
 creativeInventoryAction :: ServerboundPacketDescriptor CreativeInventoryAction
-creativeInventoryAction = defaultDescriptor Playing "CreativeInventoryAction" $ \(CreativeInventoryAction slotNum item) -> [("Slot",showText slotNum),("New Item", showText item)]
+creativeInventoryAction = defaultDescriptor Playing "Creative Inventory Action" $ \(CreativeInventoryAction slotNum item) -> [("Slot",showText slotNum),("New Item", showText item)]
 
 -- | The vanilla Minecraft serverbound [Update Sign](http://wiki.vg/Protocol#Update_Sign) packet.
 data UpdateSign = UpdateSign BlockCoord (ProtocolString,ProtocolString,ProtocolString,ProtocolString) deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'UpdateSign'@ packets.
 updateSign :: ServerboundPacketDescriptor UpdateSign
-updateSign = defaultDescriptor Playing "UpdateSign" $ \(UpdateSign _ _) -> []
+updateSign = defaultDescriptor Playing "Update Sign" $ \(UpdateSign _ _) -> []
 
 -- | The vanilla Minecraft serverbound [Animation](http://wiki.vg/Protocol#Animation_.28serverbound.29) packet.
 data Animation = Animation Hand deriving (Generic,Serial)
@@ -438,19 +448,19 @@ animation = defaultDescriptor Playing "Animation" $ \(Animation hand) -> [("Hand
 data Spectate = Spectate UUID deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'Spectate'@ packets.
 spectate :: ServerboundPacketDescriptor Spectate
-spectate = defaultDescriptor Playing "Spectate" $ \(Spectate uuid) -> [("UUID",showText uuid)]
+spectate = defaultDescriptor Playing "Spectate" $ \(Spectate uuid) -> [("U UI D",showText uuid)]
 
 -- | The vanilla Minecraft serverbound [Player Block Placement](http://wiki.vg/Protocol#Player_Block_Placement) packet.
 data PlayerBlockPlacement = PlayerBlockPlacement BlockCoord BlockFace Hand (Float,Float,Float) deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'PlayerBlockPlacement'@ packets.
 playerBlockPlacement :: ServerboundPacketDescriptor PlayerBlockPlacement
-playerBlockPlacement = defaultDescriptor Playing "PlayerBlockPlacement" $ \(PlayerBlockPlacement block side hand _cursorCoord) -> [("Block",showText block),("Side",showText side),("Hand",showText hand)]
+playerBlockPlacement = defaultDescriptor Playing "Player Block Placement" $ \(PlayerBlockPlacement block side hand _cursorCoord) -> [("Block",showText block),("Side",showText side),("Hand",showText hand)]
 
 -- | The vanilla Minecraft serverbound [Use Item](http://wiki.vg/Protocol#Use_Item) packet.
 data UseItem = UseItem Hand deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'UseItem'@ packets.
 useItem :: ServerboundPacketDescriptor UseItem
-useItem = defaultDescriptor Playing "UseItem" $ \(UseItem hand) -> [("Hand",showText hand)]
+useItem = defaultDescriptor Playing "Use Item" $ \(UseItem hand) -> [("Hand",showText hand)]
 
 -----------
 -- Login --
@@ -460,7 +470,7 @@ useItem = defaultDescriptor Playing "UseItem" $ \(UseItem hand) -> [("Hand",show
 data LoginStart = LoginStart ProtocolString deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'LoginStart'@ packets.
 loginStart :: ServerboundPacketDescriptor LoginStart
-loginStart = defaultDescriptor LoggingIn "LoginStart" $ \(LoginStart name) -> [("Username",T.pack $ unProtocolString name)]
+loginStart = defaultDescriptor LoggingIn "Login Start" $ \(LoginStart name) -> [("Username",T.pack $ unProtocolString name)]
 
 -- | The vanilla Minecraft serverbound [Encryption Response](http://wiki.vg/Protocol#Encryption_Response) packet.
 data EncryptionResponse = EncryptionResponse BS.ByteString BS.ByteString 
@@ -474,7 +484,7 @@ instance Serial EncryptionResponse where
 
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'EncryptionResponse'@ packets.
 encryptionResponse :: ServerboundPacketDescriptor EncryptionResponse
-encryptionResponse = defaultDescriptor LoggingIn "EncryptionResponse" $ \(EncryptionResponse ss vt) ->
+encryptionResponse = defaultDescriptor LoggingIn "Encryption Response" $ \(EncryptionResponse ss vt) ->
     [("Shared Secret Hash",(T.take 7 $ showText (hash ss :: Digest SHA1)) <> "...")
     ,("Verify Token Hash",(T.take 7 $ showText (hash vt :: Digest SHA1)) <> "...")
     ]
@@ -487,13 +497,13 @@ encryptionResponse = defaultDescriptor LoggingIn "EncryptionResponse" $ \(Encryp
 data StatusRequest = StatusRequest deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'StatusRequest'@ packets.
 statusRequest :: ServerboundPacketDescriptor StatusRequest
-statusRequest = defaultDescriptor Status "StatusRequest" $ \StatusRequest -> []
+statusRequest = defaultDescriptor Status "Status Request" $ \StatusRequest -> []
 
 -- | The vanilla Minecraft serverbound status [Ping](http://wiki.vg/Protocol#Ping) packet.
 data StatusPing = StatusPing Int64 deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'StatusPing'@ packets.
 statusPing :: ServerboundPacketDescriptor StatusPing
-statusPing = defaultDescriptor Status "StatusPing" $ \(StatusPing i) -> [("Ping Token",T.pack $ "0x" <> showHex i "")]
+statusPing = defaultDescriptor Status "Status Ping" $ \(StatusPing i) -> [("Ping Token",T.pack $ "0x" <> showHex i "")]
 
 -- TODO: make this not cancer
 -- | The server list image for Civskell. Yes, it's stored as a @'String'@. Yes, it's in this module for no reason. Yes, I'm too lazy to change it.

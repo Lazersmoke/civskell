@@ -54,12 +54,5 @@ logLevel level str = do
 -- Log the given message at the given log level, using the given configuration
 -- Apply the configured logging predicate to see if this message should be logged
 logToQueue :: Configuration -> LogQueue -> LogLevel -> Text -> IO ()
-logToQueue c (LogQueue l) level str = when (shouldLog c level) . atomically . writeTQueue l . (<>str) $ case level of
-  HexDump -> ""
-  ClientboundPacket -> "[\x1b[32mSent\x1b[0m] "
-  ServerboundPacket -> "[\x1b[32mRecv\x1b[0m] "
-  ErrorLog -> "[\x1b[31m\x1b[1mError\x1b[0m] "
-  NYILog -> "[\x1b[34mNYI\x1b[0m] "
-  VerboseLog -> "[\x1b[36m" <> serverName c <> "/Verbose\x1b[0m] "
-  (TaggedLog tag) -> "[\x1b[36m" <> tag <> "\x1b[0m] "
-  NormalLog -> "[\x1b[36m" <> serverName c <> "\x1b[0m] "
+logToQueue c (LogQueue l) level str = when (shouldLog c level) . atomically . writeTQueue l . (<>str) $ getLogBadge c level
+

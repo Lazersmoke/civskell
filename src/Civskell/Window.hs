@@ -14,6 +14,7 @@ import Data.SuchThat
 import qualified Data.Text as T
 import Data.Semigroup ((<>))
 import Control.Monad.Reader
+import qualified Data.Vector as Vector
 
 import Civskell.Data.Types
 import Civskell.Data.Logging
@@ -165,10 +166,10 @@ chest = WindowDescriptor
   ,onWindowClick = \(Chest i) -> let
     gsChest slotNum = if slotNum > 26 || slotNum == (-1)
       then getInventorySlot (slotNum - 18)
-      else view (at slotNum . slotMaybe) <$> (lift . readTVarIO $ i)
+      else (Vector.! (fromIntegral slotNum)) <$> (lift . readTVarIO $ i)
     ssChest slotNum s' = if slotNum > 26 || slotNum == (-1)
       then setInventorySlot (slotNum - 18) s'
-      else lift . atomically $ modifyTVar i (at slotNum . slotMaybe .~ ambiguate s')
+      else lift . atomically $ modifyTVar i (ix (fromIntegral slotNum) .~ ambiguate s')
     in defaultInventoryClick gsChest ssChest
   }
  {- clientToCivskellSlot s

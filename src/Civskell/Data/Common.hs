@@ -54,10 +54,11 @@ data PacketSerializer p = PacketSerializer
 
 type SupportedPackets h = Vector.Vector (SuchThat '[Serial] (PacketDescriptor h))
 
+-- | Move a single element in a vector from one place to another, reshuffling as needed
 moveVec :: Int -> Int -> Vector.Vector a -> Vector.Vector a
 moveVec old new v = Vector.concat [before,between,Vector.singleton oldelem,after]
   where
-    before = Vector.slice 0 old v
+    before = Vector.take old v
     oldelem = v Vector.! old
     between = Vector.slice (old + 1) (new - old - 1) v
     after = Vector.slice (new + 1) (Vector.length v - new - 1) v 

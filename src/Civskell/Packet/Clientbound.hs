@@ -189,7 +189,6 @@ import Unsafe.Coerce
 import Control.Concurrent.STM
 
 import Civskell.Data.Types
-import Civskell.Data.Util
 
 -- | A sane default way to create a @'VarInt' -> 'OutboundPacketDescriptor' p@ given some meta information. It uses
 -- the supplied information, plus the @'Serial'@ instance's @'serialize'@ for @'serializePacket'@. The @'VarInt'@
@@ -568,10 +567,10 @@ changeGameState = defaultDescriptor Playing "Change Game State" $ \(ChangeGameSt
 
 -- Random Id <-- Prevents Timeout
 -- | The vanilla Minecraft clientbound [Keep Alive](http://wiki.vg/Protocol#Keep_Alive_.28clientbound.29) packet.
-data KeepAlive = KeepAlive KeepAliveId deriving (Generic,Serial)
+data KeepAlive a = KeepAlive a deriving (Generic,Serial)
 
 -- | A reasonable default @'OutboundPacketDescriptor'@ for @'KeepAlive'@ packets.
-keepAlive :: VarInt -> OutboundPacketDescriptor KeepAlive
+keepAlive :: (Serial a,Show a) => VarInt -> OutboundPacketDescriptor (KeepAlive a)
 keepAlive = defaultDescriptor Playing "Keep Alive" $ \(KeepAlive kid) -> [("Keep Alive Id",showText kid)]
 
 -- Chunk X, Chunk Z, Full Chunk?, Bitmask of slices present, [Chunk Section], optional: 256 byte array of biome data, [Block entity NBT tag]
@@ -713,8 +712,6 @@ instance Serial (PlayerListAction 'RemovePlayer) where
   deserialize = pure PlayerListRemove
 
 -- | This is an incomplete instance.
---
--- > deserialize = error "Unimplemented: deserialize @PlayerListActionEnum"
 instance PlayerListActionEnum a => Serial (PlayerListItem a) where 
   serialize (PlayerListItem acts) = serialize (playerListActionEnum @a) *> serialize acts
   deserialize = error "Unimplemented: deserialize @PlayerListActionEnum"
@@ -769,6 +766,6 @@ chunksToColumnPacket cs (cx,cz) mbio = ChunkData (fromIntegral cx,fromIntegral c
     bitMask as = foldr (\b i -> fromBool b .|. shiftL i 1) 0 (map (not . isAirChunk) as)
     fromBool True = 1
     fromBool False = 0
-    isAirChunk (ChunkSection _m) = error "Unimplemented: Clientbound.chunksToColumnPacket.isAirChunk. Reason: Used to be map, now we have to traverse the entire array to see if it is empty" -- Map.null m
+    isAirChunk = all (== WireBlock 0 0) . unChunkSection
 
 

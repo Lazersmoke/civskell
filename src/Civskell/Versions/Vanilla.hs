@@ -4,7 +4,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
--- | Configurations for running Civskell as a Vanilla Minecraft server.
+-- | Utility functions for writing protocol configs
 module Civskell.Versions.Vanilla where
 
 import qualified Civskell.Packet.Serverbound as Server
@@ -15,7 +15,6 @@ import Civskell.Data.Types
 import Civskell.Tech.Network
 import Civskell.Tech.Encrypt
 import qualified Civskell.Entity as Entity
-import Civskell.Data.Util
 import Civskell.Data.Networking
 
 import Control.Monad.Reader
@@ -23,7 +22,6 @@ import Control.Concurrent.STM
 import Control.Lens
 import Data.Bytes.Put
 import Data.Bytes.Serial
-import qualified Data.Vector as Vector
 import Data.SuchThat
 import qualified Data.Set as Set
 import Data.List (intercalate)
@@ -31,28 +29,55 @@ import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Map as Map
 import Data.Semigroup
+import Data.Void
+import Control.Concurrent
 
--- | A default packet handler that just prints an error message. For example:
---
--- @
---   'Server.handshake' $ 'unhandled' "Packet name here"
--- @
---
--- is an @'InboundPacketDescriptor' 'Server.Handshake'@.
-unhandled :: T.Text -> p -> Civskell () 
-unhandled t _ = lognyi $ "Unhandled Packet: " <> t
+-- Do the action every microseconds timeout.
+repeatedly :: s -> (s -> Civskell s) -> Int -> Civskell Void
+repeatedly s0 a timeout = loop s0
+  where
+    loop s = do
+      lift (threadDelay timeout)
+      a s >>= loop
+
+keepAliveAction :: Enum s => (s -> DescribedPacket PacketSerializer p) -> s -> Civskell s
+keepAliveAction mkPkt s = do
+  Map.null . view worldPlayers <$> fromContext worldData >>= \case
+    -- Don't do anything if no one is listening
+    True -> pure ()
+    -- If there are players, then broadcast keep alives
+    False -> do
+      -- Send everyone a keep alive packet
+      broadcastPacket $ mkPkt s
+      logLevel VerboseLog "Broadcasting Keepalives"
+  -- Return the updated state for next time
+  pure (succ s)
+
+setGamemode :: Gamemode -> Civskell ()
+setGamemode gm = do
+  overContext playerData $ playerGamemode .~ gm
+  sendPacket (Client.changeGameState 0x1E) (Client.ChangeGameState $ ChangeGamemode gm)
+  case gm of
+    Survival -> sendPacket (Client.playerAbilities 0x2C) (Client.PlayerAbilities (AbilityFlags False False False False) 0 1)
+    Creative -> sendPacket (Client.playerAbilities 0x2C) (Client.PlayerAbilities (AbilityFlags True False True True) 0 1)
+
+setBlock :: BlockCoord -> ForAny Block -> Civskell ()
+setBlock bc b = do
+  overContext worldData $ blockInWorld bc .~ b
+  sendPacket (Client.blockChange 0x0B) (Client.BlockChange bc (ambiguously toWireBlock b))
 
 -- | Disconnect if they have the wrong version, otherwise set the player state
 handleHandshake :: Server.Handshake -> Civskell ()
-handleHandshake (Server.Handshake protocol _addr _port newstate) = protocolVersion <$> asks configuration >>= \prot -> if fromIntegral protocol == prot
-  -- They are using the correct protocol version, so continue as they request
+handleHandshake (Server.Handshake protocol _addr _port newstate) = case newstate of
   -- TODO: Enum for newstate
-  then case newstate of
-    1 -> overContext playerData $ playerState .~ Status
-    2 -> overContext playerData $ playerState .~ LoggingIn
-    _ -> logp "Invalid newstate"
-  -- They are using the incorrect protocol version. Disconnect packet will probably work even if they have a different version.
-  else sendPacket (Client.disconnect 0x00) (Client.Disconnect (jsonyText $ "Unsupported protocol version. Please use " <> show prot))
+  1 -> overContext playerData $ playerState .~ Status
+  -- If the want to log in, check their protocol version
+  2 -> protocolVersion <$> asks configuration >>= \prot -> if fromIntegral protocol == prot
+  -- They are using the correct protocol version, so continue as they request
+    then overContext playerData $ playerState .~ LoggingIn
+    -- They are using the incorrect protocol version. Disconnect packet will probably work even if they have a different version.
+    else sendPacket (Client.disconnect 0x00) (Client.Disconnect (jsonyText $ "Unsupported protocol version. Please use " <> show prot))
+  _ -> logp "Invalid newstate"
 
 -- | Send back the canned legacy handshake response
 handleLegacyHandshake :: Server.LegacyHandshake -> Civskell ()
@@ -94,7 +119,6 @@ handleEncryptionResponse (Server.EncryptionResponse ssFromClient vtFromClient) =
       let loginHash = genLoginHash "" ss encodedPublicKey
       -- Do the Auth stuff with Mojang
       name <- view playerUsername <$> fromContext playerData
-      -- TODO: This uses arbitrary IO, we should make it into an effect
       serverAuthentication name loginHash >>= \case
         -- TODO: we just crash if the token is negative :3 pls fix or make it a feature
         -- If the auth is borked, its probably our fault tbh
@@ -105,7 +129,6 @@ handleEncryptionResponse (Server.EncryptionResponse ssFromClient vtFromClient) =
         Just (AuthPacket uuid nameFromAuth authProps) -> do
           -- Get the config ready because we need it a lot here
           c <- asks configuration
-          pid <- _playerId <$> fromContext playerData
           overContext playerData $ playerUsername .~ nameFromAuth
           overContext playerData $ playerClientUUID .~ uuid
           -- Warning: setting this to 3 gave us a bad frame exception :S
@@ -118,10 +141,18 @@ handleEncryptionResponse (Server.EncryptionResponse ssFromClient vtFromClient) =
           sendPacket (Client.loginSuccess 0x02) (Client.LoginSuccess (ProtocolString $ show uuid) (ProtocolString nameFromAuth))
           -- This is where the protocol specifies the state transition to be
           overContext playerData $ playerState .~ Playing
+          -- Add this player to the world with a fresh Player Id
+          wor <- asks worldData
+          pTvar <- asks playerData
+          pid <- lift . atomically $ do
+            pid <- view worldNextEID <$> readTVar wor
+            modifyTVar wor $ (worldPlayers . at pid) .~ Just pTvar
+            pure pid
+          overContext playerData $ \p -> p {_playerId = pid}
           -- 100 is the max players
           sendPacket (Client.joinGame 0x23) (Client.JoinGame pid (defaultGamemode c) (defaultDimension c) (defaultDifficulty c) (maxPlayers c) "default" False)
           -- Also sends player abilities
-          overContext playerData $ playerGamemode .~ defaultGamemode c
+          setGamemode $ defaultGamemode c
           -- Tell them we aren't vanilla so no one gets mad at mojang for our fuck ups
           sendPacket (Client.pluginMessage 0x18) (Client.PluginMessage "MC|Brand" (runPutS $ serialize @ProtocolString "Civskell"))
           -- Difficulty to peaceful
@@ -180,8 +211,8 @@ handleTPConfirm (Server.TPConfirm tid) = clearTeleport tid >>= \case
 -- | Broadcast the chat message to everyone, or simple commands
 handleChatMessage :: Server.ChatMessage -> Civskell ()
 handleChatMessage (Server.ChatMessage (ProtocolString msg)) = case msg of
-  "/gamemode 1" -> overContext playerData $ playerGamemode .~ Creative
-  "/gamemode 0" -> overContext playerData $ playerGamemode .~ Survival
+  "/gamemode 1" -> setGamemode Creative
+  "/gamemode 0" -> setGamemode Survival
   "chunks" -> forM_ [0..48] $ \x -> sendPacket (Client.chunkData 0x20) =<< Client.colPacket ((x `mod` 7)-3,(x `div` 7)-3) (Just $ BS.replicate 256 0x00)
   --"creeper" -> summonMob (Entity.Creeper Entity.defaultInsentient 0 False False)
   --"/testchest" -> do
@@ -216,15 +247,18 @@ handleClientSettings (Server.ClientSettings _loc _viewDist _chatMode _chatColors
   sendPacket (Client.playerPositionAndLook 0x2F) (Client.PlayerPositionAndLook (1.0,130.0,1.0) (0.0,0.0) 0x00 tid)
 
 -- | Remove apologized transactions from the list
--- TODO: Transactionalize
 handleConfirmTransaction :: Server.ConfirmTransaction -> Civskell ()
-handleConfirmTransaction (Server.ConfirmTransaction wid transId _acc) = Set.member (wid,transId) . view playerFailedTransactions <$> fromContext playerData >>= \case
-  True -> do
-    -- Log when they aplogize
-    logg $ "Client apologized for bad transaction: " <> showText (wid,transId)
+handleConfirmTransaction (Server.ConfirmTransaction wid transId _acc) = do
+  plas <- asks playerData
+  isExisting <- lift . atomically $ do
+    isExisting <- Set.member (wid,transId) . view playerFailedTransactions <$> readTVar plas
     -- Remove the offending transaction
-    overContext playerData $ playerFailedTransactions %~ Set.delete (wid,transId)
-  False -> loge "Client apologized for non-existant transaction"
+    when isExisting $ modifyTVar plas $ playerFailedTransactions %~ Set.delete (wid,transId)
+    pure isExisting
+  if isExisting
+    -- Log when they aplogize
+    then logg $ "Client apologized for bad transaction: " <> showText (wid,transId)
+    else loge "Client apologized for non-existant transaction"
 
 -- | Handle the click using the window's method and send a @'Client.ConfirmTransaction'@
 handleClickWindow :: Server.ClickWindow -> Civskell ()
@@ -267,7 +301,7 @@ handleUseEntity (Server.UseEntity targetEID _action) = view (worldEntities . at 
   _ -> error "Unimplemented: handler for UseEntity. Rework entity system" --logg $ entityName @m <> " was " <> showText action <> "(ed)"
 
 -- | Log that the player ponged the keep alive
-handleKeepAlive :: Server.KeepAlive -> Civskell ()
+handleKeepAlive :: (Serial a,Show a) => Server.KeepAlive a -> Civskell ()
 handleKeepAlive (Server.KeepAlive kid) = logp $ "Player sent keep alive pong with id: " <> showText kid
 
 -- | Explicitly ignore spammy Player packets
@@ -294,13 +328,12 @@ handleSteerBoat
 handlePlayerAbilities :: Server.PlayerAbilities -> Civskell ()
 handlePlayerAbilities (Server.PlayerAbilities (AbilityFlags _i f _af _c) _flySpeed _fovMod) = overContext playerData $ playerMoveMode .~ if f then Flying else Walking
 
-
 handlePlayerDigging :: Server.PlayerDigging -> Civskell ()
 handlePlayerDigging (Server.PlayerDigging action) = case action of
   StartDig block _side -> do
     logp $ "Started digging block: " <> showText block
     -- Instant Dig
-    overContext worldData $ blockInWorld block .~ ambiguate (Block air Air)
+    setBlock block $ ambiguate (Block air Air)
   SwapHands -> do
     -- Get the current items
     heldSlot <- view playerHoldingSlot <$> fromContext playerData
@@ -315,9 +348,8 @@ handlePlayerDigging (Server.PlayerDigging action) = case action of
     -- Get the slot they are dropping from
     heldSlot <- view playerHoldingSlot <$> fromContext playerData
     -- Get the item in that slot
-    heldItem <- getInventorySlot heldSlot
-    -- Check if they are dropping literally nothing
-    case heldItem of
+    getInventorySlot heldSlot >>= \case
+      -- Check if they are dropping literally nothing
       SuchThat (Slot Nothing) -> logp $ "Tried to drop nothing"
       SuchThat (Slot (Just heldData)) -> do
         -- Drop the entire stack, or at most one item
@@ -402,8 +434,7 @@ handlePlayerBlockPlacement (Server.PlayerBlockPlacement block side hand cursorCo
       -- The actual slot is the `heldSlot`th slot in their hotbar, so
       -- add 36 to bypass the rest of the inventory
       let actualSlot = heldSlot + 36
-      theItem <- getInventorySlot actualSlot
-      case theItem of
+      getInventorySlot actualSlot >>= \case
         -- If they right click with an empty hand, this will happen
         SuchThat (Slot Nothing) -> logp "No item to use"
         -- If they right click with a real item, check if that item has a usage continuation or consumption action
@@ -413,80 +444,15 @@ handlePlayerBlockPlacement (Server.PlayerBlockPlacement block side hand cursorCo
           -- If they right click with an item that has an action
           Just (dItem,oiu)-> do
             -- Then apply that item's "consumption" action to the inventory slot
-            overContext playerData $ playerInventory . at actualSlot .~ Just (ambiguate $ dItem theSlotData)
+            overContext playerData $ playerInventory . ix (fromIntegral actualSlot) .~ (ambiguate $ dItem theSlotData)
             -- And run that item's continuation
+            -- This should inform the client of the above change
             oiu (Item idesc i) block side hand cursorCoord
 
 -- | Log that they used the item, but don't do anything about it.
 handleUseItem :: Server.UseItem -> Civskell ()
 handleUseItem (Server.UseItem hand) = do
   -- Decide which hand they are using, and find the item in that hand
-  held <- getInventorySlot =<< (case hand of {MainHand -> view playerHoldingSlot <$> fromContext playerData; OffHand -> pure 45})
-  logp $ "Used: " <> ambiguously showText held
-
--- | Civskell's recommended configuration for running as a Vanilla 1.12.1 Minecraft server.
-vanilla1_12_1 :: Configuration
-vanilla1_12_1  = defaultConfiguration
-  {packetsForState = \case
-    Handshaking -> Vector.fromList 
-      [ambiguate $ Server.handshake $ handleHandshake
-      ,ambiguate $ Server.legacyHandshake $ handleLegacyHandshake
-      ]
-    LoggingIn -> Vector.fromList 
-      [ambiguate $ Server.loginStart $ handleLoginStart
-      ,ambiguate $ Server.encryptionResponse $ handleEncryptionResponse
-      ]
-    Status -> Vector.fromList 
-      [ambiguate $ Server.statusRequest $ handleStatusRequest
-      ,ambiguate $ Server.statusPing $ handleStatusPing
-      ]
-    Playing -> Vector.fromList
-      [ambiguate $ Server.tpConfirm $ handleTPConfirm
-      ,ambiguate $ Server.tabComplete $ unhandled "Tab Complete"
-      ,ambiguate $ Server.chatMessage $ handleChatMessage
-      ,ambiguate $ Server.clientStatus $ handleClientStatus
-      ,ambiguate $ Server.clientSettings $ handleClientSettings
-      ,ambiguate $ Server.confirmTransaction $ handleConfirmTransaction
-      ,ambiguate $ Server.enchantItem $ unhandled "Enchant Item"
-      ,ambiguate $ Server.clickWindow $ handleClickWindow
-      ,ambiguate $ Server.closeWindow $ handleCloseWindow
-      ,ambiguate $ Server.pluginMessage $ handlePluginMessage
-      ,ambiguate $ Server.useEntity $ handleUseEntity
-      ,ambiguate $ Server.keepAlive $ handleKeepAlive
-      ,ambiguate $ Server.player $ handlePlayer
-      ,ambiguate $ Server.playerPosition $ handlePlayerPosition
-      ,ambiguate $ Server.playerPositionAndLook $ handlePlayerPositionAndLook
-      ,ambiguate $ Server.playerLook $ handlePlayerLook
-      ,ambiguate $ Server.vehicleMove $ unhandled "Vehicle Move"
-      ,ambiguate $ Server.steerBoat $ unhandled "Steer Boat"
-      ,ambiguate $ Server.craftRecipeRequest $ unhandled "Craft Recipe Request"
-      -- Only sent when flight is toggled
-      ,ambiguate $ Server.playerAbilities $ handlePlayerAbilities
-      ,ambiguate $ Server.playerDigging $ handlePlayerDigging
-      ,ambiguate $ Server.entityAction $ handleEntityAction
-      ,ambiguate $ Server.steerVehicle $ unhandled "Steer Vehicle"
-      ,ambiguate $ Server.craftingBookData $ unhandled "Crafting Book Data"
-      ,ambiguate $ Server.resourcePackStatus $ unhandled "Resource Pack Status"
-      ,ambiguate $ Server.advancementTab $ unhandled "Advancement Tab"
-      ,ambiguate $ Server.heldItemChange $ handleHeldItemChange
-      ,ambiguate $ Server.creativeInventoryAction $ handleCreativeInventoryAction
-      ,ambiguate $ Server.updateSign $ unhandled "Update Sign"
-      ,ambiguate $ Server.animation $ handleAnimation
-      ,ambiguate $ Server.spectate $ unhandled "Spectate"
-      ,ambiguate $ Server.playerBlockPlacement $ handlePlayerBlockPlacement
-      ,ambiguate $ Server.useItem $ handleUseItem
-      ]
-  ,serverVersion = "Vanilla 1.12.1"
-  ,protocolVersion = 338
-  }
-
-{-
-vanilla1_12_1 :: Configuration
-vanilla1_12_1 = vanilla1_12
-  {packetsForState = \case
-    Playing -> moveVec 0x01 0x12 (packetsForState vanilla1_12 Playing)
-    x -> packetsForState vanilla1_12 x
-  ,serverVersion = "Vanilla 1.12.1"
-  ,protocolVersion = 338
-  }
--}
+  usedSlot <- case hand of {MainHand -> view playerHoldingSlot <$> fromContext playerData; OffHand -> pure 45}
+  usedItem <- getInventorySlot usedSlot
+  logp $ "Used: " <> ambiguously showText usedItem

@@ -1,4 +1,5 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeInType #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE BinaryLiterals #-}
@@ -30,15 +31,17 @@ module Civskell.Data.Types
 import Civskell.Data.Common
 
 import GHC.Generics hiding (to)
-import Data.List (unfoldr)
+import Data.List
 import qualified Data.Binary.BitBuilder as BB
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Lazy as Map
 import System.IO
+import qualified Network as Net
 import Data.Maybe (fromMaybe)
 import Data.Map.Lazy (Map)
 import Data.Semigroup
 import Data.Foldable
+import Data.Void
 import Control.Lens
 import Control.Monad.Reader
 import Control.Concurrent.STM
@@ -158,10 +161,10 @@ data PlayerData = PlayerData
   }
 
 getInventorySlot :: Short -> Civskell (ForAny Slot)
-getInventorySlot i = asks playerData >>= \pla -> (\(Just x) -> x) . view (playerInventory . at i) <$> lift (readTVarIO pla)
+getInventorySlot i = (Vector.! fromIntegral i) . view playerInventory <$> fromContext playerData
 
 setInventorySlot :: Short -> Slot i -> Civskell ()
-setInventorySlot i s = asks playerData >>= \pla -> lift . atomically . modifyTVar pla $ (playerInventory . at i) .~ Just (ambiguate s)
+setInventorySlot i s = overContext playerData $ playerInventory %~ (Vector.// [(fromIntegral i,ambiguate s)])
 
 playerTPConfirmQueue :: Lens' PlayerData (Set.Set VarInt)
 playerTPConfirmQueue = lens _playerTPConfirmQueue (\p x -> p {_playerTPConfirmQueue = x})
@@ -210,7 +213,18 @@ playerPacketQueue = lens _playerPacketQueue (\p x -> p {_playerPacketQueue = x})
 
 -- TODO: replace this with a `data LogSpec = LogSpec {spec :: String -> String,level :: Int}`?
 -- Level of verbosity to log at
-data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | NYILog | VerboseLog | TaggedLog Text | NormalLog deriving Eq
+data LogLevel = HexDump | ClientboundPacket | ServerboundPacket | ErrorLog | NYILog | VerboseLog | TaggedLog Text | NormalLog deriving (Show,Eq)
+
+getLogBadge :: Configuration -> LogLevel -> Text
+getLogBadge c = \case
+  HexDump -> ""
+  ClientboundPacket -> "[\x1b[32mSent\x1b[0m] "
+  ServerboundPacket -> "[\x1b[32mRecv\x1b[0m] "
+  ErrorLog -> "[\x1b[31m\x1b[1mError\x1b[0m] "
+  NYILog -> "[\x1b[34mNYI\x1b[0m] "
+  VerboseLog -> "[\x1b[36m" <> serverName c <> "/Verbose\x1b[0m] "
+  (TaggedLog tag) -> "[\x1b[36m" <> tag <> "\x1b[0m] "
+  NormalLog -> "[\x1b[36m" <> serverName c <> "\x1b[0m] "
 
 data PacketHandler p = PacketHandler 
   {packetThreadingMode :: ThreadingMode
@@ -225,6 +239,7 @@ data Configuration = Configuration
   ,protocolVersion :: Integer
   ,serverVersion :: Text
   ,serverName :: Text
+  ,serverPort :: Net.PortID
   ,serverMotd :: Text
   ,spawnLocation :: BlockCoord
   ,defaultDifficulty :: Difficulty
@@ -235,6 +250,7 @@ data Configuration = Configuration
   ,packetsForState :: ServerState -> SupportedPackets PacketHandler
   ,supportedItems :: SupportedItems
   ,supportedBlocks :: SupportedBlocks
+  ,keepAliveThread :: Civskell Void
   }
 
 defaultConfiguration :: Configuration
@@ -243,6 +259,7 @@ defaultConfiguration = Configuration
   ,protocolVersion = 0
   ,serverVersion = "Default"
   ,serverName = "Civskell"
+  ,serverPort = Net.PortNumber 25565
   ,serverMotd = "An Experimental Minecraft server written in Haskell | github.com/Lazersmoke/civskell"
   ,spawnLocation = BlockLocation (0,64,0)
   ,defaultDifficulty = Peaceful
@@ -254,15 +271,26 @@ defaultConfiguration = Configuration
   ,packetsForState = const Vector.empty
   ,supportedItems = Map.empty
   ,supportedBlocks = Map.empty
+  ,keepAliveThread = keepAliveThread defaultConfiguration
   }
+
+displayConfig :: Configuration -> Text
+displayConfig c@Configuration{..} = T.intercalate "\n"
+  [{-Server name shown in tag-}" version " <> serverVersion <> " (Protocol " <> showText protocolVersion <> ")"
+  ,"Motd: " <> serverMotd
+  ,"Port: " <> showText serverPort
+  ,"Enabled logging badges: " <> T.intercalate ", " (filter (not . T.null) $ map (getLogBadge c) logLevels)
+  ,"Default: " <> showText spawnLocation <> " in the " <> showText defaultDimension <> " | " <> showText defaultGamemode <> " | " <> showText defaultDifficulty
+  ,"Max players: " <> showText maxPlayers
+  ]
+  where
+    logLevels = [HexDump,ClientboundPacket,ServerboundPacket,ErrorLog,NYILog,VerboseLog,TaggedLog "Tag",NormalLog]
 
 -- A thing that shuffles log messages off of running threads and logs that whenever on a dedicated one.
 newtype LogQueue = LogQueue (TQueue Text)
--- TODO: Reconsider sparsity obligations. This is pretty dumb in terms of invariants we must enforce.
--- TODO: Reconsider using Map because that is honestly a retarded data structure to use here.
--- TODO: Why isn't this a newtype. This is dumb :(
+
 -- TODO: Investigate storing just the block data (no descriptors) in the structure.
--- Maps coords to non-air blocks. BlockState 0 0 doesn't mean anything. Air just doesn't have anything in the map.
+-- Maps coords to blocks in a single chunk section.
 newtype ChunkSection b = ChunkSection {unChunkSection :: (Arr.Array (Nibble,Nibble,Nibble) b)} deriving (Generic)
 
 instance Rewrapped (ChunkSection b) t
@@ -737,11 +765,8 @@ placeBlock f = Just (\(SlotData i ic) -> Slot . Just $ SlotData i (ic - 1),setTh
       wdTvar <- worldData <$> ask
       lift $ atomically $ modifyTVar wdTvar (blockInWorld (blockOnSide bc bf) .~ ambiguate (f i))
 
--- TODO: Reconsider sparsity obligations of Map here, and decide on a better
--- internal representation. Potentially make this abstract after all. There
--- might be a really fitting purely functional data structure to show off here.
 -- | An inventory is a mapping from slot numbers to arbitrary @'Slot'@s.
-type Inventory = Map.Map Short (ForAny Slot)
+type Inventory = Vector.Vector (ForAny Slot)
 
 -- Abstraction methods for Inventory, not really needed tbh.
 --getSlot :: Short -> Inventory -> ForAny Slot
@@ -1259,5 +1284,11 @@ instance Serial (EntityMeta (Maybe BlockState)) where
 indentedHex :: BS.ByteString -> String
 indentedHex = init . unlines . map ("  "++) . lines . prettyHex
 
---comb :: Some c -> (forall a. c a => r) -> r
---comb (SuchThat (Identity (_ :: a))) f = f @a
+showText :: Show a => a -> T.Text
+showText = T.pack . show
+
+-- Simple way to inject a text message into a json chat string. No additional
+-- formatting or checking is done, just raw text.
+jsonyText :: String -> ProtocolString
+jsonyText s = ProtocolString $ "{\"text\":\"" ++ s ++ "\"}"
+

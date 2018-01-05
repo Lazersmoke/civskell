@@ -10,7 +10,7 @@
 -- To use it, create a @'Configuration'@ and pass it in to @'runServer'@ to start the server.
 module Civskell (module Civskell.Data.Types, runServer) where
 
-import Control.Concurrent (forkIO,threadDelay)
+import Control.Concurrent (forkIO)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import Data.Semigroup
@@ -22,6 +22,7 @@ import System.Exit (exitSuccess)
 import System.IO (hSetBuffering,BufferMode(NoBuffering))
 import qualified Network as Net
 import Data.SuchThat
+import qualified Data.Vector as Vector
 import qualified Data.Array.IArray as Arr
 import Control.Lens
 
@@ -31,7 +32,6 @@ import Civskell.Data.Networking
 import Civskell.Tech.Network
 import qualified Civskell.Block.Stone as Stone
 import qualified Civskell.Window as Window
-import qualified Civskell.Packet.Clientbound as Client
 
 -- | Top level entry point to the server. 
 -- Run this command from your executable to run a Civskell server.
@@ -42,14 +42,16 @@ runServer c = do
   -- This TQueue will live on its own thread and eat up all the log messages we send it from other threads.
   logger <- freshLogQueue
   _ <- forkIO (loggingThread logger)
+  -- Log our configuration on startup
+  logToQueue c logger NormalLog $ displayConfig c
   -- Make a new TVar for the World, starting with the test world
   -- TODO: Add config option for world-gen vs set world
   wor <- newTVarIO testInitWorld
   -- Note for testing: Use virtualbox port forwarding to test locally
   -- Fork a new thread to wait for incoming connections, and send the Socket from each new connection to `connLoop`.
-  _ <- forkIO . connLoop c wor logger =<< Net.listenOn (Net.PortNumber 25565)
+  _ <- forkIO . connLoop c wor logger =<< Net.listenOn (serverPort c)
   -- Fork a thread to periodically send keep alives to everyone
-  _ <- forkIO $ runReaderT (keepAliveThread 0) (fakeGlobalContext c wor logger)
+  _ <- forkIO $ runReaderT (keepAliveThread c) (fakeGlobalContext c wor logger) *> pure ()
   -- Listen for the console to say to quit. The main thread is retired to terminal duty
   terminal
 
@@ -69,7 +71,7 @@ defaultPlayerData pq = PlayerData
   ,_playerNextKid = 0
   ,_playerNextWid = 1
   ,_playerWindows = Map.fromList [(0,ambiguate $ Window Window.player Window.Player)]
-  ,_playerInventory = Map.empty
+  ,_playerInventory = Vector.replicate 46 (ambiguate $ Slot Nothing)
   ,_playerFailedTransactions = Set.empty
   ,_playerHoldingSlot = 0
   ,_playerPosition = (0,0,0)
@@ -92,17 +94,6 @@ modifyPlayerInWorld pq pId = runNat $ \case
   Get -> fromMaybe playerData . view (worldPlayers . at pId) <$> get
   Put p' -> modify $ worldPlayers . at pId .~ Just p'
 -}
--- Send a keep alive packet to every player every 2 seconds
-keepAliveThread :: KeepAliveId -> Civskell ()
-keepAliveThread !i = do
-  -- Wait 20 seconds
-  lift (threadDelay 20000000)
-  -- Send everyone a keep alive packet
-  broadcastPacket $ DescribedPacket (Client.keepAlive 0x1F) (Client.KeepAlive i)
-  logLevel VerboseLog "Broadcasting Keepalives"
-  -- Do it again with the next keep alive id
-  keepAliveThread (succ i)
-
 -- Send every log message in the TQueue to putStrLn until the thread is killed
 loggingThread :: LogQueue -> IO ()
 loggingThread (LogQueue l) = atomically (readTQueue l) >>= T.putStrLn >> loggingThread (LogQueue l)
@@ -134,9 +125,6 @@ connLoop c wor lq sock = do
     pq <- newTQueue
     -- Player Data TVar
     pTvar <- newTVar $ defaultPlayerData pq
-    -- Add this player to the world with a fresh Player Id
-    pid <- view worldNextEID <$> readTVar wor
-    modifyTVar wor $ (worldPlayers . at pid) .~ Just pTvar
     pure CivskellContext
       {configuration = c
       ,worldData = wor
@@ -171,8 +159,10 @@ packetLoop = do
       -- forked thread, and we get a packet from the new ServerState before the
       -- original packet finishes processing and updating the ServerState.
       SerialThreading -> (onPacket . packetHandler $ pktDesc) q
-      _ -> error "Unimplemented: ParThreading"
-      --ParThreading -> send . (>> pure ()) . forkIO =<< (runM <$>) . forkConfig =<< forkLogger =<< forkNetwork =<< forkWorld =<< (runPacketing <$> forkPlayer ((onPacket . packetHandler $ pktDesc) q))
+      ParThreading -> do
+        ctx <- ask 
+        _ <- lift . forkIO . flip runReaderT ctx $ (onPacket . packetHandler $ pktDesc) q
+        pure ()
   packetLoop
   where
     -- This is an *action* to decide what parser to use. It needs to be like this because
