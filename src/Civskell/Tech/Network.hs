@@ -55,10 +55,8 @@ getPacket
 getPacket ep = getRawPacket >>= \rawPkt -> decompressPacket rawPkt >>= \case
     Left e -> do
       compd <- fmap isJust . lift . readTVarIO =<< asks networkCompressionThreshold
-      loge $ "Failed to decode incoming " <> (if compd then "compressed" else "uncompressed") <> " packet"
-      loge . T.pack $ show e
-      loge . T.pack . indentedHex $ rawPkt
-      return Nothing
+      loge $ "Failed to decode incoming " <> (if compd then "compressed" else "uncompressed") <> " packet\n" <> T.pack e <> "\n" <> T.pack (indentedHex rawPkt)
+      pure Nothing
     -- The raw data (sans length)
     Right pkt -> do
       -- TODO: Take advantage of incremental parsing maybe
@@ -71,13 +69,11 @@ getPacket ep = getRawPacket >>= \rawPkt -> decompressPacket rawPkt >>= \case
           logLevel VerboseLog "Parsed serverbound packet"
           logLevel ServerboundPacket $ showPacket desc thePkt
           logLevel HexDump . T.pack . indentedHex $ pkt
-          return $ Just serverPkt
+          pure $ Just serverPkt
         -- If it didn't parse correctly, print the error and return Nothing
         Left e -> do
-          loge "Failed to parse incoming packet"
-          loge . T.pack $ show e
-          loge . T.pack . indentedHex $ pkt
-          return Nothing
+          loge $ "Failed to parse incoming packet\n" <> T.pack e <> "\nRaw:\n" <> T.pack (indentedHex rawPkt) <> "\nData:\n" <> T.pack (indentedHex pkt)
+          pure Nothing
 
 -- | Get an unparsed packet from the network.
 -- Returns the full, length annotated packet.

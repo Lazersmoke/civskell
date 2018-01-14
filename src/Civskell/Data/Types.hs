@@ -286,12 +286,16 @@ defaultConfiguration = Configuration
 
 displayConfig :: Configuration -> Text
 displayConfig c@Configuration{..} = T.intercalate "\n"
-  [{-Server name shown in tag-}" version " <> serverVersion <> " (Protocol " <> showText protocolVersion <> ")"
+  [{-Server name shown in tag-}"version " <> serverVersion <> " (Protocol " <> showText protocolVersion <> ")"
   ,"Motd: " <> serverMotd
   ,"Port: " <> showText serverPort
   ,"Enabled logging badges: " <> T.intercalate ", " (filter (not . T.null) $ map (getLogBadge c) logLevels)
   ,"Default: " <> showText spawnLocation <> " in the " <> showText defaultDimension <> " | " <> showText defaultGamemode <> " | " <> showText defaultDifficulty
   ,"Max players: " <> showText maxPlayers
+  ,"Handshake packets:\n" <> T.intercalate ", " (map (ambiguously packetName) . Vector.toList $ packetsForState Handshaking)
+  ,"LoggingIn packets:\n" <> T.intercalate ", " (map (ambiguously packetName) . Vector.toList $ packetsForState LoggingIn)
+  ,"Play packets:\n" <> T.intercalate ", " (map (ambiguously packetName) . Vector.toList $ packetsForState Playing)
+  ,"Status packets:\n" <> T.intercalate ", " (map (ambiguously packetName) . Vector.toList $ packetsForState Status)
   ]
   where
     logLevels = [HexDump,ClientboundPacket,ServerboundPacket,ErrorLog,NYILog,VerboseLog,TaggedLog "Tag",NormalLog]

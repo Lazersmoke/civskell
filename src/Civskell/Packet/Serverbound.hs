@@ -25,6 +25,10 @@ module Civskell.Packet.Serverbound
   -- ** Playing
   -- *** Teleport Confirm
   ,TPConfirm(..),tpConfirm
+  -- *** Prepare Crafting Grid
+  ,PrepareCraftingGrid(..),prepareCraftingGrid
+  -- *** Original Prepare Crafting Grid
+  ,OriginalPrepareCraftingGrid(..),originalPrepareCraftingGrid
   -- *** Tab-Complete
   ,TabComplete(..),tabComplete
   -- *** Chat Message
@@ -195,12 +199,22 @@ instance Serial LegacyHandshake where
 data TPConfirm = TPConfirm VarInt deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'TPConfirm'@ packets.
 tpConfirm :: ServerboundPacketDescriptor TPConfirm
-tpConfirm = defaultDescriptor Playing "T P Confirm" $ \(TPConfirm i) -> [("Teleport Id",showText i)]
+tpConfirm = defaultDescriptor Playing "TP Confirm" $ \(TPConfirm i) -> [("Teleport Id",showText i)]
 
---Legacy buggy type
---data PrepareCraftingGrid = WindowId Short TransactionId (ProtocolList Short (Slot,Word8,Word8)) (ProtocolList Short (Slot,Word8,Word8)) deriving (Generic,Serial)
+-- | The original version of @'PrepareCraftingGrid'@ as introduced in 17w13a
+data OriginalPrepareCraftingGrid = OriginalPrepareCraftingGrid WindowId TransactionId Bool (ProtocolList Word8 (ProtocolString,Short,Word8,Word8)) deriving (Generic,Serial)
+-- | A reasonable @'ServerboundPacketDescriptor'@ for @'OriginalPrepareCraftingGrid'@ packets.
+originalPrepareCraftingGrid :: ServerboundPacketDescriptor OriginalPrepareCraftingGrid
+originalPrepareCraftingGrid = defaultDescriptor Playing "Original Prepare Crafting Grid" $ const []
+
+-- | Legacy buggy type, but not the original
+data PrepareCraftingGrid arraySize = PrepareCraftingGrid WindowId TransactionId Short (ProtocolList arraySize (WireSlot,Word8,Word8)) (ProtocolList arraySize (WireSlot,Word8,Word8)) deriving (Generic,Serial)
+-- | A reasonable @'ServerboundPacketDescriptor'@ for @'PrepareCraftingGrid'@ packets.
+prepareCraftingGrid :: (Integral a,Serial a) => ServerboundPacketDescriptor (PrepareCraftingGrid a)
+prepareCraftingGrid = defaultDescriptor Playing "Prepare Crafting Grid" $ const []
+
 -- | The vanilla Minecraft serverbound [Craft Recipe Request](http://wiki.vg/Protocol#Craft_Recipe_Request) packet.
-data CraftRecipeRequest = WindowId VarInt Bool deriving (Generic,Serial)
+data CraftRecipeRequest = CraftRecipeRequest WindowId VarInt Bool deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'CraftRecipeRequest'@ packets.
 craftRecipeRequest :: ServerboundPacketDescriptor CraftRecipeRequest
 craftRecipeRequest = defaultDescriptor Playing "Craft Recipe Request" $ const []
@@ -328,7 +342,7 @@ playerPosition = defaultDescriptor Playing "Player Position" $ \(PlayerPosition 
 data PlayerPositionAndLook = PlayerPositionAndLook (Double,Double,Double) (Float,Float) Bool deriving (Generic,Serial)
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'PlayerPositionAndLook'@ packets.
 playerPositionAndLook :: ServerboundPacketDescriptor PlayerPositionAndLook
-playerPositionAndLook = defaultDescriptor Playing "Player PositionAnd Look" $ \(PlayerPositionAndLook (x,y,z) (yaw,pitch) grounded) -> [("Positon",showText (x,y,z)),("Looking",showText (yaw,pitch)),("On Ground",showText grounded)]
+playerPositionAndLook = defaultDescriptor Playing "Player Position And Look" $ \(PlayerPositionAndLook (x,y,z) (yaw,pitch) grounded) -> [("Positon",showText (x,y,z)),("Looking",showText (yaw,pitch)),("On Ground",showText grounded)]
 
 -- | The vanilla Minecraft serverbound [Player Look](http://wiki.vg/Protocol#Player_Look) packet.
 data PlayerLook = PlayerLook (Float,Float) Bool deriving (Generic,Serial)
@@ -388,17 +402,19 @@ steerVehicle :: ServerboundPacketDescriptor SteerVehicle
 steerVehicle = defaultDescriptor Playing "Steer Vehicle" $ \(SteerVehicle _ _ _) -> []
 
 -- | The vanilla Minecraft serverbound [Crafting Book Data](http://wiki.vg/Protocol#Crafting_Book_Data) packet.
-data CraftingBookData = CraftingBookDisplayedRecipe Int32 | CraftingBookStatus Bool Bool
-instance Serial CraftingBookData where
-  serialize (CraftingBookDisplayedRecipe rId) = serialize @VarInt 0 *> serialize rId
-  serialize (CraftingBookStatus isOpen hasFilter) = serialize @VarInt 1 *> serialize isOpen *> serialize hasFilter
-  deserialize = deserialize @VarInt >>= \case
+data CraftingBookData a = CraftingBookDisplayedRecipe Int32 | CraftingBookStatus Bool Bool
+instance (Num a,Serial a,Show a,Eq a) => Serial (CraftingBookData a) where
+  serialize (CraftingBookDisplayedRecipe rId) = serialize @a 0 *> serialize rId
+  serialize (CraftingBookStatus isOpen hasFilter) = serialize @a 1 *> serialize isOpen *> serialize hasFilter
+  deserialize = deserialize @a >>= \case
     0 -> CraftingBookDisplayedRecipe <$> deserialize @Int32
     1 -> CraftingBookStatus <$> deserialize @Bool <*> deserialize @Bool
     x -> error $ "deserialize @CraftingBookData: Bad 'Type' indicator " <> show x
 -- | A reasonable @'ServerboundPacketDescriptor'@ for @'CraftingBookData'@ packets.
-craftingBookData :: ServerboundPacketDescriptor CraftingBookData
-craftingBookData = defaultDescriptor Playing "Crafting Book Data" $ const []
+craftingBookData :: (Num a,Serial a,Show a,Eq a) => ServerboundPacketDescriptor (CraftingBookData a)
+craftingBookData = defaultDescriptor Playing "Crafting Book Data" $ \case 
+  (CraftingBookDisplayedRecipe i) -> [("Recipe ID",showText i)]
+  (CraftingBookStatus bookOn filterOn) -> [("Book",if bookOn then "Active" else "Inactive"),("Filter",if filterOn then "Active" else "Inactive")]
 
 -- | The vanilla Minecraft serverbound [Resource Pack Status](http://wiki.vg/Protocol#Resource_Pack_Status) packet.
 data ResourcePackStatus = ResourcePackStatus VarInt deriving (Generic,Serial)

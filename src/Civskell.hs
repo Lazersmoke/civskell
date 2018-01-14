@@ -107,6 +107,7 @@ terminal = do
 -- Spawns a new thread to deal with each new client
 connLoop :: Configuration -> TVar WorldData -> LogQueue -> Net.Socket -> IO ()
 connLoop c wor lq sock = do
+  logToQueue c lq NormalLog $ "Waiting for client to connect"
   -- Accept every connection
   -- TODO: Timeout handlers or something here
   (handle, cliHost, cliPort) <- Net.accept sock
