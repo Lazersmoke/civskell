@@ -61,7 +61,12 @@ testInitWorld :: WorldData
 testInitWorld = worldChunks .~ Map.fromList [(ChunkCoord (cx,cy,cz),exampleChunk) | cx <- [-3..3], cz <- [-3..3], cy <- [0..7]] $ initWorld
   where
     -- A chunk section full of stone
-    exampleChunk = ChunkSection $ Arr.array ((0,0,0),(15,15,15)) [((x,y,z),ambiguate $ Block Stone.stone (Stone.Stone :: Stone.Stone 'AsBlock)) | x <- [0..15], y <- [0..15], z <- [0..15]]
+    exampleChunk = ChunkSection $ Arr.array ((0,0,0),(15,15,15)) [((x,y,z),ambiguate $ Block Stone.stone Stone.Stone) | x <- [0..15], y <- [0..15], z <- [0..15]]
+
+stoneWorldGenerator :: WorldGenerator ()
+stoneWorldGenerator = WorldGenerator $ \() _ -> exampleChunk 
+  where
+    exampleChunk = ChunkSection $ Arr.array ((0,0,0),(15,15,15)) [((x,y,z),ambiguate $ Block Stone.stone Stone.Stone) | x <- [0..15], y <- [0..15], z <- [0..15]]
 
 defaultPlayerData :: TQueue (ForAny (DescribedPacket PacketSerializer)) -> PlayerData
 defaultPlayerData pq = PlayerData
@@ -150,7 +155,6 @@ flushPackets q = lift (atomically $ readTQueue q) >>= (\(SuchThat (DescribedPack
 -- Get packet -> Spawn thread -> Repeat loop for players
 packetLoop :: Civskell ()
 packetLoop = do
-  -- TODO: Fork new thread on every packet
   -- Block until a packet arrives, then deal with it
   getPacket getPacketParsers >>= \case
     Nothing -> loge "Failed to parse incoming packet"

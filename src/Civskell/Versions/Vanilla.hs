@@ -168,7 +168,7 @@ handleEncryptionResponse (Server.EncryptionResponse ssFromClient vtFromClient) =
           -- Send an initial blank inventory
           sendPacket (Client.windowItems 0x14) (Client.WindowItems 0 (ProtocolList []))
           -- Give them some stone (for testing)
-          setInventorySlot 4 (Slot . Just $ SlotData (Item Stone.itemStone (Stone.Stone :: Stone.Stone 'AsItem)) 32)
+          setInventorySlot 4 (Slot . Just $ SlotData (Item Stone.itemStone (Stone.Stone :: Stone.Stone)) 32)
           ps <- mapM (lift . readTVarIO) =<< Map.elems . view worldPlayers <$> fromContext worldData
           sendPacket (Client.playerListItem 0x2E) (Client.PlayerListItem . ProtocolList $ (map (\p -> (p ^. playerClientUUID,Client.PlayerListAdd (ProtocolString $ p ^. playerUsername) (ProtocolList authProps) Survival 0 (ProtocolOptional Nothing))) ps))
 

@@ -584,7 +584,7 @@ chunkData = defaultDescriptor Playing "Chunk Data" $ \(ChunkData (cx,cz) guCont 
 -- | This instance is special because the ground-up continuous flag and the biome information are related,
 -- and the chunk serialization uses the total serialized length in bytes rather than the number of chunk sections sent.
 instance Serial ChunkData where
-  serialize (ChunkData (cx,cz) guCont bitMask chunkSecs mBiomes blockEnts) = serialize cx *> serialize cz *> serialize guCont *> serialize bitMask *> withLength (runPutS $ (traverse serialize chunkSecs) *> maybe (pure ()) putByteString mBiomes) *> serialize @(ProtocolList VarInt ProtocolNBT) blockEnts
+  serialize (ChunkData (cx,cz) guCont bitMask chunkSecs mBiomes blockEnts) = serialize cx *> serialize cz *> serialize guCont *> serialize bitMask *> serialize (LengthAnnotatedByteString . runPutS $ (traverse serialize chunkSecs) *> maybe (pure ()) putByteString mBiomes) *> serialize @(ProtocolList VarInt ProtocolNBT) blockEnts
   deserialize = error "Undefined: deserialize @ChunkData"
 
 -- Effect Id (Enum), block coord, extra data (from Enum), disable relative?

@@ -15,7 +15,7 @@ cabal-version:       >=1.10
 
 library
   hs-source-dirs:      src
-  exposed-modules:     Civskell, Civskell.Data.Types, Civskell.Tech.Network, Civskell.Tech.Encrypt, Civskell.Packet.Serverbound, Civskell.Packet.Clientbound, Civskell.Data.Logging, Civskell.Data.Networking, Civskell.Entity, Civskell.Entity.Object, Civskell.Tile, Civskell.Item, Civskell.Entity.Base, Civskell.Window, Civskell.Versions.Vanilla, Civskell.Versions.Protocol, Civskell.Data.Protocol, Civskell.Data.Configuration, Civskell.Data.Common
+  exposed-modules:     Civskell, Civskell.Data.Types, Civskell.Tech.Network, Civskell.Tech.Encrypt, Civskell.Packet.Serverbound, Civskell.Packet.Clientbound, Civskell.Data.Logging, Civskell.Data.Networking, Civskell.Entity, Civskell.Entity.Object, Civskell.Entity.Base, Civskell.Window, Civskell.Versions.Vanilla, Civskell.Versions.Protocol, Civskell.Data.Protocol, Civskell.Data.Configuration, Civskell.Data.Common, Civskell.Data.Entity, Civskell.Data.Block, Civskell.Data.World, Civskell.Data.Chunk, Civskell.Data.Player, Civskell.Data.Item
   other-modules:       Civskell.Entity.Item, Civskell.Entity.Creeper, Civskell.Block.Stone
   build-depends:       base >= 4.7 && < 5, hashable, network, bytestring, utf8-string, random, cryptonite, pretty-hex, time, http-client, http-client-tls, AES, zlib, bytes, cereal, nbt, containers, binary-strict, attoparsec, ghost-buster, aeson, unordered-containers, text, stm, vector, lens, array, mtl
   default-language:    Haskell2010

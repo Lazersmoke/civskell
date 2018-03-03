@@ -11,10 +11,10 @@
 module Civskell.Data.Common where
 
 import Data.Semigroup
-import Numeric (readHex,showHex)
 import Data.Bytes.Serial
 import Data.Bytes.Put
 import Data.Bytes.Get
+import qualified Data.ByteString as BS
 import Data.Int (Int32,Int64)
 import Data.Bits
 import Data.Word
@@ -24,8 +24,7 @@ import Data.Text (Text)
 import Data.SuchThat
 import qualified Data.Text as T
 import Unsafe.Coerce (unsafeCoerce)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Types
+import Hexdump (prettyHex)
 
 import Civskell.Data.Protocol
 
@@ -58,7 +57,7 @@ data PacketSerializer p = PacketSerializer
   }
 
 -- | The set of packets supported by this particular configuration.
--- The order determines the packet ids, and is there for significant.
+-- The order determines the packet ids, and is therefore significant.
 type SupportedPackets h = Vector.Vector (SuchThat '[Serial] (PacketDescriptor h))
 
 -- | Move a single element in a vector from one place to another, reshuffling as needed.
@@ -138,6 +137,9 @@ instance Serial BlockCoord where
     where
       u = unsafeCoerce :: Int64 -> Int
 
+-- The state of a block in the world (Block id, damage)
+data BlockState = BlockState Short Word8 deriving Eq
+
 -- * Chunk Coordinates
 
 -- A Chunk Coord is a coordinate *of* a chunk slice, not *in* a chunk slice.
@@ -149,46 +151,6 @@ newtype ChunkCoord = ChunkCoord (Int,Int,Int) deriving (Eq,Ord)
 -- This mirrors the format of `Show BlockLocation`
 instance Show ChunkCoord where
   show (ChunkCoord (x,y,z)) = "(Chunk)<" ++ show x ++ "," ++ show y ++ "," ++ show z ++ ">"
-
--- * UUID
-
--- TODO: Investigate using a library to provide this type for seperation of concerns
--- There is no native Word128 type, so we role our own here.
-newtype UUID = UUID (Word64,Word64)
-
-instance Enum UUID where
-  succ (UUID (a,b)) 
-    | b /= maxBound = UUID (a, succ b)
-    | otherwise = if a == maxBound 
-      then error "Enum.succ{UUID}: tried to take `succ' of maxBound" 
-      else UUID (succ a, minBound)
-  pred (UUID (a,b)) 
-    | b /= minBound = UUID (a, pred b)
-    | otherwise = if a == minBound 
-      then error "Enum.pred{UUID}: tried to take `pred' of minBound" 
-      else UUID (pred a, maxBound) 
-  toEnum n = UUID (0,fromIntegral n)
-  fromEnum (UUID (_,n)) = fromIntegral n
-
--- This show instance should match the standard Minecraft display format.
-instance Show UUID where
-  show (UUID (ua,ub)) = reformat $ showHex ua (showHex ub "")
-    where
-      -- Add a hyphen at an index
-      ins i s = let (a,b) = splitAt i s in a ++ "-" ++ b
-      -- Reformat the uuid to what the client expects
-      reformat = ins 8 . ins 12 . ins 16 . ins 20
-
--- A UUID is pretending to be a Word128, so just smoosh all the bits together
-instance Serial UUID where
-  serialize (UUID (a,b)) = putWord64be a >> putWord64be b
-  deserialize = (UUID .) . (,) <$> getWord64be <*> getWord64be
-
-instance Data.Aeson.Types.FromJSON UUID where
-  parseJSON (Aeson.String s) = pure $ (\i -> UUID (fromInteger $ i .&. 0xFFFFFFFFFFFFFFFF,fromInteger $ shiftR i 8)) . fst . head . readHex . T.unpack $ s
-  parseJSON x = Data.Aeson.Types.typeMismatch "UUID" x
-
-
 
 -- * Notchian Enums
 
@@ -280,3 +242,11 @@ instance Enum CardinalDirection where
 
 -- | The movement mode of a player.
 data MoveMode = Sprinting | Sneaking | Walking | Gliding | Flying
+
+-- | Literally @'T.pack' . 'show'@.
+showText :: Show a => a -> T.Text
+showText = T.pack . show
+
+-- Indent the hexdump; helper function
+indentedHex :: BS.ByteString -> String
+indentedHex = init . unlines . map ("  "++) . lines . prettyHex

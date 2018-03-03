@@ -84,7 +84,7 @@ setCompression thresh = asks networkCompressionThreshold >>= \net -> lift . atom
 compressPacket :: BS.ByteString -> Civskell BS.ByteString
 compressPacket bs = asks networkCompressionThreshold >>= lift . readTVarIO >>= \case
   -- Do not compress; annotate with length only
-  Nothing -> pure (runPutS . withLength $ bs)
+  Nothing -> pure (runPutS . serialize . LengthAnnotatedByteString $ bs)
   -- Compress with the threshold `t`
   Just t -> if BS.length bs >= fromIntegral t
     -- Compress data and annotate to match
@@ -93,10 +93,10 @@ compressPacket bs = asks networkCompressionThreshold >>= lift . readTVarIO >>= \
       compIdAndData = putByteString . LBS.toStrict . Z.compress . LBS.fromStrict $ bs
       -- Add the original size annotation
       origSize = serialize @VarInt . fromIntegral . BS.length $ bs
-      in pure . runPutS $ withLength (runPutS $ origSize *> compIdAndData)
+      in pure . runPutS . serialize $ LengthAnnotatedByteString (runPutS $ origSize *> compIdAndData)
     -- Do not compress; annotate with length only
     -- 0x00 indicates it is not compressed
-    else pure . runPutS . withLength . runPutS $ putWord8 0x00 *> putByteString bs
+    else pure . runPutS . serialize . LengthAnnotatedByteString . runPutS $ putWord8 0x00 *> putByteString bs
   
 -- | Remove compression (if enabled) and strip packet metadata. Packets are left with packetId intact
 {-# INLINE decompressPacket #-}
